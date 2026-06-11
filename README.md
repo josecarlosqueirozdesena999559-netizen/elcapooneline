@@ -223,11 +223,22 @@ else:
 
 ## Manual test market flow
 ```bash
+curl http://localhost:8080/health
+
 curl -H "x-api-key: CHAVE" -H "x-user-id: USER_ID" http://localhost:8080/bullex/assets
 
 curl -H "x-api-key: CHAVE" -H "x-user-id: USER_ID" "http://localhost:8080/bullex/candles?active=EURUSD-OTC&interval=60&count=10"
 
 curl -H "x-api-key: CHAVE" -H "x-user-id: USER_ID" "http://localhost:8080/bullex/payouts?active=EURUSD-OTC"
+```
+
+## Manual test market websocket
+```bash
+curl http://localhost:8080/health
+
+curl -H "x-api-key: 40402400kkj" -H "x-user-id: teste1" "http://localhost:8080/bullex/candles?active=EURUSD-OTC&interval=60&count=2"
+
+npx wscat -c "ws://2.25.187.128:8080/ws/market?user_id=teste1&active=EURUSD-OTC&api_key=40402400kkj"
 ```
 
 ## Supabase integration

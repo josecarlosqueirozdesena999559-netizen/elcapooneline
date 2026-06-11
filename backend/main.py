@@ -1,9 +1,10 @@
 import logging
 import os
+import asyncio
 from typing import Any
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -20,6 +21,42 @@ def build_success(data: Any) -> dict[str, Any]:
 
 def build_error(message: str) -> dict[str, Any]:
     return {"ok": False, "data": None, "error": message}
+
+
+class ConnectionManager:
+    def __init__(self) -> None:
+        self._connections: dict[tuple[str, str], set[WebSocket]] = {}
+        self._lock = asyncio.Lock()
+
+    async def connect(self, user_id: str, active: str, websocket: WebSocket) -> None:
+        await websocket.accept()
+        async with self._lock:
+            key = (user_id, active)
+            websockets = self._connections.setdefault(key, set())
+            websockets.add(websocket)
+
+    async def disconnect(self, user_id: str, active: str, websocket: WebSocket) -> None:
+        async with self._lock:
+            key = (user_id, active)
+            websockets = self._connections.get(key)
+            if not websockets:
+                return
+            websockets.discard(websocket)
+            if not websockets:
+                self._connections.pop(key, None)
+
+    async def broadcast_to_user_active(self, user_id: str, active: str, payload: dict[str, Any]) -> None:
+        async with self._lock:
+            targets = list(self._connections.get((user_id, active), set()))
+        for websocket in targets:
+            try:
+                await websocket.send_json(payload)
+            except Exception:
+                logger.exception("falha ao enviar payload WS para %s %s", user_id, active)
+                await self.disconnect(user_id, active, websocket)
+
+
+manager = ConnectionManager()
 
 
 class GatewayConfig:
@@ -48,6 +85,105 @@ app.add_middleware(
     allow_headers=["*"],
 )
 user_store: UserStore = create_user_store()
+
+
+def normalize_ws_value(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def build_market_ws_payload(user_id: str, active: str, candle: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "candle",
+        "user_id": user_id,
+        "active": active,
+        "time": candle.get("from") or candle.get("time"),
+        "open": candle.get("open"),
+        "high": candle.get("max") if "max" in candle else candle.get("high"),
+        "low": candle.get("min") if "min" in candle else candle.get("low"),
+        "close": candle.get("close"),
+        "volume": candle.get("volume", 0),
+    }
+
+
+def extract_latest_candle(payload: dict[str, Any]) -> dict[str, Any] | None:
+    data = payload.get("data")
+    candles: list[dict[str, Any]] = []
+    if isinstance(data, list):
+        candles = [item for item in data if isinstance(item, dict)]
+    elif isinstance(data, dict) and isinstance(data.get("candles"), list):
+        candles = [item for item in data["candles"] if isinstance(item, dict)]
+
+    if not candles:
+        return None
+    return candles[-1]
+
+
+def is_session_disconnected(payload: dict[str, Any]) -> bool:
+    error = str(payload.get("error") or "").strip().upper()
+    return error in {"SESSION_NOT_FOUND", "SESSION_DISCONNECTED"}
+
+
+async def close_market_websocket(websocket: WebSocket, payload: dict[str, Any]) -> None:
+    try:
+        await websocket.send_json(payload)
+    except Exception:
+        logger.exception("falha ao enviar mensagem final do websocket de mercado")
+    try:
+        await websocket.close(code=1008)
+    except Exception:
+        logger.exception("falha ao fechar websocket de mercado")
+
+
+async def stream_market_updates(websocket: WebSocket, user_id: str, active: str) -> None:
+    previous_signature: tuple[Any, Any] | None = None
+    while True:
+        try:
+            status_code, payload = await call_bullex_service(
+                "GET",
+                "/candles",
+                user_id,
+                params={"active": active, "interval": 60, "count": 2},
+            )
+            if not payload.get("ok"):
+                if is_session_disconnected(payload):
+                    await close_market_websocket(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "SESSION_DISCONNECTED",
+                        },
+                    )
+                    return
+                logger.warning("[MARKET WS ERROR] user_id=%s active=%s status=%s error=%s", user_id, active, status_code, payload.get("error"))
+                await websocket.send_json({"type": "warning", "error": "MARKET_STREAM_TEMPORARY_ERROR"})
+                await asyncio.sleep(1)
+                continue
+
+            latest_candle = extract_latest_candle(payload)
+            if latest_candle is None:
+                logger.warning("[MARKET WS ERROR] user_id=%s active=%s error=UNEXPECTED_CANDLES_PAYLOAD", user_id, active)
+                await websocket.send_json({"type": "warning", "error": "MARKET_STREAM_TEMPORARY_ERROR"})
+                await asyncio.sleep(1)
+                continue
+
+            current_signature = (
+                latest_candle.get("from") or latest_candle.get("time"),
+                latest_candle.get("close"),
+            )
+            if current_signature != previous_signature:
+                message = build_market_ws_payload(user_id, active, latest_candle)
+                logger.info("[MARKET WS MESSAGE] user_id=%s active=%s payload=%s", user_id, active, message)
+                await manager.broadcast_to_user_active(user_id, active, message)
+                previous_signature = current_signature
+        except WebSocketDisconnect:
+            raise
+        except Exception:
+            logger.exception("[MARKET WS ERROR] user_id=%s active=%s error=UNHANDLED_STREAM_EXCEPTION", user_id, active)
+            try:
+                await websocket.send_json({"type": "warning", "error": "MARKET_STREAM_TEMPORARY_ERROR"})
+            except Exception:
+                raise
+        await asyncio.sleep(1)
 
 
 async def require_headers(
@@ -164,6 +300,49 @@ def sync_user_store_from_payload(
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return build_success({"status": "healthy", "service": "backend-gateway"})
+
+
+@app.websocket("/ws/market")
+async def ws_market(websocket: WebSocket) -> None:
+    api_key = normalize_ws_value(websocket.query_params.get("api_key"))
+    user_id = normalize_ws_value(websocket.query_params.get("user_id"))
+    active = normalize_ws_value(websocket.query_params.get("active"))
+
+    logger.info("[MARKET WS CONNECTING] user_id=%s active=%s", user_id or "<missing>", active or "<missing>")
+
+    if not config.panel_api_key:
+        await websocket.accept()
+        await close_market_websocket(websocket, {"type": "error", "error": "PANEL_API_KEY_NOT_CONFIGURED"})
+        return
+    if api_key != config.panel_api_key:
+        await websocket.accept()
+        await close_market_websocket(websocket, {"type": "error", "error": "INVALID_API_KEY"})
+        return
+    if not user_id:
+        await websocket.accept()
+        await close_market_websocket(websocket, {"type": "error", "error": "MISSING_USER_ID"})
+        return
+    if not active:
+        await websocket.accept()
+        await close_market_websocket(websocket, {"type": "error", "error": "MISSING_ACTIVE"})
+        return
+
+    await manager.connect(user_id, active, websocket)
+    logger.info("[MARKET WS CONNECTED] user_id=%s active=%s", user_id, active)
+
+    try:
+        await stream_market_updates(websocket, user_id, active)
+    except WebSocketDisconnect:
+        logger.info("[MARKET WS DISCONNECTED] user_id=%s active=%s", user_id, active)
+    except Exception:
+        logger.exception("[MARKET WS ERROR] user_id=%s active=%s error=UNHANDLED_WEBSOCKET_EXCEPTION", user_id, active)
+        try:
+            await websocket.send_json({"type": "warning", "error": "MARKET_STREAM_TEMPORARY_ERROR"})
+        except Exception:
+            logger.exception("falha ao enviar warning final do websocket de mercado")
+    finally:
+        await manager.disconnect(user_id, active, websocket)
+        logger.info("[MARKET WS DISCONNECTED] user_id=%s active=%s", user_id, active)
 
 
 @app.post("/bullex/connect")
