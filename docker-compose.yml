@@ -6,6 +6,7 @@ services:
     container_name: backend-gateway
     environment:
       BULLEX_SERVICE_URL: "http://bullex-service:8000"
+      CORS_ORIGINS: "http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174"
       PANEL_API_KEY: "chave_do_painel"
       SUPABASE_URL: ""
       SUPABASE_SERVICE_ROLE_KEY: ""
