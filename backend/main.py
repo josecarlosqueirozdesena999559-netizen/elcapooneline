@@ -6,6 +6,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from backend.user_store import InMemoryUserStore, UserStore
+
 
 def build_success(data: Any) -> dict[str, Any]:
     return {"ok": True, "data": data, "error": None}
@@ -23,6 +25,7 @@ class GatewayConfig:
 
 config = GatewayConfig()
 app = FastAPI(title="backend-gateway", version="0.1.0")
+user_store: UserStore = InMemoryUserStore()
 
 
 async def require_headers(
@@ -63,7 +66,7 @@ async def call_bullex_service(
     user_id: str,
     json_body: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
-) -> JSONResponse:
+) -> tuple[int, dict[str, Any]]:
     headers = {"x-user-id": user_id}
     url = f"{config.bullex_service_url}{path}"
 
@@ -77,7 +80,7 @@ async def call_bullex_service(
                 params=params,
             )
     except httpx.HTTPError:
-        return JSONResponse(status_code=502, content=build_error("BULLEX_SERVICE_UNAVAILABLE"))
+        return 502, build_error("BULLEX_SERVICE_UNAVAILABLE")
 
     try:
         payload = response.json()
@@ -87,7 +90,31 @@ async def call_bullex_service(
     if not isinstance(payload, dict) or "ok" not in payload or "data" not in payload or "error" not in payload:
         payload = build_success(payload) if response.is_success else build_error("INVALID_BULLEX_RESPONSE")
 
-    return JSONResponse(status_code=response.status_code, content=payload)
+    return response.status_code, payload
+
+
+def json_response(status_code: int, payload: dict[str, Any]) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+def sync_user_store_from_payload(user_id: str, payload: dict[str, Any], fallback_email: str | None = None) -> None:
+    if not payload.get("ok"):
+        return
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return
+
+    updates: dict[str, Any] = {}
+    if fallback_email is not None:
+        updates["email"] = fallback_email
+
+    for field in ("email", "connected", "balance", "currency", "mode", "requires_2fa"):
+        if field in data:
+            updates[field] = data[field]
+
+    if updates:
+        user_store.upsert(user_id, **updates)
 
 
 @app.get("/health")
@@ -100,17 +127,28 @@ async def bullex_connect(
     body: dict[str, Any],
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
-    return await call_bullex_service("POST", "/sessions/connect", auth["user_id"], json_body=body)
+    status_code, payload = await call_bullex_service(
+        "POST",
+        "/sessions/connect",
+        auth["user_id"],
+        json_body=body,
+    )
+    sync_user_store_from_payload(auth["user_id"], payload, body.get("email"))
+    return json_response(status_code, payload)
 
 
 @app.get("/bullex/status")
 async def bullex_status(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    return await call_bullex_service("GET", "/sessions/status", auth["user_id"])
+    status_code, payload = await call_bullex_service("GET", "/sessions/status", auth["user_id"])
+    sync_user_store_from_payload(auth["user_id"], payload)
+    return json_response(status_code, payload)
 
 
 @app.get("/bullex/balance")
 async def bullex_balance(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    return await call_bullex_service("GET", "/account/balance", auth["user_id"])
+    status_code, payload = await call_bullex_service("GET", "/account/balance", auth["user_id"])
+    sync_user_store_from_payload(auth["user_id"], payload)
+    return json_response(status_code, payload)
 
 
 @app.post("/bullex/change-mode")
@@ -118,12 +156,20 @@ async def bullex_change_mode(
     body: dict[str, Any],
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
-    return await call_bullex_service("POST", "/account/change-mode", auth["user_id"], json_body=body)
+    status_code, payload = await call_bullex_service(
+        "POST",
+        "/account/change-mode",
+        auth["user_id"],
+        json_body=body,
+    )
+    sync_user_store_from_payload(auth["user_id"], payload)
+    return json_response(status_code, payload)
 
 
 @app.get("/bullex/assets")
 async def bullex_assets(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    return await call_bullex_service("GET", "/assets", auth["user_id"])
+    status_code, payload = await call_bullex_service("GET", "/assets", auth["user_id"])
+    return json_response(status_code, payload)
 
 
 @app.get("/bullex/candles")
@@ -137,7 +183,8 @@ async def bullex_candles(
     params = {"active": active, "interval": interval, "count": count}
     if endtime is not None:
         params["endtime"] = endtime
-    return await call_bullex_service("GET", "/candles", auth["user_id"], params=params)
+    status_code, payload = await call_bullex_service("GET", "/candles", auth["user_id"], params=params)
+    return json_response(status_code, payload)
 
 
 @app.post("/bullex/buy-demo")
@@ -145,7 +192,13 @@ async def bullex_buy_demo(
     body: dict[str, Any],
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
-    return await call_bullex_service("POST", "/orders/buy-demo", auth["user_id"], json_body=body)
+    status_code, payload = await call_bullex_service(
+        "POST",
+        "/orders/buy-demo",
+        auth["user_id"],
+        json_body=body,
+    )
+    return json_response(status_code, payload)
 
 
 @app.post("/bullex/buy-real")
@@ -153,9 +206,37 @@ async def bullex_buy_real(
     body: dict[str, Any],
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
-    return await call_bullex_service("POST", "/orders/buy-real", auth["user_id"], json_body=body)
+    status_code, payload = await call_bullex_service(
+        "POST",
+        "/orders/buy-real",
+        auth["user_id"],
+        json_body=body,
+    )
+    return json_response(status_code, payload)
+
+
+@app.post("/bullex/disconnect")
+async def bullex_disconnect(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    status_code, payload = await call_bullex_service("POST", "/sessions/disconnect", auth["user_id"])
+    sync_user_store_from_payload(auth["user_id"], payload)
+    return json_response(status_code, payload)
+
+
+@app.post("/bullex/reconnect")
+async def bullex_reconnect(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    status_code, payload = await call_bullex_service("POST", "/sessions/reconnect", auth["user_id"])
+    sync_user_store_from_payload(auth["user_id"], payload)
+    return json_response(status_code, payload)
+
+
+@app.get("/bullex/account")
+async def bullex_account(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    status_code, payload = await call_bullex_service("GET", "/account", auth["user_id"])
+    sync_user_store_from_payload(auth["user_id"], payload)
+    return json_response(status_code, payload)
 
 
 @app.get("/bullex/order-result/{order_id}")
 async def bullex_order_result(order_id: str, auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    return await call_bullex_service("GET", f"/orders/{order_id}/result", auth["user_id"])
+    status_code, payload = await call_bullex_service("GET", f"/orders/{order_id}/result", auth["user_id"])
+    return json_response(status_code, payload)

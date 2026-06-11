@@ -132,6 +132,19 @@ class SessionManager:
             self._finalize_connect(new_session, ok, reason)
         return new_session
 
+    def disconnect(self, user_id: str) -> ManagedSession:
+        session = self.require(user_id)
+        self._close_session(session)
+        session.requires_2fa = False
+        return session
+
+    def reconnect(self, user_id: str) -> ManagedSession:
+        session = self.require(user_id)
+        with self._session_context(session):
+            ok, reason = session.client.connect()
+            self._finalize_connect(session, ok, reason)
+        return session
+
     def _finalize_connect(self, session: ManagedSession, ok: bool, reason: Any) -> None:
         if ok:
             session.requires_2fa = False
@@ -246,6 +259,25 @@ def parse_order_id(order_id: str) -> int | str:
     return int(order_id) if order_id.isdigit() else order_id
 
 
+def build_account_payload(session: ManagedSession) -> dict[str, Any]:
+    connected = bool(session.client.check_connect())
+    account = {
+        "connected": connected,
+        "balance": None,
+        "currency": None,
+        "mode": None,
+        "email": session.email,
+        "requires_2fa": session.requires_2fa,
+    }
+
+    if connected and not session.requires_2fa:
+        account["balance"] = session.client.get_balance()
+        account["currency"] = session.client.get_currency()
+        account["mode"] = session.client.get_balance_mode()
+
+    return account
+
+
 app = FastAPI(title="bullex-service", version="0.1.0")
 session_manager = SessionManager()
 
@@ -312,6 +344,29 @@ def session_status(x_user_id: str | None = Header(default=None)) -> dict[str, An
     return build_success(session_manager.run(user_id, operation))
 
 
+@app.post("/sessions/disconnect")
+def disconnect_session(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
+    user_id = require_user_id(x_user_id)
+    session_manager.disconnect(user_id)
+
+    def operation(session: ManagedSession) -> dict[str, Any]:
+        return {
+            "user_id": user_id,
+            "connected": bool(session.client.check_connect()),
+            "requires_2fa": session.requires_2fa,
+            "email": session.email,
+        }
+
+    return build_success(session_manager.run(user_id, operation))
+
+
+@app.post("/sessions/reconnect")
+def reconnect_session(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
+    user_id = require_user_id(x_user_id)
+    session_manager.reconnect(user_id)
+    return build_success(session_manager.run(user_id, build_account_payload))
+
+
 @app.get("/account/balance")
 def account_balance(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
@@ -323,6 +378,16 @@ def account_balance(x_user_id: str | None = Header(default=None)) -> dict[str, A
             "currency": session.client.get_currency(),
             "mode": session.client.get_balance_mode(),
         }
+
+    return build_success(session_manager.run(user_id, operation))
+
+
+@app.get("/account")
+def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
+    user_id = require_user_id(x_user_id)
+
+    def operation(session: ManagedSession) -> dict[str, Any]:
+        return build_account_payload(session)
 
     return build_success(session_manager.run(user_id, operation))
 
