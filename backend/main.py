@@ -4,17 +4,19 @@ import asyncio
 from typing import Any
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from backend.signal_engine import analyze_signal
 from backend.user_store import UserStore, create_user_store
 
 
 logger = logging.getLogger("backend-gateway")
 
 ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
+SESSION_DISCONNECTED = "SESSION_DISCONNECTED"
 BINARY_ALLOWED_ASSETS = [
     "EURUSD-OTC",
     "EURGBP-OTC",
@@ -151,6 +153,14 @@ def extract_latest_candle(payload: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return candles[-1]
 
+
+def extract_candles(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    data = payload.get("data")
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict) and isinstance(data.get("candles"), list):
+        return [item for item in data["candles"] if isinstance(item, dict)]
+    return []
 
 def is_session_disconnected(payload: dict[str, Any]) -> bool:
     error = str(payload.get("error") or "").strip().upper()
@@ -334,6 +344,77 @@ def sync_user_store_from_payload(
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return build_success({"status": "healthy", "service": "backend-gateway"})
+
+
+@app.get("/signals/analyze")
+async def signals_analyze(
+    active: str,
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    if not is_binary_asset_allowed(active):
+        return json_response(400, build_error(ASSET_NOT_ALLOWED))
+
+    symbol = normalize_binary_active(active)
+    status_code, payload = await call_bullex_service(
+        "GET",
+        "/candles",
+        auth["user_id"],
+        params={"active": symbol, "interval": 60, "count": 100},
+    )
+    if not payload.get("ok"):
+        if is_session_disconnected(payload):
+            return json_response(409, build_error(SESSION_DISCONNECTED))
+        return json_response(status_code, payload)
+
+    signal = analyze_signal(symbol, extract_candles(payload))
+    logger.info("[SIGNAL ANALYZE] %s %s %s", symbol, signal["signal"], signal["confidence"])
+    return json_response(200, build_success(signal))
+
+
+@app.get("/signals/scan")
+async def signals_scan(
+    limit: int = Query(default=5, ge=1, le=len(BINARY_ALLOWED_ASSETS)),
+    include_wait: bool = False,
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    logger.info("[SIGNAL SCAN START]")
+    signals = []
+
+    for symbol in BINARY_ALLOWED_ASSETS:
+        try:
+            status_code, payload = await call_bullex_service(
+                "GET",
+                "/candles",
+                auth["user_id"],
+                params={"active": symbol, "interval": 60, "count": 100},
+            )
+            if not payload.get("ok"):
+                if is_session_disconnected(payload):
+                    logger.warning("[SIGNAL ERROR] %s %s", symbol, payload.get("error"))
+                    return json_response(409, build_error(SESSION_DISCONNECTED))
+                logger.warning("[SIGNAL ERROR] %s %s", symbol, payload.get("error"))
+                continue
+
+            candles = extract_candles(payload)
+            if not candles:
+                logger.warning("[SIGNAL ERROR] %s NO_CANDLES", symbol)
+                continue
+
+            signal = analyze_signal(symbol, candles)
+            logger.info("[SIGNAL ANALYZE] %s %s %s", symbol, signal["signal"], signal["confidence"])
+            if signal["confidence"] < 70:
+                continue
+            if signal["signal"] == "WAIT" and not include_wait:
+                continue
+            signals.append(signal)
+        except Exception as exc:
+            logger.exception("[SIGNAL ERROR] %s %s", symbol, exc)
+            continue
+
+    signals.sort(key=lambda item: item["confidence"], reverse=True)
+    limited_signals = signals[:limit]
+    logger.info("[SIGNAL SCAN RESULT] count=%s", len(limited_signals))
+    return json_response(200, build_success(limited_signals))
 
 
 @app.websocket("/ws/market")
