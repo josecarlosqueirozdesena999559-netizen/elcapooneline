@@ -262,6 +262,14 @@ curl -H "x-api-key: 40402400kkj" -H "x-user-id: teste1" "http://localhost:8080/s
 curl -H "x-api-key: 40402400kkj" -H "x-user-id: teste1" "http://localhost:8080/signals/scan"
 ```
 
+
+## Manual test OpenAI signal reviewer
+```bash
+curl -H "x-api-key: 40402400kkj" -H "x-user-id: teste1" "http://localhost:8080/signals/review?active=EURUSD-OTC"
+
+curl -H "x-api-key: 40402400kkj" -H "x-user-id: teste1" "http://localhost:8080/signals/top-reviewed"
+```
+
 ## Supabase integration
 - O gateway aceita `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY`.
 - Quando essas variaveis estiverem definidas, o backend troca o `InMemoryUserStore` por `SupabaseUserStore`.

@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from backend.openai_signal_reviewer import review_signal
 from backend.signal_engine import analyze_signal
 from backend.user_store import UserStore, create_user_store
 
@@ -341,6 +342,53 @@ def sync_user_store_from_payload(
             user_store.update_connection(user_id, updates)
 
 
+async def analyze_active_signal(user_id: str, symbol: str) -> tuple[int, dict[str, Any]]:
+    status_code, payload = await call_bullex_service(
+        "GET",
+        "/candles",
+        user_id,
+        params={"active": symbol, "interval": 60, "count": 100},
+    )
+    if not payload.get("ok"):
+        if is_session_disconnected(payload):
+            return 409, build_error(SESSION_DISCONNECTED)
+        return status_code, payload
+
+    signal = analyze_signal(symbol, extract_candles(payload))
+    logger.info("[SIGNAL ANALYZE] %s %s %s", symbol, signal["signal"], signal["confidence"])
+    return 200, build_success(signal)
+
+
+async def scan_local_signals(user_id: str, limit: int = 5, include_wait: bool = False) -> tuple[int, dict[str, Any]]:
+    logger.info("[SIGNAL SCAN START]")
+    signals = []
+
+    for symbol in BINARY_ALLOWED_ASSETS:
+        try:
+            status_code, payload = await analyze_active_signal(user_id, symbol)
+            if not payload.get("ok"):
+                if is_session_disconnected(payload):
+                    logger.warning("[SIGNAL ERROR] %s %s", symbol, payload.get("error"))
+                    return status_code, payload
+                logger.warning("[SIGNAL ERROR] %s %s", symbol, payload.get("error"))
+                continue
+
+            signal = payload["data"]
+            if signal["confidence"] < 70:
+                continue
+            if signal["signal"] == "WAIT" and not include_wait:
+                continue
+            signals.append(signal)
+        except Exception as exc:
+            logger.exception("[SIGNAL ERROR] %s %s", symbol, exc)
+            continue
+
+    signals.sort(key=lambda item: item["confidence"], reverse=True)
+    limited_signals = signals[:limit]
+    logger.info("[SIGNAL SCAN RESULT] count=%s", len(limited_signals))
+    return 200, build_success(limited_signals)
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return build_success({"status": "healthy", "service": "backend-gateway"})
@@ -355,20 +403,26 @@ async def signals_analyze(
         return json_response(400, build_error(ASSET_NOT_ALLOWED))
 
     symbol = normalize_binary_active(active)
-    status_code, payload = await call_bullex_service(
-        "GET",
-        "/candles",
-        auth["user_id"],
-        params={"active": symbol, "interval": 60, "count": 100},
-    )
+    status_code, payload = await analyze_active_signal(auth["user_id"], symbol)
+    return json_response(status_code, payload)
+
+
+@app.get("/signals/review")
+async def signals_review(
+    active: str,
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    if not is_binary_asset_allowed(active):
+        return json_response(400, build_error(ASSET_NOT_ALLOWED))
+
+    symbol = normalize_binary_active(active)
+    status_code, payload = await analyze_active_signal(auth["user_id"], symbol)
     if not payload.get("ok"):
-        if is_session_disconnected(payload):
-            return json_response(409, build_error(SESSION_DISCONNECTED))
         return json_response(status_code, payload)
 
-    signal = analyze_signal(symbol, extract_candles(payload))
-    logger.info("[SIGNAL ANALYZE] %s %s %s", symbol, signal["signal"], signal["confidence"])
-    return json_response(200, build_success(signal))
+    signal = payload["data"]
+    review = await review_signal(signal)
+    return json_response(200, build_success({"signal": signal, "review": review}))
 
 
 @app.get("/signals/scan")
@@ -377,44 +431,29 @@ async def signals_scan(
     include_wait: bool = False,
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
-    logger.info("[SIGNAL SCAN START]")
-    signals = []
+    status_code, payload = await scan_local_signals(auth["user_id"], limit=limit, include_wait=include_wait)
+    return json_response(status_code, payload)
 
-    for symbol in BINARY_ALLOWED_ASSETS:
-        try:
-            status_code, payload = await call_bullex_service(
-                "GET",
-                "/candles",
-                auth["user_id"],
-                params={"active": symbol, "interval": 60, "count": 100},
-            )
-            if not payload.get("ok"):
-                if is_session_disconnected(payload):
-                    logger.warning("[SIGNAL ERROR] %s %s", symbol, payload.get("error"))
-                    return json_response(409, build_error(SESSION_DISCONNECTED))
-                logger.warning("[SIGNAL ERROR] %s %s", symbol, payload.get("error"))
-                continue
 
-            candles = extract_candles(payload)
-            if not candles:
-                logger.warning("[SIGNAL ERROR] %s NO_CANDLES", symbol)
-                continue
+@app.get("/signals/top-reviewed")
+async def signals_top_reviewed(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    status_code, payload = await scan_local_signals(auth["user_id"], limit=5, include_wait=False)
+    if not payload.get("ok"):
+        return json_response(status_code, payload)
 
-            signal = analyze_signal(symbol, candles)
-            logger.info("[SIGNAL ANALYZE] %s %s %s", symbol, signal["signal"], signal["confidence"])
-            if signal["confidence"] < 70:
-                continue
-            if signal["signal"] == "WAIT" and not include_wait:
-                continue
-            signals.append(signal)
-        except Exception as exc:
-            logger.exception("[SIGNAL ERROR] %s %s", symbol, exc)
-            continue
+    reviewed = []
+    for signal in payload["data"][:5]:
+        review = await review_signal(signal)
+        reviewed.append({"signal": signal, "review": review})
 
-    signals.sort(key=lambda item: item["confidence"], reverse=True)
-    limited_signals = signals[:limit]
-    logger.info("[SIGNAL SCAN RESULT] count=%s", len(limited_signals))
-    return json_response(200, build_success(limited_signals))
+    reviewed.sort(
+        key=lambda item: (
+            int(item["review"].get("quality") or 0),
+            int(item["signal"].get("confidence") or 0),
+        ),
+        reverse=True,
+    )
+    return json_response(200, build_success(reviewed))
 
 
 @app.websocket("/ws/market")

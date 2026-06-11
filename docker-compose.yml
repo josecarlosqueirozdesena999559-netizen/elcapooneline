@@ -10,6 +10,8 @@ services:
       PANEL_API_KEY: "40402400kkj"
       SUPABASE_URL: "https://ynqevdkyrnxsgnzmlvix.supabase.co"
       SUPABASE_SERVICE_ROLE_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlucWV2ZGt5cm54c2duem1sdml4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODExNTc2MDUsImV4cCI6MjA5NjczMzYwNX0.JfUfQBizVp1YJov2hanUDteay9NW4BWpblIBBt7HiYk"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-5.5}"
     ports:
       - "8080:8080"
     restart: unless-stopped
