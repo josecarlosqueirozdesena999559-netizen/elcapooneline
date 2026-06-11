@@ -221,8 +221,17 @@ else:
 - `POST /bullex/disconnect`
 - `GET /bullex/status` deve retornar `SESSION_NOT_FOUND` ou `connected: false`
 
+## Manual test market flow
+```bash
+curl -H "x-api-key: CHAVE" -H "x-user-id: USER_ID" http://localhost:8080/bullex/assets
+
+curl -H "x-api-key: CHAVE" -H "x-user-id: USER_ID" "http://localhost:8080/bullex/candles?active=EURUSD-OTC&interval=60&count=10"
+
+curl -H "x-api-key: CHAVE" -H "x-user-id: USER_ID" "http://localhost:8080/bullex/payouts?active=EURUSD-OTC"
+```
+
 ## Supabase integration
 - O gateway aceita `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY`.
 - Quando essas variaveis estiverem definidas, o backend troca o `InMemoryUserStore` por `SupabaseUserStore`.
-- O schema base para criar `users` e `bullex_connections` esta em `backend/supabase_schema.sql`.
+- O schema base para criar `users`, `bullex_connections` e `market_assets` esta em `backend/supabase_schema.sql`.
 - O backend usa a `service_role key` no servidor. Nao use `publishable key` ou `anon key` para essa integracao.

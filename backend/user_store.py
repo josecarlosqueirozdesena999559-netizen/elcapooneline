@@ -1,6 +1,7 @@
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -35,10 +36,15 @@ class UserStore(ABC):
     def disconnect(self, user_id: str) -> None:
         raise NotImplementedError
 
+    @abstractmethod
+    def save_market_assets_snapshot(self, user_id: str, assets: list[dict[str, Any]]) -> None:
+        raise NotImplementedError
+
 
 class InMemoryUserStore(UserStore):
     def __init__(self) -> None:
         self.users: dict[str, BullExUserRecord] = {}
+        self.market_assets: dict[str, list[dict[str, Any]]] = {}
 
     def get_user(self, user_id: str) -> BullExUserRecord | None:
         return self.users.get(user_id)
@@ -54,6 +60,9 @@ class InMemoryUserStore(UserStore):
         record.connected = False
         record.requires_2fa = False
         self.users[user_id] = record
+
+    def save_market_assets_snapshot(self, user_id: str, assets: list[dict[str, Any]]) -> None:
+        self.market_assets[user_id] = assets
 
     def _upsert(self, user_id: str, payload: dict[str, Any]) -> BullExUserRecord:
         record = self.users.get(user_id) or BullExUserRecord(user_id=user_id)
@@ -103,6 +112,34 @@ class SupabaseUserStore(UserStore):
             extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
         )
 
+    def save_market_assets_snapshot(self, user_id: str, assets: list[dict[str, Any]]) -> None:
+        self._ensure_user_row(user_id)
+        rows = []
+        now = datetime.now(timezone.utc).isoformat()
+        for asset in assets:
+            symbol = asset.get("symbol")
+            if not symbol:
+                continue
+            rows.append(
+                {
+                    "user_id": user_id,
+                    "active_id": asset.get("active_id"),
+                    "symbol": symbol,
+                    "name": asset.get("name") or symbol,
+                    "enabled": asset.get("enabled", True),
+                    "payout": asset.get("payout"),
+                    "last_seen_at": now,
+                }
+            )
+        if not rows:
+            return
+        self._request(
+            "POST",
+            "/market_assets?on_conflict=user_id,symbol",
+            json=rows,
+            extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
+
     def _ensure_user_row(self, user_id: str) -> None:
         body = {"id": user_id}
         self._request(
@@ -137,7 +174,7 @@ class SupabaseUserStore(UserStore):
         self,
         method: str,
         path: str,
-        json: dict[str, Any] | None = None,
+        json: Any = None,
         extra_headers: dict[str, str] | None = None,
     ) -> Any:
         headers = dict(self.headers)

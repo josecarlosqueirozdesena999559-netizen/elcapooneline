@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Any
 
@@ -8,6 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from backend.user_store import UserStore, create_user_store
+
+
+logger = logging.getLogger("backend-gateway")
 
 
 def build_success(data: Any) -> dict[str, Any]:
@@ -214,6 +218,11 @@ async def bullex_change_mode(
 @app.get("/bullex/assets")
 async def bullex_assets(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     status_code, payload = await call_bullex_service("GET", "/assets", auth["user_id"])
+    if payload.get("ok") and isinstance(payload.get("data"), list):
+        try:
+            user_store.save_market_assets_snapshot(auth["user_id"], payload["data"])
+        except Exception:
+            logger.exception("falha ao salvar snapshot de market_assets para %s", auth["user_id"])
     return json_response(status_code, payload)
 
 
@@ -229,6 +238,16 @@ async def bullex_candles(
     if endtime is not None:
         params["endtime"] = endtime
     status_code, payload = await call_bullex_service("GET", "/candles", auth["user_id"], params=params)
+    return json_response(status_code, payload)
+
+
+@app.get("/bullex/payouts")
+async def bullex_payouts(
+    active: str | None = None,
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    params = {"active": active} if active is not None else None
+    status_code, payload = await call_bullex_service("GET", "/payouts", auth["user_id"], params=params)
     return json_response(status_code, payload)
 
 

@@ -289,6 +289,55 @@ def build_account_payload(session: ManagedSession) -> dict[str, Any]:
     return account
 
 
+def normalize_active(symbol: Any, active_id: Any) -> dict[str, Any]:
+    return {
+        "active_id": active_id,
+        "symbol": str(symbol),
+        "name": str(symbol),
+        "enabled": True,
+    }
+
+
+def normalize_assets(raw_assets: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_assets, dict):
+        return []
+    return [normalize_active(symbol, active_id) for symbol, active_id in raw_assets.items()]
+
+
+def normalize_candle(candle: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "from": candle.get("from") or candle.get("at") or candle.get("id"),
+        "open": candle.get("open"),
+        "close": candle.get("close"),
+        "min": candle.get("min") if "min" in candle else candle.get("low"),
+        "max": candle.get("max") if "max" in candle else candle.get("high"),
+        "volume": candle.get("volume", 0),
+    }
+
+
+def normalize_candles(raw_candles: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_candles, list):
+        return []
+    return [normalize_candle(candle) for candle in raw_candles if isinstance(candle, dict)]
+
+
+def read_assets(client: Bullex) -> list[dict[str, Any]]:
+    client.update_ACTIVES_OPCODE()
+    return normalize_assets(client.get_all_ACTIVES_OPCODE())
+
+
+def read_digital_payout(client: Bullex, active: str) -> int | float | None:
+    getter = getattr(client, "get_digital_payout", None)
+    if not callable(getter):
+        return None
+    try:
+        payout = getter(active, seconds=3)
+    except Exception:
+        logger.exception("falha ao consultar payout digital de %s", active)
+        return None
+    return payout if payout else None
+
+
 app = FastAPI(title="bullex-service", version="0.1.0")
 session_manager = SessionManager()
 
@@ -417,12 +466,13 @@ def account_change_mode(payload: ChangeModeRequest, x_user_id: str | None = Head
 def list_assets(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
 
-    def operation(session: ManagedSession) -> dict[str, Any]:
+    def operation(session: ManagedSession) -> list[dict[str, Any]]:
         ensure_session_ready(session)
-        session.client.update_ACTIVES_OPCODE()
-        assets = session.client.get_all_ACTIVES_OPCODE()
-        items = [{"name": name, "opcode": opcode} for name, opcode in assets.items()]
-        return {"items": items, "count": len(items)}
+        try:
+            return read_assets(session.client)
+        except Exception as exc:
+            logger.exception("falha ao listar ativos")
+            raise ServiceError("BULLEX_ASSETS_ERROR", 502) from exc
 
     return build_success(session_manager.run(user_id, operation))
 
@@ -438,18 +488,43 @@ def get_candles(
     user_id = require_user_id(x_user_id)
     resolved_endtime = endtime or int(time.time())
 
-    def operation(session: ManagedSession) -> dict[str, Any]:
+    def operation(session: ManagedSession) -> list[dict[str, Any]]:
         ensure_session_ready(session)
-        candles = session.client.get_candles(active, interval, count, resolved_endtime)
+        try:
+            candles = session.client.get_candles(active, interval, count, resolved_endtime)
+        except Exception as exc:
+            logger.exception("falha ao obter candles de %s", active)
+            raise ServiceError("BULLEX_CANDLES_ERROR", 502) from exc
         if candles is None:
             raise ServiceError("nao foi possivel obter candles", 502)
-        return {
-            "active": active,
-            "interval": interval,
-            "count": count,
-            "endtime": resolved_endtime,
-            "candles": candles,
-        }
+        return normalize_candles(candles)
+
+    return build_success(session_manager.run(user_id, operation))
+
+
+@app.get("/payouts")
+def get_payouts(active: str | None = None, x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
+    user_id = require_user_id(x_user_id)
+
+    def operation(session: ManagedSession) -> list[dict[str, Any]]:
+        ensure_session_ready(session)
+        if active:
+            symbols = [active]
+        else:
+            try:
+                symbols = [asset["symbol"] for asset in read_assets(session.client)]
+            except Exception as exc:
+                logger.exception("falha ao listar ativos para payouts")
+                raise ServiceError("BULLEX_PAYOUTS_ERROR", 502) from exc
+
+        return [
+            {
+                "symbol": symbol,
+                "payout": read_digital_payout(session.client, symbol) if active else None,
+                "type": "digital",
+            }
+            for symbol in symbols
+        ]
 
     return build_success(session_manager.run(user_id, operation))
 
