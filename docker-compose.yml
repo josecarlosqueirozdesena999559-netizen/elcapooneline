@@ -1,4 +1,18 @@
 services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: backend-gateway
+    environment:
+      BULLEX_SERVICE_URL: "http://bullex-service:8000"
+      PANEL_API_KEY: "40402400kkj"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    depends_on:
+      - bullex-service
+
   bullex-service:
     build:
       context: .
@@ -6,6 +20,6 @@ services:
     container_name: bullex-service
     environment:
       BULLEX_MAX_CONCURRENT_API_CALLS: "1"
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     restart: unless-stopped
