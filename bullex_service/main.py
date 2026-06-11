@@ -21,6 +21,31 @@ logger = logging.getLogger("bullex-service")
 ALLOWED_BALANCE_MODES = {"PRACTICE", "REAL", "TOURNAMENT"}
 ALLOWED_ACTIONS = {"call", "put"}
 SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
+ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
+BINARY_ALLOWED_ASSETS = [
+    "EURUSD-OTC",
+    "EURGBP-OTC",
+    "USDCHF-OTC",
+    "EURJPY-OTC",
+    "NZDUSD-OTC",
+    "GBPUSD-OTC",
+    "GBPJPY-OTC",
+    "USDJPY-OTC",
+    "AUDCAD-OTC",
+    "AUDUSD-OTC",
+    "USDCAD-OTC",
+    "AUDJPY-OTC",
+    "GBPCAD-OTC",
+    "GBPCHF-OTC",
+    "GBPAUD-OTC",
+    "EURCAD-OTC",
+    "CHFJPY-OTC",
+    "CADCHF-OTC",
+    "EURAUD-OTC",
+    "EURNZD-OTC",
+    "AUDCHF-OTC",
+]
+BINARY_ALLOWED_ASSET_SET = set(BINARY_ALLOWED_ASSETS)
 
 
 class ServiceError(Exception):
@@ -234,6 +259,17 @@ def normalize_action(action: str) -> str:
     return normalized
 
 
+def normalize_binary_active(active: str) -> str:
+    return (active or "").strip().upper()
+
+
+def ensure_binary_asset_allowed(active: str) -> str:
+    normalized = normalize_binary_active(active)
+    if normalized not in BINARY_ALLOWED_ASSET_SET:
+        raise ServiceError(ASSET_NOT_ALLOWED, 400)
+    return normalized
+
+
 def build_success(data: Any) -> dict[str, Any]:
     return {"ok": True, "data": data, "error": None}
 
@@ -301,7 +337,18 @@ def normalize_active(symbol: Any, active_id: Any) -> dict[str, Any]:
 def normalize_assets(raw_assets: Any) -> list[dict[str, Any]]:
     if not isinstance(raw_assets, dict):
         return []
-    return [normalize_active(symbol, active_id) for symbol, active_id in raw_assets.items()]
+    available_assets = {
+        normalize_binary_active(symbol): normalize_active(normalize_binary_active(symbol), active_id)
+        for symbol, active_id in raw_assets.items()
+    }
+    filtered_assets = []
+    for symbol in BINARY_ALLOWED_ASSETS:
+        asset = available_assets.get(symbol)
+        if asset is None:
+            logger.warning("[BINARY ASSET MISSING] %s", symbol)
+            continue
+        filtered_assets.append(asset)
+    return filtered_assets
 
 
 def normalize_candle(candle: dict[str, Any]) -> dict[str, Any]:
@@ -486,6 +533,7 @@ def get_candles(
     x_user_id: str | None = Header(default=None),
 ) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
+    active = ensure_binary_asset_allowed(active)
     resolved_endtime = endtime or int(time.time())
 
     def operation(session: ManagedSession) -> list[dict[str, Any]]:
@@ -505,6 +553,7 @@ def get_candles(
 @app.get("/payouts")
 def get_payouts(active: str | None = None, x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
+    active = ensure_binary_asset_allowed(active) if active else None
 
     def operation(session: ManagedSession) -> list[dict[str, Any]]:
         ensure_session_ready(session)

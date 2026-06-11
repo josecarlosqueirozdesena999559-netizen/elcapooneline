@@ -14,6 +14,32 @@ from backend.user_store import UserStore, create_user_store
 
 logger = logging.getLogger("backend-gateway")
 
+ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
+BINARY_ALLOWED_ASSETS = [
+    "EURUSD-OTC",
+    "EURGBP-OTC",
+    "USDCHF-OTC",
+    "EURJPY-OTC",
+    "NZDUSD-OTC",
+    "GBPUSD-OTC",
+    "GBPJPY-OTC",
+    "USDJPY-OTC",
+    "AUDCAD-OTC",
+    "AUDUSD-OTC",
+    "USDCAD-OTC",
+    "AUDJPY-OTC",
+    "GBPCAD-OTC",
+    "GBPCHF-OTC",
+    "GBPAUD-OTC",
+    "EURCAD-OTC",
+    "CHFJPY-OTC",
+    "CADCHF-OTC",
+    "EURAUD-OTC",
+    "EURNZD-OTC",
+    "AUDCHF-OTC",
+]
+BINARY_ALLOWED_ASSET_SET = set(BINARY_ALLOWED_ASSETS)
+
 
 def build_success(data: Any) -> dict[str, Any]:
     return {"ok": True, "data": data, "error": None}
@@ -21,6 +47,14 @@ def build_success(data: Any) -> dict[str, Any]:
 
 def build_error(message: str) -> dict[str, Any]:
     return {"ok": False, "data": None, "error": message}
+
+
+def normalize_binary_active(active: str) -> str:
+    return (active or "").strip().upper()
+
+
+def is_binary_asset_allowed(active: str) -> bool:
+    return normalize_binary_active(active) in BINARY_ALLOWED_ASSET_SET
 
 
 class ConnectionManager:
@@ -326,6 +360,11 @@ async def ws_market(websocket: WebSocket) -> None:
         await websocket.accept()
         await close_market_websocket(websocket, {"type": "error", "error": "MISSING_ACTIVE"})
         return
+    if not is_binary_asset_allowed(active):
+        await websocket.accept()
+        await close_market_websocket(websocket, build_error(ASSET_NOT_ALLOWED))
+        return
+    active = normalize_binary_active(active)
 
     await manager.connect(user_id, active, websocket)
     logger.info("[MARKET WS CONNECTED] user_id=%s active=%s", user_id, active)
@@ -398,8 +437,14 @@ async def bullex_change_mode(
 async def bullex_assets(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     status_code, payload = await call_bullex_service("GET", "/assets", auth["user_id"])
     if payload.get("ok") and isinstance(payload.get("data"), list):
+        allowed_assets = [
+            asset
+            for asset in payload["data"]
+            if isinstance(asset, dict) and is_binary_asset_allowed(str(asset.get("symbol") or ""))
+        ]
+        payload["data"] = allowed_assets
         try:
-            user_store.save_market_assets_snapshot(auth["user_id"], payload["data"])
+            user_store.save_market_assets_snapshot(auth["user_id"], allowed_assets)
         except Exception:
             logger.exception("falha ao salvar snapshot de market_assets para %s", auth["user_id"])
     return json_response(status_code, payload)
@@ -413,6 +458,9 @@ async def bullex_candles(
     endtime: int | None = None,
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
+    if not is_binary_asset_allowed(active):
+        return json_response(400, build_error(ASSET_NOT_ALLOWED))
+    active = normalize_binary_active(active)
     params = {"active": active, "interval": interval, "count": count}
     if endtime is not None:
         params["endtime"] = endtime
@@ -425,6 +473,9 @@ async def bullex_payouts(
     active: str | None = None,
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
+    if active is not None and not is_binary_asset_allowed(active):
+        return json_response(400, build_error(ASSET_NOT_ALLOWED))
+    active = normalize_binary_active(active) if active is not None else None
     params = {"active": active} if active is not None else None
     status_code, payload = await call_bullex_service("GET", "/payouts", auth["user_id"], params=params)
     if payload.get("ok") and active and isinstance(payload.get("data"), list):

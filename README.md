@@ -225,11 +225,24 @@ else:
 ```bash
 curl http://localhost:8080/health
 
-curl -H "x-api-key: CHAVE" -H "x-user-id: USER_ID" http://localhost:8080/bullex/assets
+curl -H "x-api-key: CHAVE" -H "x-user-id: teste1" http://localhost:8080/bullex/assets
 
-curl -H "x-api-key: CHAVE" -H "x-user-id: USER_ID" "http://localhost:8080/bullex/candles?active=EURUSD-OTC&interval=60&count=10"
+curl -H "x-api-key: CHAVE" -H "x-user-id: teste1" "http://localhost:8080/bullex/candles?active=EURUSD-OTC&interval=60&count=10"
 
-curl -H "x-api-key: CHAVE" -H "x-user-id: USER_ID" "http://localhost:8080/bullex/payouts?active=EURUSD-OTC"
+curl -H "x-api-key: CHAVE" -H "x-user-id: teste1" "http://localhost:8080/bullex/candles?active=APPLE&interval=60&count=10"
+```
+
+Esperado:
+- `assets` retorna no maximo 21 ativos binarios/OTC permitidos.
+- `EURUSD-OTC` retorna candles quando a sessao BullEx esta conectada.
+- `APPLE` retorna:
+
+```json
+{
+  "ok": false,
+  "data": null,
+  "error": "ASSET_NOT_ALLOWED"
+}
 ```
 
 ## Manual test market websocket
