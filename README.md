@@ -220,3 +220,9 @@ else:
 - `GET /bullex/status` deve retornar `connected: true`
 - `POST /bullex/disconnect`
 - `GET /bullex/status` deve retornar `SESSION_NOT_FOUND` ou `connected: false`
+
+## Supabase integration
+- O gateway aceita `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY`.
+- Quando essas variaveis estiverem definidas, o backend troca o `InMemoryUserStore` por `SupabaseUserStore`.
+- O schema base para criar `users` e `bullex_connections` esta em `backend/supabase_schema.sql`.
+- O backend usa a `service_role key` no servidor. Nao use `publishable key` ou `anon key` para essa integracao.

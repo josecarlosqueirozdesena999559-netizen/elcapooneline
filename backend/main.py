@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from backend.user_store import InMemoryUserStore, UserStore
+from backend.user_store import UserStore, create_user_store
 
 
 def build_success(data: Any) -> dict[str, Any]:
@@ -21,11 +21,13 @@ class GatewayConfig:
     def __init__(self) -> None:
         self.bullex_service_url = os.getenv("BULLEX_SERVICE_URL", "http://bullex-service:8000").rstrip("/")
         self.panel_api_key = os.getenv("PANEL_API_KEY", "")
+        self.supabase_url = os.getenv("SUPABASE_URL", "").strip()
+        self.supabase_service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
 
 config = GatewayConfig()
 app = FastAPI(title="backend-gateway", version="0.1.0")
-user_store: UserStore = InMemoryUserStore()
+user_store: UserStore = create_user_store()
 
 
 async def require_headers(
@@ -97,7 +99,33 @@ def json_response(status_code: int, payload: dict[str, Any]) -> JSONResponse:
     return JSONResponse(status_code=status_code, content=payload)
 
 
-def sync_user_store_from_payload(user_id: str, payload: dict[str, Any], fallback_email: str | None = None) -> None:
+def build_connection_payload(data: dict[str, Any], fallback_email: str | None = None) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if fallback_email is not None:
+        updates["bullex_email"] = fallback_email
+
+    field_map = {
+        "email": "bullex_email",
+        "connected": "connected",
+        "balance": "last_balance",
+        "currency": "currency",
+        "mode": "account_mode",
+        "active_mode": "account_mode",
+        "requires_2fa": "requires_2fa",
+    }
+    for source_field, target_field in field_map.items():
+        if source_field in data:
+            updates[target_field] = data[source_field]
+    return updates
+
+
+def sync_user_store_from_payload(
+    user_id: str,
+    payload: dict[str, Any],
+    fallback_email: str | None = None,
+    *,
+    is_new_connection: bool = False,
+) -> None:
     if not payload.get("ok"):
         return
 
@@ -105,16 +133,12 @@ def sync_user_store_from_payload(user_id: str, payload: dict[str, Any], fallback
     if not isinstance(data, dict):
         return
 
-    updates: dict[str, Any] = {}
-    if fallback_email is not None:
-        updates["email"] = fallback_email
-
-    for field in ("email", "connected", "balance", "currency", "mode", "requires_2fa"):
-        if field in data:
-            updates[field] = data[field]
-
+    updates = build_connection_payload(data, fallback_email)
     if updates:
-        user_store.upsert(user_id, **updates)
+        if is_new_connection:
+            user_store.save_connection(user_id, updates)
+        else:
+            user_store.update_connection(user_id, updates)
 
 
 @app.get("/health")
@@ -133,7 +157,12 @@ async def bullex_connect(
         auth["user_id"],
         json_body=body,
     )
-    sync_user_store_from_payload(auth["user_id"], payload, body.get("email"))
+    sync_user_store_from_payload(
+        auth["user_id"],
+        payload,
+        body.get("email"),
+        is_new_connection=True,
+    )
     return json_response(status_code, payload)
 
 
@@ -219,7 +248,7 @@ async def bullex_buy_real(
 async def bullex_disconnect(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     status_code, payload = await call_bullex_service("POST", "/sessions/disconnect", auth["user_id"])
     if payload.get("ok"):
-        user_store.upsert(auth["user_id"], connected=False, requires_2fa=False)
+        user_store.disconnect(auth["user_id"])
     else:
         sync_user_store_from_payload(auth["user_id"], payload)
     return json_response(status_code, payload)

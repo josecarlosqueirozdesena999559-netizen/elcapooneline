@@ -6,7 +6,9 @@ services:
     container_name: backend-gateway
     environment:
       BULLEX_SERVICE_URL: "http://bullex-service:8000"
-      PANEL_API_KEY: "40402400kkj"
+      PANEL_API_KEY: "chave_do_painel"
+      SUPABASE_URL: ""
+      SUPABASE_SERVICE_ROLE_KEY: ""
     ports:
       - "8080:8080"
     restart: unless-stopped
