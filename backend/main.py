@@ -248,6 +248,20 @@ async def bullex_payouts(
 ) -> JSONResponse:
     params = {"active": active} if active is not None else None
     status_code, payload = await call_bullex_service("GET", "/payouts", auth["user_id"], params=params)
+    if payload.get("ok") and active and isinstance(payload.get("data"), list):
+        payout_item = next(
+            (
+                item
+                for item in payload["data"]
+                if isinstance(item, dict) and item.get("symbol") == active and item.get("payout") is not None
+            ),
+            None,
+        )
+        if payout_item is not None:
+            try:
+                user_store.save_market_asset_payout(auth["user_id"], active, payout_item.get("payout"))
+            except Exception:
+                logger.exception("falha ao salvar payout de market_assets para %s %s", auth["user_id"], active)
     return json_response(status_code, payload)
 
 

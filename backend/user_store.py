@@ -2,10 +2,14 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 from typing import Any
 from urllib.parse import quote
 
 import httpx
+
+
+logger = logging.getLogger("backend-gateway")
 
 
 @dataclass
@@ -40,11 +44,15 @@ class UserStore(ABC):
     def save_market_assets_snapshot(self, user_id: str, assets: list[dict[str, Any]]) -> None:
         raise NotImplementedError
 
+    @abstractmethod
+    def save_market_asset_payout(self, user_id: str, symbol: str, payout: int | float | None) -> None:
+        raise NotImplementedError
+
 
 class InMemoryUserStore(UserStore):
     def __init__(self) -> None:
         self.users: dict[str, BullExUserRecord] = {}
-        self.market_assets: dict[str, list[dict[str, Any]]] = {}
+        self.market_assets: dict[str, dict[str, dict[str, Any]]] = {}
 
     def get_user(self, user_id: str) -> BullExUserRecord | None:
         return self.users.get(user_id)
@@ -62,7 +70,42 @@ class InMemoryUserStore(UserStore):
         self.users[user_id] = record
 
     def save_market_assets_snapshot(self, user_id: str, assets: list[dict[str, Any]]) -> None:
-        self.market_assets[user_id] = assets
+        now = datetime.now(timezone.utc).isoformat()
+        existing_assets = self.market_assets.setdefault(user_id, {})
+        for asset in assets:
+            symbol = asset.get("symbol")
+            if not symbol:
+                continue
+            previous = existing_assets.get(symbol, {})
+            incoming_payout = asset.get("payout")
+            existing_assets[symbol] = {
+                "user_id": user_id,
+                "active_id": asset.get("active_id"),
+                "symbol": symbol,
+                "name": asset.get("name") or symbol,
+                "enabled": asset.get("enabled", True),
+                "payout": incoming_payout if incoming_payout is not None else previous.get("payout"),
+                "last_seen_at": now,
+                "updated_at": now,
+            }
+
+    def save_market_asset_payout(self, user_id: str, symbol: str, payout: int | float | None) -> None:
+        if payout is None:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        existing_assets = self.market_assets.setdefault(user_id, {})
+        previous = existing_assets.get(symbol, {})
+        existing_assets[symbol] = {
+            "user_id": user_id,
+            "active_id": previous.get("active_id"),
+            "symbol": symbol,
+            "name": previous.get("name") or symbol,
+            "enabled": previous.get("enabled", True),
+            "payout": payout,
+            "last_seen_at": now,
+            "updated_at": now,
+        }
+        logger.info("MARKET_ASSET_PAYOUT_UPDATED %s %s %s", user_id, symbol, payout)
 
     def _upsert(self, user_id: str, payload: dict[str, Any]) -> BullExUserRecord:
         record = self.users.get(user_id) or BullExUserRecord(user_id=user_id)
@@ -116,10 +159,12 @@ class SupabaseUserStore(UserStore):
         self._ensure_user_row(user_id)
         rows = []
         now = datetime.now(timezone.utc).isoformat()
+        existing_payouts = self._get_existing_market_asset_payouts(user_id)
         for asset in assets:
             symbol = asset.get("symbol")
             if not symbol:
                 continue
+            incoming_payout = asset.get("payout")
             rows.append(
                 {
                     "user_id": user_id,
@@ -127,7 +172,7 @@ class SupabaseUserStore(UserStore):
                     "symbol": symbol,
                     "name": asset.get("name") or symbol,
                     "enabled": asset.get("enabled", True),
-                    "payout": asset.get("payout"),
+                    "payout": incoming_payout if incoming_payout is not None else existing_payouts.get(symbol),
                     "last_seen_at": now,
                 }
             )
@@ -139,6 +184,24 @@ class SupabaseUserStore(UserStore):
             json=rows,
             extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
         )
+
+    def save_market_asset_payout(self, user_id: str, symbol: str, payout: int | float | None) -> None:
+        self._ensure_user_row(user_id)
+        if payout is None:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        self._request(
+            "POST",
+            "/market_assets?on_conflict=user_id,symbol",
+            json={
+                "user_id": user_id,
+                "symbol": symbol,
+                "payout": payout,
+                "last_seen_at": now,
+            },
+            extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
+        logger.info("MARKET_ASSET_PAYOUT_UPDATED %s %s %s", user_id, symbol, payout)
 
     def _ensure_user_row(self, user_id: str) -> None:
         body = {"id": user_id}
@@ -158,6 +221,18 @@ class SupabaseUserStore(UserStore):
             extra_headers={"Prefer": "resolution=merge-duplicates,return=representation"},
         )
         return self._to_record(rows[0] if rows else body)
+
+    def _get_existing_market_asset_payouts(self, user_id: str) -> dict[str, Any]:
+        rows = self._request(
+            "GET",
+            f"/market_assets?user_id=eq.{quote(user_id, safe='')}&select=symbol,payout",
+        )
+        payouts: dict[str, Any] = {}
+        for row in rows:
+            symbol = row.get("symbol")
+            if symbol:
+                payouts[symbol] = row.get("payout")
+        return payouts
 
     def _to_record(self, row: dict[str, Any]) -> BullExUserRecord:
         return BullExUserRecord(
