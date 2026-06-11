@@ -214,3 +214,9 @@ else:
   "error": "SESSION_NOT_FOUND"
 }
 ```
+
+## Manual test disconnect flow
+- `POST /bullex/connect`
+- `GET /bullex/status` deve retornar `connected: true`
+- `POST /bullex/disconnect`
+- `GET /bullex/status` deve retornar `SESSION_NOT_FOUND` ou `connected: false`

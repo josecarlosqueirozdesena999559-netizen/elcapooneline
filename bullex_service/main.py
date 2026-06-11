@@ -91,6 +91,9 @@ class SessionManager:
         self.sessions[session.user_id] = session
         return session
 
+    def remove(self, user_id: str) -> None:
+        self.sessions.pop(user_id, None)
+
     def require(self, user_id: str) -> ManagedSession:
         session = self.get(user_id)
         if session is None:
@@ -132,11 +135,19 @@ class SessionManager:
             self._finalize_connect(new_session, ok, reason)
         return new_session
 
-    def disconnect(self, user_id: str) -> ManagedSession:
+    def disconnect(self, user_id: str) -> str:
         session = self.require(user_id)
-        self._close_session(session)
-        session.requires_2fa = False
-        return session
+        with self._session_context(session):
+            try:
+                session.client.logout()
+            except Exception:
+                logger.exception("falha ao executar logout da sessao %s", session.user_id)
+            try:
+                session.client.api.close()
+            except Exception:
+                logger.exception("falha ao fechar websocket da sessao %s", session.user_id)
+        self.remove(user_id)
+        return user_id
 
     def reconnect(self, user_id: str) -> ManagedSession:
         session = self.require(user_id)
@@ -348,16 +359,7 @@ def session_status(x_user_id: str | None = Header(default=None)) -> dict[str, An
 def disconnect_session(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
     session_manager.disconnect(user_id)
-
-    def operation(session: ManagedSession) -> dict[str, Any]:
-        return {
-            "user_id": user_id,
-            "connected": bool(session.client.check_connect()),
-            "requires_2fa": session.requires_2fa,
-            "email": session.email,
-        }
-
-    return build_success(session_manager.run(user_id, operation))
+    return build_success({"user_id": user_id, "connected": False})
 
 
 @app.post("/sessions/reconnect")

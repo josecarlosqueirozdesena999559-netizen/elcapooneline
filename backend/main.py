@@ -218,7 +218,10 @@ async def bullex_buy_real(
 @app.post("/bullex/disconnect")
 async def bullex_disconnect(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     status_code, payload = await call_bullex_service("POST", "/sessions/disconnect", auth["user_id"])
-    sync_user_store_from_payload(auth["user_id"], payload)
+    if payload.get("ok"):
+        user_store.upsert(auth["user_id"], connected=False, requires_2fa=False)
+    else:
+        sync_user_store_from_payload(auth["user_id"], payload)
     return json_response(status_code, payload)
 
 
