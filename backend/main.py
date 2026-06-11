@@ -4,6 +4,7 @@ from typing import Any
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from backend.user_store import UserStore, create_user_store
@@ -23,10 +24,25 @@ class GatewayConfig:
         self.panel_api_key = os.getenv("PANEL_API_KEY", "")
         self.supabase_url = os.getenv("SUPABASE_URL", "").strip()
         self.supabase_service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        self.cors_origins = [
+            origin.strip()
+            for origin in os.getenv(
+                "CORS_ORIGINS",
+                "http://localhost:5173,http://localhost:3000,http://2.25.187.128:8080",
+            ).split(",")
+            if origin.strip()
+        ]
 
 
 config = GatewayConfig()
 app = FastAPI(title="backend-gateway", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 user_store: UserStore = create_user_store()
 
 
