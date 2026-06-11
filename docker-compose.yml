@@ -1,0 +1,11 @@
+services:
+  bullex-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bullex-service
+    environment:
+      BULLEX_MAX_CONCURRENT_API_CALLS: "1"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
