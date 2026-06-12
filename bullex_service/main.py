@@ -319,6 +319,12 @@ class SessionManager:
             except Exception as exc:
                 self.remove(session.user_id)
                 self.store.mark_disconnected(session.user_id)
+                if restore_failure_reason == "invalid_ssid":
+                    logger.warning(
+                        "[SESSION_RESTORE] user_id=%s status=unsupported reason=broker_invalidates_ssid",
+                        session.user_id,
+                    )
+                    continue
                 logger.warning(
                     "[SESSION_RESTORE] user_id=%s status=failed reason=%s",
                     session.user_id,
@@ -329,7 +335,6 @@ class SessionManager:
         if self.store is None:
             return {
                 "stored_sessions": 0,
-                "has_encryption_key": False,
                 "users": [],
             }
         return self.store.persistence_debug()
@@ -566,6 +571,14 @@ session_manager = SessionManager(create_session_store())
 
 @app.on_event("startup")
 def restore_persisted_sessions() -> None:
+    persistence_debug_registered = any(
+        getattr(route, "path", None) == "/sessions/persistence-debug"
+        for route in app.routes
+    )
+    logger.info(
+        "[SESSION_PERSISTENCE_ROUTE] path=/sessions/persistence-debug registered=%s",
+        persistence_debug_registered,
+    )
     session_manager.restore_sessions()
 
 

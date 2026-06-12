@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -36,9 +37,13 @@ class SessionPersistenceTests(unittest.TestCase):
                 ).fetchone()[0]
 
             self.assertNotIn("password", columns)
+            self.assertNotIn("cookies", columns)
+            self.assertNotIn("session_data", columns)
             self.assertNotEqual(encrypted_token, "sensitive-ssid-token")
-            restored = store.load_connected()
+            with self.assertLogs("bullex-service", level="INFO") as logs:
+                restored = store.load_connected()
             self.assertEqual(restored[0].session_token, "sensitive-ssid-token")
+            self.assertIn("ssid_length=20", "\n".join(logs.output))
 
     def test_session_manager_restores_with_persisted_ssid(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -97,6 +102,30 @@ class SessionPersistenceTests(unittest.TestCase):
                 "\n".join(logs.output),
             )
 
+    def test_session_manager_marks_invalid_ssid_as_broker_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(str(Path(directory) / "sessions.db"), "test-secret")
+            store.save_connected("user-session", "user@example.com", "PRACTICE", "persisted-ssid")
+            fake_client = SimpleNamespace(
+                connect=Mock(side_effect=AssertionError("restore must not login with password")),
+                restore_with_ssid=Mock(return_value=(False, "invalid_ssid")),
+                get_balance_mode=lambda: "PRACTICE",
+            )
+            manager = bullex_main.SessionManager(store)
+            with (
+                patch.object(bullex_main, "Bullex", return_value=fake_client),
+                patch.object(manager, "_session_context", side_effect=lambda session: _FakeContext(session)),
+                self.assertLogs("bullex-service", level="WARNING") as logs,
+            ):
+                manager.restore_sessions()
+
+            self.assertIsNone(manager.get("user-session"))
+            fake_client.connect.assert_not_called()
+            self.assertIn(
+                "status=unsupported reason=broker_invalidates_ssid",
+                "\n".join(logs.output),
+            )
+
     def test_session_persistence_debug_does_not_expose_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SessionStore(str(Path(directory) / "sessions.db"), "test-secret")
@@ -110,14 +139,12 @@ class SessionPersistenceTests(unittest.TestCase):
             debug = store.persistence_debug()
 
             self.assertEqual(debug["stored_sessions"], 1)
-            self.assertEqual(debug["has_encryption_key"], True)
             self.assertEqual(
                 debug["users"][0],
                 {
                     "user_id": "user-session",
-                    "email_present": True,
                     "ssid_present": True,
-                    "password_present": False,
+                    "session_file_exists": True,
                     "last_connected_at": debug["users"][0]["last_connected_at"],
                 },
             )
@@ -135,9 +162,72 @@ class SessionPersistenceTests(unittest.TestCase):
             debug,
             {
                 "stored_sessions": 0,
-                "has_encryption_key": False,
                 "users": [],
             },
+        )
+
+    def test_persistence_debug_route_is_registered(self) -> None:
+        routes = {
+            route.path: route.methods
+            for route in bullex_main.app.routes
+            if hasattr(route, "methods")
+        }
+
+        self.assertIn("/sessions/persistence-debug", routes)
+        self.assertIn("GET", routes["/sessions/persistence-debug"])
+
+    def test_save_and_load_logs_have_matching_ssid_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(str(Path(directory) / "sessions.db"), "test-secret")
+            with self.assertLogs("bullex-service", level="INFO") as logs:
+                store.save_connected("user-session", "user@example.com", "PRACTICE", "persisted-ssid")
+                store.load_connected()
+
+            messages = "\n".join(logs.output)
+            fingerprint = hashlib.sha256(b"persisted-ssid").hexdigest()[:12]
+            self.assertIn(f"[SESSION_SAVE] user_id=user-session ssid_present=True ssid_length=14", messages)
+            self.assertIn(f"[SESSION_LOAD] user_id=user-session ssid_present=True ssid_length=14", messages)
+            self.assertEqual(messages.count("persisted_fields=ssid"), 2)
+            self.assertEqual(messages.count("token_present=False"), 2)
+            self.assertEqual(messages.count("cookies_present=False"), 2)
+            self.assertEqual(messages.count("session_data_present=False"), 2)
+            self.assertEqual(messages.count(f"ssid_fingerprint={fingerprint}"), 2)
+
+    def test_gateway_persistence_debug_route_is_registered_and_forwards_raw_data(self) -> None:
+        from backend import main
+
+        routes = {
+            route.path: route.methods
+            for route in main.app.routes
+            if hasattr(route, "methods")
+        }
+        expected = {
+            "stored_sessions": 1,
+            "users": [
+                {
+                    "user_id": "user-session",
+                    "ssid_present": True,
+                    "session_file_exists": True,
+                    "last_connected_at": "2026-06-12T12:00:00+00:00",
+                }
+            ],
+        }
+
+        self.assertIn("/sessions/persistence-debug", routes)
+        self.assertIn("GET", routes["/sessions/persistence-debug"])
+
+        with patch.object(
+            main,
+            "call_bullex_service",
+            new=AsyncMock(return_value=(200, main.build_success(expected))),
+        ) as service_call:
+            response = asyncio.run(main.sessions_persistence_debug())
+
+        self.assertEqual(json.loads(response.body), expected)
+        service_call.assert_awaited_once_with(
+            "GET",
+            "/sessions/persistence-debug",
+            "persistence-debug",
         )
 
 

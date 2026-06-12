@@ -253,16 +253,24 @@ async def require_headers(
     x_api_key: str | None = Header(default=None),
     x_user_id: str | None = Header(default=None),
 ) -> dict[str, str]:
-    if not config.panel_api_key:
-        raise HTTPException(status_code=500, detail="PANEL_API_KEY_NOT_CONFIGURED")
-    if x_api_key != config.panel_api_key:
-        raise HTTPException(status_code=401, detail="INVALID_API_KEY")
+    require_api_key_value(x_api_key)
 
     user_id = (x_user_id or "").strip()
     if not user_id:
         raise HTTPException(status_code=400, detail="MISSING_USER_ID")
 
     return {"user_id": user_id}
+
+
+def require_api_key_value(x_api_key: str | None) -> None:
+    if not config.panel_api_key:
+        raise HTTPException(status_code=500, detail="PANEL_API_KEY_NOT_CONFIGURED")
+    if x_api_key != config.panel_api_key:
+        raise HTTPException(status_code=401, detail="INVALID_API_KEY")
+
+
+async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    require_api_key_value(x_api_key)
 
 
 @app.exception_handler(HTTPException)
@@ -720,6 +728,15 @@ async def read_restored_session_status(user_id: str) -> bool:
 
 @app.on_event("startup")
 async def restore_robot_states() -> None:
+    persistence_debug_registered = any(
+        getattr(route, "path", None) == "/sessions/persistence-debug"
+        for route in app.routes
+    )
+    logger.info(
+        "[SESSION_PERSISTENCE_ROUTE] service=backend-gateway "
+        "path=/sessions/persistence-debug registered=%s",
+        persistence_debug_registered,
+    )
     try:
         persisted_states = robot_persistence.load_states()
     except Exception:
@@ -863,6 +880,22 @@ async def robot_persistence_status(auth: dict[str, str] = Depends(require_header
         logger.exception("[ROBOT PERSISTENCE ERROR] user_id=%s", auth["user_id"])
         payload = {"session_restored": False, "robot_restored": False, "last_restore_at": None}
     return JSONResponse(status_code=200, content=payload)
+
+
+@app.get("/sessions/persistence-debug")
+async def sessions_persistence_debug(_: None = Depends(require_api_key)) -> JSONResponse:
+    status_code, payload = await call_bullex_service(
+        "GET",
+        "/sessions/persistence-debug",
+        "persistence-debug",
+    )
+    if not payload.get("ok"):
+        return json_response(status_code, payload)
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return json_response(502, build_error("INVALID_BULLEX_RESPONSE"))
+    return JSONResponse(status_code=status_code, content=data)
 
 
 @app.get("/debug/bullex-connection-schema")

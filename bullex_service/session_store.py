@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import logging
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -9,6 +10,9 @@ from pathlib import Path
 from collections.abc import Iterator
 
 from cryptography.fernet import Fernet, InvalidToken
+
+
+logger = logging.getLogger("bullex-service")
 
 
 @dataclass
@@ -53,6 +57,7 @@ class SessionStore:
                 """,
                 (user_id, email, account_mode, encrypted_token, now, now),
             )
+        self._log_session_value("SESSION_SAVE", user_id, session_token)
 
     def mark_disconnected(self, user_id: str, *, revoke_token: bool = False) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -83,8 +88,10 @@ class SessionStore:
             try:
                 token = self._fernet.decrypt(row["encrypted_session_token"].encode("ascii")).decode("utf-8")
             except (InvalidToken, UnicodeError):
+                self._log_session_value("SESSION_LOAD", row["user_id"], None)
                 self.mark_disconnected(row["user_id"])
                 continue
+            self._log_session_value("SESSION_LOAD", row["user_id"], token)
             sessions.append(
                 PersistedSession(
                     user_id=row["user_id"],
@@ -119,18 +126,29 @@ class SessionStore:
             users.append(
                 {
                     "user_id": row["user_id"],
-                    "email_present": bool(row["email"]),
                     "ssid_present": ssid_present,
-                    "password_present": False,
+                    "session_file_exists": Path(self.database_path).is_file(),
                     "last_connected_at": row["last_connected_at"],
                 }
             )
 
         return {
             "stored_sessions": len(users),
-            "has_encryption_key": True,
             "users": users,
         }
+
+    def _log_session_value(self, event: str, user_id: str, ssid: str | None) -> None:
+        logger.info(
+            "[%s] user_id=%s ssid_present=%s ssid_length=%s path=%s "
+            "persisted_fields=ssid token_present=False cookies_present=False "
+            "session_data_present=False ssid_fingerprint=%s",
+            event,
+            user_id,
+            bool(ssid),
+            len(ssid) if ssid else 0,
+            self.database_path,
+            hashlib.sha256(ssid.encode("utf-8")).hexdigest()[:12] if ssid else "none",
+        )
 
     def _initialize(self) -> None:
         with self._connect() as connection:
