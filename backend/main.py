@@ -1,6 +1,8 @@
 import logging
 import os
 import asyncio
+from contextlib import suppress
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -9,6 +11,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from backend.auto_trader import (
+    AutoTrader,
+    RobotConfigUpdate,
+    STATUS_PENDING_RESULT,
+    STATUS_WAITING_NEXT_CYCLE,
+)
 from backend.openai_signal_reviewer import review_signal
 from backend.signal_engine import analyze_signal
 from backend.user_store import UserStore, create_user_store
@@ -17,6 +25,8 @@ from backend.user_store import UserStore, create_user_store
 logger = logging.getLogger("backend-gateway")
 
 ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
+REAL_TRADING_LOCKED = "REAL_TRADING_LOCKED"
+SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
 SESSION_DISCONNECTED = "SESSION_DISCONNECTED"
 BINARY_ALLOWED_ASSETS = [
     "EURUSD-OTC",
@@ -102,6 +112,7 @@ class GatewayConfig:
         self.panel_api_key = os.getenv("PANEL_API_KEY", "")
         self.supabase_url = os.getenv("SUPABASE_URL", "").strip()
         self.supabase_service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        self.robot_real_max_entry = float(os.getenv("ROBOT_REAL_MAX_ENTRY", "10"))
         self.cors_origins = [
             origin.strip()
             for origin in os.getenv(
@@ -122,6 +133,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 user_store: UserStore = create_user_store()
+auto_trader = AutoTrader()
+robot_tasks: dict[str, asyncio.Task[None]] = {}
 
 
 def normalize_ws_value(value: Any) -> str:
@@ -163,6 +176,7 @@ def extract_candles(payload: dict[str, Any]) -> list[dict[str, Any]]:
         return [item for item in data["candles"] if isinstance(item, dict)]
     return []
 
+
 def is_session_disconnected(payload: dict[str, Any]) -> bool:
     error = str(payload.get("error") or "").strip().upper()
     return error in {"SESSION_NOT_FOUND", "SESSION_DISCONNECTED"}
@@ -191,6 +205,7 @@ async def stream_market_updates(websocket: WebSocket, user_id: str, active: str)
             )
             if not payload.get("ok"):
                 if is_session_disconnected(payload):
+                    mark_disconnected_from_payload(user_id, payload)
                     await close_market_websocket(
                         websocket,
                         {
@@ -328,6 +343,8 @@ def sync_user_store_from_payload(
     is_new_connection: bool = False,
 ) -> None:
     if not payload.get("ok"):
+        if payload.get("error") in {SESSION_DISCONNECTED, SESSION_NOT_FOUND}:
+            user_store.disconnect(user_id)
         return
 
     data = payload.get("data")
@@ -342,6 +359,54 @@ def sync_user_store_from_payload(
             user_store.update_connection(user_id, updates)
 
 
+def mark_disconnected_from_payload(user_id: str, payload: dict[str, Any]) -> None:
+    if payload.get("error") not in {SESSION_DISCONNECTED, SESSION_NOT_FOUND}:
+        return
+    try:
+        user_store.disconnect(user_id)
+    except Exception:
+        logger.exception("falha ao marcar sessao desconectada para %s", user_id)
+
+
+def extract_account_status(payload: dict[str, Any]) -> tuple[bool, str | None]:
+    data = payload.get("data")
+    if not payload.get("ok") or not isinstance(data, dict):
+        return False, None
+    connected = bool(data.get("connected"))
+    mode = data.get("active_mode") or data.get("mode")
+    return connected, str(mode).strip().upper() if mode else None
+
+
+def extract_payout(payload: dict[str, Any], symbol: str) -> float | None:
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return None
+    for item in data:
+        if not isinstance(item, dict) or normalize_binary_active(str(item.get("symbol") or "")) != symbol:
+            continue
+        try:
+            return float(item["payout"])
+        except (KeyError, TypeError, ValueError):
+            return None
+    return None
+
+
+def robot_stop_reason(state: Any) -> str | None:
+    if state.operation_in_progress:
+        return "OPERATION_IN_PROGRESS"
+    if state.stop_win > 0 and state.profit >= state.stop_win:
+        return "STOP_WIN_REACHED"
+    if state.stop_loss > 0 and state.profit <= -state.stop_loss:
+        return "STOP_LOSS_REACHED"
+    return None
+
+
+def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
+    data = state.to_dict()
+    data.update(extra)
+    return build_success(data)
+
+
 async def analyze_active_signal(user_id: str, symbol: str) -> tuple[int, dict[str, Any]]:
     status_code, payload = await call_bullex_service(
         "GET",
@@ -349,6 +414,7 @@ async def analyze_active_signal(user_id: str, symbol: str) -> tuple[int, dict[st
         user_id,
         params={"active": symbol, "interval": 60, "count": 100},
     )
+    mark_disconnected_from_payload(user_id, payload)
     if not payload.get("ok"):
         if is_session_disconnected(payload):
             return 409, build_error(SESSION_DISCONNECTED)
@@ -387,6 +453,199 @@ async def scan_local_signals(user_id: str, limit: int = 5, include_wait: bool = 
     limited_signals = signals[:limit]
     logger.info("[SIGNAL SCAN RESULT] count=%s", len(limited_signals))
     return 200, build_success(limited_signals)
+
+
+async def execute_robot_cycle(
+    user_id: str,
+    *,
+    required_mode: str | None = None,
+    confirm_real_header: bool = False,
+) -> tuple[int, dict[str, Any]]:
+    async with auto_trader.lock(user_id):
+        can_run, state = auto_trader.prepare_cycle(user_id)
+        if not can_run:
+            if state.status == STATUS_WAITING_NEXT_CYCLE:
+                logger.info("[ROBOT WAITING NEXT CYCLE] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
+            return 200, build_robot_payload(state)
+
+        logger.info("[ROBOT TICK] user_id=%s", user_id)
+        try:
+            if required_mode is not None and state.account_mode != required_mode:
+                return 409, build_error(f"ACCOUNT_MODE_NOT_{required_mode}")
+
+            if state.account_mode == "REAL" and (
+                not state.allow_real
+                or not state.confirm_real
+                or not confirm_real_header
+                or state.entry_value > config.robot_real_max_entry
+            ):
+                auto_trader.lock_real(user_id)
+                logger.warning("[ROBOT REAL BLOCKED] user_id=%s", user_id)
+                return 403, build_error(REAL_TRADING_LOCKED)
+
+            status_code, account_payload = await call_bullex_service("GET", "/sessions/status", user_id)
+            mark_disconnected_from_payload(user_id, account_payload)
+            connected, active_mode = extract_account_status(account_payload)
+            expected_bullex_mode = "PRACTICE" if state.account_mode == "DEMO" else "REAL"
+            if not connected:
+                state = auto_trader.reject(user_id, "ACCOUNT_DISCONNECTED")
+                logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=ACCOUNT_DISCONNECTED", user_id)
+                return 200, build_robot_payload(state)
+            if active_mode != expected_bullex_mode:
+                state = auto_trader.reject(user_id, f"ACCOUNT_MODE_MUST_BE_{expected_bullex_mode}")
+                logger.info(
+                    "[ROBOT SIGNAL REJECTED] user_id=%s reason=ACCOUNT_MODE_MUST_BE_%s",
+                    user_id,
+                    expected_bullex_mode,
+                )
+                return 200, build_robot_payload(state)
+
+            scan_status, scan_payload = await scan_local_signals(
+                user_id,
+                limit=len(BINARY_ALLOWED_ASSETS),
+                include_wait=True,
+            )
+            if not scan_payload.get("ok"):
+                state = auto_trader.fail(user_id, str(scan_payload.get("error") or "SIGNAL_SCAN_FAILED"))
+                logger.error("[ROBOT ERROR] user_id=%s error=%s", user_id, state.rejection_reason)
+                return scan_status, build_robot_payload(state)
+
+            signals = [item for item in scan_payload.get("data", []) if isinstance(item, dict)]
+            if not signals:
+                state = auto_trader.reject(user_id, "NO_SIGNAL")
+                logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=NO_SIGNAL", user_id)
+                return 200, build_robot_payload(state)
+
+            selected = max(
+                signals,
+                key=lambda item: (
+                    int(item.get("confidence") or 0),
+                    int(item.get("strength") or 0),
+                ),
+            )
+            symbol = normalize_binary_active(str(selected.get("symbol") or ""))
+            payout_status, payout_payload = await call_bullex_service(
+                "GET",
+                "/payouts",
+                user_id,
+                params={"active": symbol},
+            )
+            mark_disconnected_from_payload(user_id, payout_payload)
+            payout = extract_payout(payout_payload, symbol) if payout_payload.get("ok") else None
+            selected = {**selected, "symbol": symbol, "payout": payout}
+            auto_trader.select_signal(user_id, selected)
+            logger.info(
+                "[ROBOT SIGNAL SELECTED] user_id=%s symbol=%s signal=%s confidence=%s payout=%s",
+                user_id,
+                symbol,
+                selected.get("signal"),
+                selected.get("confidence"),
+                payout,
+            )
+
+            rejection = robot_stop_reason(state)
+            if rejection is None and not is_binary_asset_allowed(symbol):
+                rejection = ASSET_NOT_ALLOWED
+            if rejection is None and selected.get("signal") not in {"CALL", "PUT"}:
+                rejection = "SIGNAL_WAIT"
+            if rejection is None and int(selected.get("confidence") or 0) < state.min_confidence:
+                rejection = "CONFIDENCE_BELOW_MINIMUM"
+            if rejection is None and (payout is None or payout < state.min_payout):
+                rejection = "PAYOUT_BELOW_MINIMUM"
+            if payout_status >= 400 and rejection is None:
+                rejection = str(payout_payload.get("error") or "PAYOUT_UNAVAILABLE")
+            if rejection is None and not state.enabled:
+                rejection = "ROBOT_STOPPED"
+
+            if rejection is not None:
+                state = auto_trader.reject(user_id, rejection)
+                logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=%s", user_id, rejection)
+                return 200, build_robot_payload(state)
+
+            order_body = {
+                "active": symbol,
+                "action": str(selected["signal"]).lower(),
+                "amount": state.entry_value,
+                "expiration": 1,
+            }
+            order_path = "/orders/buy-demo"
+            if state.account_mode == "REAL":
+                order_path = "/orders/buy-real"
+                order_body["confirm_real"] = True
+
+            order_status, order_payload = await call_bullex_service(
+                "POST",
+                order_path,
+                user_id,
+                json_body=order_body,
+            )
+            mark_disconnected_from_payload(user_id, order_payload)
+            if not order_payload.get("ok"):
+                state = auto_trader.fail(user_id, str(order_payload.get("error") or "ORDER_FAILED"))
+                logger.error("[ROBOT ERROR] user_id=%s error=%s", user_id, state.rejection_reason)
+                return order_status, build_robot_payload(state)
+
+            order_data = order_payload.get("data") if isinstance(order_payload.get("data"), dict) else {}
+            trade = {
+                **order_data,
+                "mode": state.account_mode,
+                "active": symbol,
+                "direction": selected["signal"],
+                "amount": state.entry_value,
+                "confidence": selected["confidence"],
+                "payout": payout,
+                "expiration": "M1",
+                "result": STATUS_PENDING_RESULT,
+                "sent_at": datetime.now(timezone.utc).isoformat(),
+            }
+            state = auto_trader.record_trade(user_id, trade)
+            log_label = "[ROBOT DEMO ORDER SENT]" if state.account_mode == "DEMO" else "[ROBOT REAL ORDER SENT]"
+            logger.info("%s user_id=%s order_id=%s", log_label, user_id, trade.get("order_id"))
+            return 200, build_robot_payload(state)
+        except Exception as exc:
+            state = auto_trader.fail(user_id, "ROBOT_CYCLE_ERROR")
+            logger.exception("[ROBOT ERROR] user_id=%s error=%s", user_id, exc)
+            return 500, build_robot_payload(state)
+
+
+async def robot_worker(user_id: str) -> None:
+    try:
+        while auto_trader.get(user_id).enabled:
+            await execute_robot_cycle(user_id)
+            state = auto_trader.get(user_id)
+            delay = max(1, state.to_dict()["seconds_until_next_cycle"])
+            await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("[ROBOT ERROR] user_id=%s error=WORKER_STOPPED", user_id)
+        auto_trader.fail(user_id, "WORKER_STOPPED")
+    finally:
+        current = asyncio.current_task()
+        if robot_tasks.get(user_id) is current:
+            robot_tasks.pop(user_id, None)
+
+
+def ensure_robot_worker(user_id: str) -> None:
+    task = robot_tasks.get(user_id)
+    if task is None or task.done():
+        robot_tasks[user_id] = asyncio.create_task(robot_worker(user_id))
+
+
+async def stop_robot_worker(user_id: str) -> None:
+    task = robot_tasks.pop(user_id, None)
+    if task is None or task.done() or task is asyncio.current_task():
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+@app.on_event("shutdown")
+async def shutdown_robot_workers() -> None:
+    for user_id in list(robot_tasks):
+        auto_trader.stop(user_id)
+        await stop_robot_worker(user_id)
 
 
 @app.get("/health")
@@ -454,6 +713,66 @@ async def signals_top_reviewed(auth: dict[str, str] = Depends(require_headers)) 
         reverse=True,
     )
     return json_response(200, build_success(reviewed))
+
+
+@app.get("/robot/state")
+async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    return json_response(200, build_robot_payload(auto_trader.get(auth["user_id"])))
+
+
+@app.post("/robot/config")
+async def robot_config(
+    body: RobotConfigUpdate,
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    state = auto_trader.update_config(auth["user_id"], body)
+    if state.enabled:
+        ensure_robot_worker(auth["user_id"])
+    else:
+        await stop_robot_worker(auth["user_id"])
+    return json_response(200, build_robot_payload(state))
+
+
+@app.post("/robot/start")
+async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    state = auto_trader.start(auth["user_id"])
+    ensure_robot_worker(auth["user_id"])
+    logger.info("[ROBOT START] user_id=%s", auth["user_id"])
+    return json_response(200, build_robot_payload(state))
+
+
+@app.post("/robot/stop")
+async def robot_stop(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    state = auto_trader.stop(auth["user_id"])
+    await stop_robot_worker(auth["user_id"])
+    logger.info("[ROBOT STOP] user_id=%s", auth["user_id"])
+    return json_response(200, build_robot_payload(state))
+
+
+@app.post("/robot/tick")
+async def robot_tick(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    status_code, payload = await execute_robot_cycle(auth["user_id"])
+    return json_response(status_code, payload)
+
+
+@app.post("/robot/execute-demo")
+async def robot_execute_demo(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    status_code, payload = await execute_robot_cycle(auth["user_id"], required_mode="DEMO")
+    return json_response(status_code, payload)
+
+
+@app.post("/robot/execute-real")
+async def robot_execute_real(
+    x_confirm_real: str | None = Header(default=None),
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    confirmed = str(x_confirm_real or "").strip().lower() == "true"
+    status_code, payload = await execute_robot_cycle(
+        auth["user_id"],
+        required_mode="REAL",
+        confirm_real_header=confirmed,
+    )
+    return json_response(status_code, payload)
 
 
 @app.websocket("/ws/market")
@@ -556,6 +875,7 @@ async def bullex_change_mode(
 @app.get("/bullex/assets")
 async def bullex_assets(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     status_code, payload = await call_bullex_service("GET", "/assets", auth["user_id"])
+    mark_disconnected_from_payload(auth["user_id"], payload)
     if payload.get("ok") and isinstance(payload.get("data"), list):
         allowed_assets = [
             asset
@@ -585,6 +905,7 @@ async def bullex_candles(
     if endtime is not None:
         params["endtime"] = endtime
     status_code, payload = await call_bullex_service("GET", "/candles", auth["user_id"], params=params)
+    mark_disconnected_from_payload(auth["user_id"], payload)
     return json_response(status_code, payload)
 
 
@@ -598,6 +919,7 @@ async def bullex_payouts(
     active = normalize_binary_active(active) if active is not None else None
     params = {"active": active} if active is not None else None
     status_code, payload = await call_bullex_service("GET", "/payouts", auth["user_id"], params=params)
+    mark_disconnected_from_payload(auth["user_id"], payload)
     if payload.get("ok") and active and isinstance(payload.get("data"), list):
         payout_item = next(
             (

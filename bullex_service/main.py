@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 import bullexapi.global_value as global_value
 from bullexapi.stable_api import Bullex
+from websocket._exceptions import WebSocketConnectionClosedException
 
 
 logging.basicConfig(level=logging.INFO)
@@ -21,6 +22,7 @@ logger = logging.getLogger("bullex-service")
 ALLOWED_BALANCE_MODES = {"PRACTICE", "REAL", "TOURNAMENT"}
 ALLOWED_ACTIONS = {"call", "put"}
 SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
+SESSION_DISCONNECTED = "SESSION_DISCONNECTED"
 ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
 BINARY_ALLOWED_ASSETS = [
     "EURUSD-OTC",
@@ -46,6 +48,7 @@ BINARY_ALLOWED_ASSETS = [
     "AUDCHF-OTC",
 ]
 BINARY_ALLOWED_ASSET_SET = set(BINARY_ALLOWED_ASSETS)
+SESSION_EXCEPTION_TYPES = (WebSocketConnectionClosedException, ConnectionError, TimeoutError)
 
 
 class ServiceError(Exception):
@@ -91,6 +94,8 @@ class ManagedSession:
     user_id: str
     client: Bullex
     email: str | None = None
+    password: str | None = None
+    sms_code: str | None = None
     desired_mode: str = "PRACTICE"
     requires_2fa: bool = False
     state: SessionState = field(default_factory=SessionState)
@@ -125,16 +130,51 @@ class SessionManager:
             raise ServiceError(SESSION_NOT_FOUND, 404)
         return session
 
-    def run(self, user_id: str, operation):
+    def ensure_session_alive(self, user_id: str) -> ManagedSession:
+        logger.info("[SESSION-CHECK] %s", user_id)
         session = self.require(user_id)
-        with self._session_context(session):
-            return operation(session)
+        if session.requires_2fa:
+            logger.info("[SESSION-ALIVE] %s", user_id)
+            return session
+
+        alive = False
+        dead_reason = "UNKNOWN"
+        try:
+            with self._session_context(session):
+                alive = self._is_session_alive(session)
+        except SESSION_EXCEPTION_TYPES as exc:
+            dead_reason = type(exc).__name__
+        except Exception as exc:
+            dead_reason = type(exc).__name__
+
+        if alive:
+            logger.info("[SESSION-ALIVE] %s", user_id)
+            return session
+
+        logger.warning("[SESSION-DEAD] %s %s", user_id, dead_reason)
+        return self._attempt_reconnect(session, dead_reason)
+
+    def run(self, user_id: str, operation):
+        session = self.ensure_session_alive(user_id)
+        try:
+            with self._session_context(session):
+                return operation(session)
+        except ServiceError as exc:
+            if exc.message == SESSION_DISCONNECTED:
+                logger.warning("[SESSION-DISCONNECTED] %s", user_id)
+                self.remove(user_id)
+            raise
+        except SESSION_EXCEPTION_TYPES as exc:
+            self._mark_disconnected(user_id, type(exc).__name__)
+        except Exception as exc:
+            self._mark_disconnected(user_id, type(exc).__name__)
 
     def connect(self, user_id: str, payload: ConnectRequest) -> ManagedSession:
         existing = self.get(user_id)
 
         if payload.sms_code and existing and not payload.email and not payload.password:
             session = existing
+            session.sms_code = payload.sms_code
             session.desired_mode = normalize_mode(payload.account_mode)
             with self._session_context(session):
                 ok, reason = session.client.connect_2fa(payload.sms_code)
@@ -148,6 +188,8 @@ class SessionManager:
             user_id=user_id,
             client=Bullex(payload.email, payload.password),
             email=payload.email,
+            password=payload.password,
+            sms_code=payload.sms_code,
             desired_mode=normalize_mode(payload.account_mode),
         )
 
@@ -172,14 +214,74 @@ class SessionManager:
             except Exception:
                 logger.exception("falha ao fechar websocket da sessao %s", session.user_id)
         self.remove(user_id)
+        logger.info("[SESSION-DISCONNECTED] %s", user_id)
         return user_id
 
     def reconnect(self, user_id: str) -> ManagedSession:
         session = self.require(user_id)
-        with self._session_context(session):
-            ok, reason = session.client.connect()
-            self._finalize_connect(session, ok, reason)
-        return session
+        return self._attempt_reconnect(session, "MANUAL")
+
+    def _is_session_alive(self, session: ManagedSession) -> bool:
+        check_connect = getattr(session.client, "check_connect", None)
+        if callable(check_connect) and not bool(check_connect()):
+            return False
+
+        websocket_alive = getattr(session.client, "websocket_alive", None)
+        if callable(websocket_alive):
+            return bool(websocket_alive())
+        if websocket_alive is not None:
+            return bool(websocket_alive)
+
+        api = getattr(session.client, "api", None)
+        api_websocket_alive = getattr(api, "websocket_alive", None)
+        if callable(api_websocket_alive):
+            return bool(api_websocket_alive())
+        if api_websocket_alive is not None:
+            return bool(api_websocket_alive)
+
+        return True
+
+    def _attempt_reconnect(self, session: ManagedSession, reason: str) -> ManagedSession:
+        user_id = session.user_id
+        logger.info("[SESSION-RECONNECT-START] %s", user_id)
+        if not session.email or not session.password:
+            logger.warning("[SESSION-RECONNECT-FAILED] %s missing_credentials", user_id)
+            self._mark_disconnected(user_id, reason)
+
+        old_client = session.client
+        new_session = ManagedSession(
+            user_id=user_id,
+            client=Bullex(session.email, session.password),
+            email=session.email,
+            password=session.password,
+            sms_code=session.sms_code,
+            desired_mode=session.desired_mode,
+            requires_2fa=session.requires_2fa,
+        )
+
+        try:
+            try:
+                old_client.api.close()
+            except Exception:
+                pass
+            with self._session_context(new_session):
+                ok, connect_reason = new_session.client.connect(new_session.sms_code)
+                self._finalize_connect(new_session, ok, connect_reason)
+        except SESSION_EXCEPTION_TYPES as exc:
+            logger.warning("[SESSION-RECONNECT-FAILED] %s %s", user_id, type(exc).__name__)
+            self._mark_disconnected(user_id, type(exc).__name__)
+        except Exception as exc:
+            logger.warning("[SESSION-RECONNECT-FAILED] %s %s", user_id, exc)
+            self._mark_disconnected(user_id, type(exc).__name__)
+
+        self.upsert(new_session)
+        logger.info("[SESSION-RECONNECT-OK] %s", user_id)
+        return new_session
+
+    def _mark_disconnected(self, user_id: str, reason: str) -> None:
+        logger.warning("[SESSION-DISCONNECTED] %s", user_id)
+        self.remove(user_id)
+        raise ServiceError(SESSION_DISCONNECTED, 409) from None
 
     def _finalize_connect(self, session: ManagedSession, ok: bool, reason: Any) -> None:
         if ok:
@@ -299,7 +401,7 @@ def ensure_session_ready(session: ManagedSession) -> None:
     if session.requires_2fa:
         raise ServiceError("sessao aguardando 2FA", 409)
     if not session.client.check_connect():
-        raise ServiceError("sessao desconectada", 409)
+        raise ServiceError(SESSION_DISCONNECTED, 409)
 
 
 def parse_order_id(order_id: str) -> int | str:
@@ -379,14 +481,20 @@ def read_digital_payout(client: Bullex, active: str) -> int | float | None:
         return None
     try:
         payout = getter(active, seconds=3)
+    except SESSION_EXCEPTION_TYPES:
+        raise
     except Exception:
         logger.exception("falha ao consultar payout digital de %s", active)
-        return None
+        raise ServiceError(SESSION_DISCONNECTED, 409)
     return payout if payout else None
 
 
 app = FastAPI(title="bullex-service", version="0.1.0")
 session_manager = SessionManager()
+
+
+def ensure_session_alive(user_id: str) -> ManagedSession:
+    return session_manager.ensure_session_alive(user_id)
 
 
 @app.exception_handler(ServiceError)
@@ -434,7 +542,7 @@ def connect_session(payload: ConnectRequest, x_user_id: str | None = Header(defa
 
 
 @app.get("/sessions/status")
-def session_status(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
+def session_status(x_user_id: str | None = Header(default=None)) -> JSONResponse:
     user_id = require_user_id(x_user_id)
 
     def operation(current: ManagedSession) -> dict[str, Any]:
@@ -448,7 +556,16 @@ def session_status(x_user_id: str | None = Header(default=None)) -> dict[str, An
             "active_mode": active_mode,
         }
 
-    return build_success(session_manager.run(user_id, operation))
+    try:
+        return JSONResponse(status_code=200, content=build_success(session_manager.run(user_id, operation)))
+    except ServiceError as exc:
+        if exc.message in {SESSION_NOT_FOUND, SESSION_DISCONNECTED}:
+            status_code = 404 if exc.message == SESSION_NOT_FOUND else 409
+            return JSONResponse(
+                status_code=status_code,
+                content={"ok": False, "data": {"connected": False}, "error": exc.message},
+            )
+        raise
 
 
 @app.post("/sessions/disconnect")
@@ -517,9 +634,12 @@ def list_assets(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
         ensure_session_ready(session)
         try:
             return read_assets(session.client)
+        except SESSION_EXCEPTION_TYPES as exc:
+            logger.warning("[SESSION-DEAD] %s %s", user_id, type(exc).__name__)
+            raise ServiceError(SESSION_DISCONNECTED, 409) from exc
         except Exception as exc:
             logger.exception("falha ao listar ativos")
-            raise ServiceError("BULLEX_ASSETS_ERROR", 502) from exc
+            raise ServiceError(SESSION_DISCONNECTED, 409) from exc
 
     return build_success(session_manager.run(user_id, operation))
 
@@ -540,11 +660,14 @@ def get_candles(
         ensure_session_ready(session)
         try:
             candles = session.client.get_candles(active, interval, count, resolved_endtime)
+        except SESSION_EXCEPTION_TYPES as exc:
+            logger.warning("[SESSION-DEAD] %s %s", user_id, type(exc).__name__)
+            raise ServiceError(SESSION_DISCONNECTED, 409) from exc
         except Exception as exc:
             logger.exception("falha ao obter candles de %s", active)
-            raise ServiceError("BULLEX_CANDLES_ERROR", 502) from exc
+            raise ServiceError(SESSION_DISCONNECTED, 409) from exc
         if candles is None:
-            raise ServiceError("nao foi possivel obter candles", 502)
+            raise ServiceError(SESSION_DISCONNECTED, 409)
         return normalize_candles(candles)
 
     return build_success(session_manager.run(user_id, operation))
@@ -562,9 +685,12 @@ def get_payouts(active: str | None = None, x_user_id: str | None = Header(defaul
         else:
             try:
                 symbols = [asset["symbol"] for asset in read_assets(session.client)]
+            except SESSION_EXCEPTION_TYPES as exc:
+                logger.warning("[SESSION-DEAD] %s %s", user_id, type(exc).__name__)
+                raise ServiceError(SESSION_DISCONNECTED, 409) from exc
             except Exception as exc:
                 logger.exception("falha ao listar ativos para payouts")
-                raise ServiceError("BULLEX_PAYOUTS_ERROR", 502) from exc
+                raise ServiceError(SESSION_DISCONNECTED, 409) from exc
 
         return [
             {

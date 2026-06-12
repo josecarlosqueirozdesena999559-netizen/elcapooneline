@@ -221,6 +221,28 @@ else:
 - `POST /bullex/disconnect`
 - `GET /bullex/status` deve retornar `SESSION_NOT_FOUND` ou `connected: false`
 
+## Manual test stable BullEx session
+```bash
+curl -X POST -H "x-api-key: CHAVE" -H "x-user-id: teste1" -H "Content-Type: application/json" \
+  -d "{\"email\":\"EMAIL_BULLEX\",\"password\":\"SENHA_BULLEX\",\"account_mode\":\"PRACTICE\"}" \
+  http://localhost:8080/bullex/connect
+
+curl -H "x-api-key: CHAVE" -H "x-user-id: teste1" http://localhost:8080/bullex/account
+
+docker compose restart bullex-service
+
+curl -H "x-api-key: CHAVE" -H "x-user-id: teste1" http://localhost:8080/bullex/account
+
+curl -X POST -H "x-api-key: CHAVE" -H "x-user-id: teste1" -H "Content-Type: application/json" \
+  -d "{\"email\":\"EMAIL_BULLEX\",\"password\":\"SENHA_BULLEX\",\"account_mode\":\"PRACTICE\"}" \
+  http://localhost:8080/bullex/connect
+```
+
+Esperado:
+- Antes da queda, `/bullex/account` retorna os dados da conta.
+- Apos queda/restart do `bullex-service`, `/bullex/account` retorna erro controlado `SESSION_DISCONNECTED` ou `SESSION_NOT_FOUND`, nunca 500.
+- Apos reconectar, `/bullex/account` volta a retornar dados da conta.
+
 ## Manual test market flow
 ```bash
 curl http://localhost:8080/health
@@ -249,25 +271,57 @@ Esperado:
 ```bash
 curl http://localhost:8080/health
 
-curl -H "x-api-key: 40402400kkj" -H "x-user-id: teste1" "http://localhost:8080/bullex/candles?active=EURUSD-OTC&interval=60&count=2"
+curl -H "x-api-key: CHAVE" -H "x-user-id: teste1" "http://localhost:8080/bullex/candles?active=EURUSD-OTC&interval=60&count=2"
 
-npx wscat -c "ws://2.25.187.128:8080/ws/market?user_id=teste1&active=EURUSD-OTC&api_key=40402400kkj"
+npx wscat -c "ws://localhost:8080/ws/market?user_id=teste1&active=EURUSD-OTC&api_key=CHAVE"
 ```
-
 
 ## Manual test signal engine
 ```bash
-curl -H "x-api-key: 40402400kkj" -H "x-user-id: teste1" "http://localhost:8080/signals/analyze?active=EURUSD-OTC"
+curl -H "x-api-key: CHAVE" -H "x-user-id: teste1" "http://localhost:8080/signals/analyze?active=EURUSD-OTC"
 
-curl -H "x-api-key: 40402400kkj" -H "x-user-id: teste1" "http://localhost:8080/signals/scan"
+curl -H "x-api-key: CHAVE" -H "x-user-id: teste1" "http://localhost:8080/signals/scan"
 ```
 
+## Robot cycle
+
+O estado e mantido em memoria por `x-user-id`. O modo padrao e `DEMO`, o ciclo
+padrao e de 10 minutos e operacoes REAL permanecem bloqueadas ate que todas as
+confirmacoes sejam fornecidas.
+
+Endpoints:
+- `GET /robot/state`
+- `POST /robot/config`
+- `POST /robot/start`
+- `POST /robot/stop`
+- `POST /robot/tick`
+- `POST /robot/execute-demo`
+- `POST /robot/execute-real`
+
+Exemplo de configuracao DEMO:
+```bash
+curl -X POST \
+  -H "x-api-key: CHAVE" \
+  -H "x-user-id: teste1" \
+  -H "Content-Type: application/json" \
+  -d "{\"enabled\":true,\"account_mode\":\"DEMO\",\"entry_value\":2,\"cycle_minutes\":10,\"min_confidence\":85,\"min_payout\":80,\"stop_win\":50,\"stop_loss\":30}" \
+  http://localhost:8080/robot/config
+```
+
+Enquanto nao houver monitor de resultado, uma ordem aceita fica com
+`operation_in_progress: true` e `status: PENDING_RESULT`. WIN, LOSS e profit
+nao sao alterados ate a Fase 14.
+
+Para REAL, alem de `account_mode: REAL`, `allow_real: true` e
+`confirm_real: true`, a chamada de `POST /robot/execute-real` exige o header
+`x-confirm-real: true`. `entry_value` nao pode ultrapassar
+`ROBOT_REAL_MAX_ENTRY`, cujo padrao e `10`.
 
 ## Manual test OpenAI signal reviewer
 ```bash
-curl -H "x-api-key: 40402400kkj" -H "x-user-id: teste1" "http://localhost:8080/signals/review?active=EURUSD-OTC"
+curl -H "x-api-key: CHAVE" -H "x-user-id: teste1" "http://localhost:8080/signals/review?active=EURUSD-OTC"
 
-curl -H "x-api-key: 40402400kkj" -H "x-user-id: teste1" "http://localhost:8080/signals/top-reviewed"
+curl -H "x-api-key: CHAVE" -H "x-user-id: teste1" "http://localhost:8080/signals/top-reviewed"
 ```
 
 ## Supabase integration
