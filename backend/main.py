@@ -118,7 +118,7 @@ class GatewayConfig:
             origin.strip()
             for origin in os.getenv(
                 "CORS_ORIGINS",
-                "http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174",
+                "https://www.elcapobot.online,https://elcapobot.online,http://localhost:5173",
             ).split(",")
             if origin.strip()
         ]
@@ -690,6 +690,11 @@ async def shutdown_robot_workers() -> None:
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return build_success({"status": "healthy", "service": "backend-gateway"})
+
+
+@app.get("/cors-test")
+async def cors_test() -> dict[str, bool]:
+    return {"ok": True}
 
 
 @app.get("/signals/analyze")
