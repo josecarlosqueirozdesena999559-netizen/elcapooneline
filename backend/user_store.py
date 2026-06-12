@@ -21,6 +21,7 @@ class BullExUserRecord:
     account_mode: str | None = None
     currency: str | None = None
     last_balance: float | None = None
+    last_connected_at: str | None = None
 
 
 class UserStore(ABC):
@@ -131,7 +132,7 @@ class SupabaseUserStore(UserStore):
         self._ensure_user_row(user_id)
         rows = self._request(
             "GET",
-            f"/bullex_connections?user_id=eq.{quote(user_id, safe='')}&select=user_id,bullex_email,connected,requires_2fa,account_mode,currency,last_balance",
+            f"/bullex_connections?user_id=eq.{quote(user_id, safe='')}&select=user_id,bullex_email,connected,requires_2fa,account_mode,currency,last_balance,last_connected_at",
         )
         if not rows:
             return None
@@ -243,6 +244,7 @@ class SupabaseUserStore(UserStore):
             account_mode=row.get("account_mode"),
             currency=row.get("currency"),
             last_balance=row.get("last_balance"),
+            last_connected_at=row.get("last_connected_at"),
         )
 
     def _request(

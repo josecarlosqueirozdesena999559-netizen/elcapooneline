@@ -89,6 +89,37 @@ class AutoTrader:
     def get(self, user_id: str) -> RobotState:
         return self._states.setdefault(user_id, RobotState())
 
+    def restore(
+        self,
+        user_id: str,
+        payload: dict[str, Any],
+        trades: list[dict[str, Any]] | None = None,
+    ) -> RobotState:
+        state = RobotState()
+        datetime_fields = {"current_cycle_started_at", "next_cycle_at", "last_entry_at"}
+        for key, value in payload.items():
+            if not hasattr(state, key) or key in {"accuracy", "seconds_until_next_cycle"}:
+                continue
+            if key in datetime_fields and isinstance(value, str):
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            setattr(state, key, value)
+
+        if state.enabled and not state.operation_in_progress:
+            state.status = STATUS_WAITING_NEXT_CYCLE
+            state.rejection_reason = None
+        self._states[user_id] = state
+
+        restored_trades = [dict(trade) for trade in (trades or [])]
+        self._histories[user_id] = [
+            trade for trade in restored_trades if trade.get("result") in {"WIN", "LOSS", "TIMEOUT"}
+        ][-100:]
+        self._completed_order_ids[user_id] = {
+            str(trade.get("order_id"))
+            for trade in self._histories[user_id]
+            if trade.get("order_id") is not None
+        }
+        return state
+
     def lock(self, user_id: str) -> asyncio.Lock:
         return self._locks.setdefault(user_id, asyncio.Lock())
 

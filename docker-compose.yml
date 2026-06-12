@@ -13,6 +13,9 @@ services:
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENAI_MODEL: "${OPENAI_MODEL:-gpt-5.5}"
       ROBOT_REAL_MAX_ENTRY: "${ROBOT_REAL_MAX_ENTRY:-10}"
+      ROBOT_DB_PATH: "/data/backend-persistence.db"
+    volumes:
+      - backend-data:/data
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -26,6 +29,14 @@ services:
     container_name: bullex-service
     environment:
       BULLEX_MAX_CONCURRENT_API_CALLS: "1"
+      BULLEX_SESSION_DB_PATH: "/data/bullex-sessions.db"
+      BULLEX_SESSION_ENCRYPTION_KEY: "${BULLEX_SESSION_ENCRYPTION_KEY:-}"
+    volumes:
+      - bullex-session-data:/data
     expose:
       - "8000"
     restart: unless-stopped
+
+volumes:
+  backend-data:
+  bullex-session-data:

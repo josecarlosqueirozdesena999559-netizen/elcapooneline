@@ -325,6 +325,34 @@ Para REAL, alem de `account_mode: REAL`, `allow_real: true` e
 `x-confirm-real: true`. `entry_value` nao pode ultrapassar
 `ROBOT_REAL_MAX_ENTRY`, cujo padrao e `10`.
 
+## Fase 17 - persistencia de sessao e robo
+
+Antes de subir os containers, configure uma chave longa e estavel:
+
+```env
+BULLEX_SESSION_ENCRYPTION_KEY=uma-chave-secreta-longa-e-aleatoria
+```
+
+Essa chave cifra somente o SSID de sessao necessario para o reconnect. A senha
+BullEx, a chave OpenAI e as chaves Supabase nunca sao gravadas no banco de
+persistencia.
+
+Rode novamente `backend/supabase_schema.sql` no Supabase. O script e
+idempotente e cria as tabelas `robot_states`, `robot_trades` e
+`robot_restore_status`.
+
+O Docker Compose usa volumes nomeados para preservar o fallback SQLite:
+
+- `backend-data`: estado, metricas, diagnostico e historico do robo.
+- `bullex-session-data`: metadados e SSID BullEx cifrado.
+
+Depois de um restart:
+
+- `GET /robot/state` mantem `enabled=true`, restaura o ciclo e inclui
+  `connected=true` quando a sessao BullEx foi recuperada.
+- `GET /robot/persistence` retorna `session_restored`, `robot_restored` e
+  `last_restore_at`.
+
 ## Manual test OpenAI signal reviewer
 ```bash
 curl -H "x-api-key: CHAVE" -H "x-user-id: teste1" "http://localhost:8080/signals/review?active=EURUSD-OTC"

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 import bullexapi.global_value as global_value
 from bullexapi.stable_api import Bullex
+from bullex_service.session_store import SessionStore, create_session_store
 from websocket._exceptions import WebSocketConnectionClosedException
 
 
@@ -102,8 +103,9 @@ class ManagedSession:
 
 
 class SessionManager:
-    def __init__(self) -> None:
+    def __init__(self, store: SessionStore | None = None) -> None:
         self.sessions: dict[str, ManagedSession] = {}
+        self.store = store
         self._runtime_lock = RLock()
         self._max_concurrent_api_calls = read_max_concurrent_api_calls()
         self._call_gate = BoundedSemaphore(self._max_concurrent_api_calls)
@@ -179,6 +181,7 @@ class SessionManager:
             with self._session_context(session):
                 ok, reason = session.client.connect_2fa(payload.sms_code)
                 self._finalize_connect(session, ok, reason)
+            self._persist_connected(session)
             return session
 
         if not payload.email or not payload.password:
@@ -200,6 +203,7 @@ class SessionManager:
         with self._session_context(new_session):
             ok, reason = new_session.client.connect(payload.sms_code)
             self._finalize_connect(new_session, ok, reason)
+        self._persist_connected(new_session)
         return new_session
 
     def disconnect(self, user_id: str) -> str:
@@ -214,6 +218,8 @@ class SessionManager:
             except Exception:
                 logger.exception("falha ao fechar websocket da sessao %s", session.user_id)
         self.remove(user_id)
+        if self.store is not None:
+            self.store.mark_disconnected(user_id, revoke_token=True)
         logger.info("[SESSION-DISCONNECTED] %s", user_id)
         return user_id
 
@@ -275,13 +281,54 @@ class SessionManager:
             self._mark_disconnected(user_id, type(exc).__name__)
 
         self.upsert(new_session)
+        self._persist_connected(new_session)
         logger.info("[SESSION-RECONNECT-OK] %s", user_id)
         return new_session
+
+    def restore_sessions(self) -> None:
+        if self.store is None:
+            logger.warning("[SESSION_RESTORE] status=disabled reason=missing_encryption_key")
+            return
+
+        for persisted in self.store.load_connected():
+            session = ManagedSession(
+                user_id=persisted.user_id,
+                client=Bullex(persisted.email, ""),
+                email=persisted.email,
+                desired_mode=normalize_mode(persisted.account_mode),
+                state=SessionState(SSID=persisted.session_token),
+            )
+            self.upsert(session)
+            try:
+                with self._session_context(session):
+                    ok, reason = session.client.connect()
+                    self._finalize_connect(session, ok, reason)
+                self._persist_connected(session)
+                logger.info("[SESSION_RESTORE] user_id=%s status=success", session.user_id)
+            except Exception:
+                self.remove(session.user_id)
+                self.store.mark_disconnected(session.user_id)
+                logger.exception("[SESSION_RESTORE] user_id=%s status=failed", session.user_id)
 
     def _mark_disconnected(self, user_id: str, reason: str) -> None:
         logger.warning("[SESSION-DISCONNECTED] %s", user_id)
         self.remove(user_id)
+        if self.store is not None:
+            self.store.mark_disconnected(user_id)
         raise ServiceError(SESSION_DISCONNECTED, 409) from None
+
+    def _persist_connected(self, session: ManagedSession) -> None:
+        if self.store is None or session.requires_2fa:
+            return
+        token = session.state.SSID
+        if not session.email or not token:
+            return
+        self.store.save_connected(
+            session.user_id,
+            session.email,
+            session.desired_mode,
+            str(token),
+        )
 
     def _finalize_connect(self, session: ManagedSession, ok: bool, reason: Any) -> None:
         if ok:
@@ -490,7 +537,12 @@ def read_digital_payout(client: Bullex, active: str) -> int | float | None:
 
 
 app = FastAPI(title="bullex-service", version="0.1.0")
-session_manager = SessionManager()
+session_manager = SessionManager(create_session_store())
+
+
+@app.on_event("startup")
+def restore_persisted_sessions() -> None:
+    session_manager.restore_sessions()
 
 
 def ensure_session_alive(user_id: str) -> ManagedSession:
@@ -621,6 +673,7 @@ def account_change_mode(payload: ChangeModeRequest, x_user_id: str | None = Head
         if active_mode != target_mode:
             raise ServiceError("falha ao trocar o modo da conta", 409)
         session.desired_mode = active_mode
+        session_manager._persist_connected(session)
         return {"mode": active_mode}
 
     return build_success(session_manager.run(user_id, operation))

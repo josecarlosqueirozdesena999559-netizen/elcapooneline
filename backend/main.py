@@ -18,6 +18,7 @@ from backend.auto_trader import (
     STATUS_WAITING_NEXT_CYCLE,
 )
 from backend.openai_signal_reviewer import review_signal
+from backend.robot_persistence import RobotPersistence, create_robot_persistence
 from backend.signal_engine import analyze_signal
 from backend.trade_result_monitor import TradeResultMonitor
 from backend.user_store import UserStore, create_user_store
@@ -135,6 +136,7 @@ app.add_middleware(
 )
 user_store: UserStore = create_user_store()
 auto_trader = AutoTrader()
+robot_persistence: RobotPersistence = create_robot_persistence()
 robot_tasks: dict[str, asyncio.Task[None]] = {}
 
 
@@ -333,6 +335,8 @@ def build_connection_payload(data: dict[str, Any], fallback_email: str | None = 
     for source_field, target_field in field_map.items():
         if source_field in data:
             updates[target_field] = data[source_field]
+    if updates.get("connected") is True:
+        updates["last_connected_at"] = datetime.now(timezone.utc).isoformat()
     return updates
 
 
@@ -408,6 +412,16 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     return build_success(data)
 
 
+def persist_robot(user_id: str) -> None:
+    try:
+        state = auto_trader.get(user_id)
+        robot_persistence.save_state(user_id, state.to_dict())
+        if state.last_trade:
+            robot_persistence.save_trade(user_id, state.last_trade)
+    except Exception:
+        logger.exception("[ROBOT PERSISTENCE ERROR] user_id=%s", user_id)
+
+
 async def analyze_active_signal(user_id: str, symbol: str) -> tuple[int, dict[str, Any]]:
     status_code, payload = await call_bullex_service(
         "GET",
@@ -465,11 +479,13 @@ async def fetch_trade_result(user_id: str, order_id: str) -> tuple[int, dict[str
 async def finish_monitored_trade(user_id: str, order_id: str, result: str, profit: float) -> None:
     async with auto_trader.lock(user_id):
         auto_trader.finish_trade(user_id, order_id, result, profit)
+        persist_robot(user_id)
 
 
 async def timeout_monitored_trade(user_id: str, order_id: str) -> None:
     async with auto_trader.lock(user_id):
         auto_trader.timeout_trade(user_id, order_id)
+        persist_robot(user_id)
 
 
 trade_result_monitor = TradeResultMonitor(
@@ -634,6 +650,7 @@ async def execute_robot_cycle(
                 "result": STATUS_PENDING_RESULT,
                 "sent_at": datetime.now(timezone.utc).isoformat(),
             }
+            trade["timestamp"] = trade["sent_at"]
             state = auto_trader.record_trade(user_id, trade)
             log_label = "[ROBOT DEMO ORDER SENT]" if state.account_mode == "DEMO" else "[ROBOT REAL ORDER SENT]"
             logger.info("%s user_id=%s order_id=%s", log_label, user_id, trade.get("order_id"))
@@ -644,6 +661,8 @@ async def execute_robot_cycle(
             state = auto_trader.fail(user_id, "ROBOT_CYCLE_ERROR")
             logger.exception("[ROBOT ERROR] user_id=%s error=%s", user_id, exc)
             return 500, build_robot_payload(state)
+        finally:
+            persist_robot(user_id)
 
 
 async def robot_worker(user_id: str) -> None:
@@ -658,6 +677,7 @@ async def robot_worker(user_id: str) -> None:
     except Exception:
         logger.exception("[ROBOT ERROR] user_id=%s error=WORKER_STOPPED", user_id)
         auto_trader.fail(user_id, "WORKER_STOPPED")
+        persist_robot(user_id)
     finally:
         current = asyncio.current_task()
         if robot_tasks.get(user_id) is current:
@@ -679,10 +699,59 @@ async def stop_robot_worker(user_id: str) -> None:
         await task
 
 
+async def read_restored_session_status(user_id: str) -> bool:
+    for attempt in range(5):
+        _, payload = await call_bullex_service("GET", "/sessions/status", user_id)
+        connected, _ = extract_account_status(payload)
+        if connected:
+            sync_user_store_from_payload(user_id, payload)
+            return True
+        if attempt < 4:
+            await asyncio.sleep(2)
+    return False
+
+
+@app.on_event("startup")
+async def restore_robot_states() -> None:
+    try:
+        persisted_states = robot_persistence.load_states()
+    except Exception:
+        logger.exception("[ROBOT_RESTORE] status=failed reason=load_error")
+        return
+
+    for user_id, payload in persisted_states:
+        try:
+            trades = robot_persistence.load_trades(user_id)
+            state = auto_trader.restore(user_id, payload, trades)
+            session_restored = await read_restored_session_status(user_id)
+            if state.operation_in_progress and state.last_trade:
+                order_id = state.last_trade.get("order_id")
+                if order_id and state.account_mode == "DEMO":
+                    trade_result_monitor.start(user_id, order_id)
+            if state.enabled:
+                ensure_robot_worker(user_id)
+            robot_persistence.save_restore_status(
+                user_id,
+                session_restored=session_restored,
+                robot_restored=True,
+            )
+            logger.info("[ROBOT_RESTORE] user_id=%s enabled=%s", user_id, str(state.enabled).lower())
+        except Exception:
+            logger.exception("[ROBOT_RESTORE] user_id=%s enabled=false status=failed", user_id)
+            try:
+                robot_persistence.save_restore_status(
+                    user_id,
+                    session_restored=False,
+                    robot_restored=False,
+                )
+            except Exception:
+                logger.exception("[ROBOT PERSISTENCE ERROR] user_id=%s", user_id)
+
+
 @app.on_event("shutdown")
 async def shutdown_robot_workers() -> None:
     for user_id in list(robot_tasks):
-        auto_trader.stop(user_id)
+        persist_robot(user_id)
         await stop_robot_worker(user_id)
     await trade_result_monitor.shutdown()
 
@@ -761,12 +830,32 @@ async def signals_top_reviewed(auth: dict[str, str] = Depends(require_headers)) 
 
 @app.get("/robot/state")
 async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    return json_response(200, build_robot_payload(auto_trader.get(auth["user_id"])))
+    _, session_payload = await call_bullex_service("GET", "/sessions/status", auth["user_id"])
+    sync_user_store_from_payload(auth["user_id"], session_payload)
+    connected, active_mode = extract_account_status(session_payload)
+    return json_response(
+        200,
+        build_robot_payload(
+            auto_trader.get(auth["user_id"]),
+            connected=connected,
+            active_mode=active_mode,
+        ),
+    )
 
 
 @app.get("/robot/history")
 async def robot_history(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     return json_response(200, build_success(auto_trader.history(auth["user_id"])))
+
+
+@app.get("/robot/persistence")
+async def robot_persistence_status(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    try:
+        payload = robot_persistence.get_restore_status(auth["user_id"])
+    except Exception:
+        logger.exception("[ROBOT PERSISTENCE ERROR] user_id=%s", auth["user_id"])
+        payload = {"session_restored": False, "robot_restored": False, "last_restore_at": None}
+    return JSONResponse(status_code=200, content=payload)
 
 
 @app.post("/robot/config")
@@ -775,6 +864,7 @@ async def robot_config(
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
     state = auto_trader.update_config(auth["user_id"], body)
+    persist_robot(auth["user_id"])
     if state.enabled:
         ensure_robot_worker(auth["user_id"])
     else:
@@ -785,6 +875,7 @@ async def robot_config(
 @app.post("/robot/start")
 async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     state = auto_trader.start(auth["user_id"])
+    persist_robot(auth["user_id"])
     ensure_robot_worker(auth["user_id"])
     logger.info("[ROBOT START] user_id=%s", auth["user_id"])
     return json_response(200, build_robot_payload(state))
@@ -793,6 +884,7 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
 @app.post("/robot/stop")
 async def robot_stop(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     state = auto_trader.stop(auth["user_id"])
+    persist_robot(auth["user_id"])
     await stop_robot_worker(auth["user_id"])
     logger.info("[ROBOT STOP] user_id=%s", auth["user_id"])
     return json_response(200, build_robot_payload(state))

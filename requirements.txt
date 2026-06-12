@@ -3,4 +3,5 @@ uvicorn==0.30.6
 pydantic==2.9.2
 requests
 websocket-client==1.8.0
+cryptography==45.0.4
 -e .
