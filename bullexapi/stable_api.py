@@ -164,6 +164,36 @@ class Bullex:
     def connect_2fa(self, sms_code):
         return self.connect(sms_code=sms_code)
 
+    def restore_with_ssid(self, ssid):
+        try:
+            self.api.close()
+        except:
+            pass
+
+        self.api = BullexAPI(
+            "ws.trade.bull-ex.com", self.email, self.password)
+        self.api.set_session(headers=self.SESSION_HEADER,
+                             cookies=self.SESSION_COOKIE)
+
+        previous_ssid = global_value.SSID
+        global_value.SSID = ssid
+        check, reason = self.api.connect_with_ssid_only()
+        if check != True:
+            global_value.SSID = previous_ssid
+            return check, reason
+
+        self.re_subscribe_stream()
+
+        while global_value.balance_id == None:
+            pass
+
+        self.position_change_all(
+            "subscribeMessage", global_value.balance_id)
+
+        self.order_changed_all("subscribeMessage")
+        self.api.setOptions(1, True)
+        return True, None
+
     def check_connect(self):
         # True/False
         # if not connected, sometimes it's None, sometimes its '0', so

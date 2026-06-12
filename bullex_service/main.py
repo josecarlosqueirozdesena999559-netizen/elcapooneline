@@ -298,17 +298,41 @@ class SessionManager:
                 desired_mode=normalize_mode(persisted.account_mode),
                 state=SessionState(SSID=persisted.session_token),
             )
+            restore_with_ssid = getattr(session.client, "restore_with_ssid", None)
+            if not callable(restore_with_ssid):
+                self.store.mark_disconnected(session.user_id)
+                logger.warning(
+                    "[SESSION_RESTORE] status=unsupported reason=no_ssid_restore_method user_id=%s",
+                    session.user_id,
+                )
+                continue
+
             self.upsert(session)
+            restore_failure_reason = "unknown"
             try:
                 with self._session_context(session):
-                    ok, reason = session.client.connect()
+                    ok, reason = restore_with_ssid(persisted.session_token)
+                    restore_failure_reason = str(reason or "restore_rejected")
                     self._finalize_connect(session, ok, reason)
                 self._persist_connected(session)
                 logger.info("[SESSION_RESTORE] user_id=%s status=success", session.user_id)
-            except Exception:
+            except Exception as exc:
                 self.remove(session.user_id)
                 self.store.mark_disconnected(session.user_id)
-                logger.exception("[SESSION_RESTORE] user_id=%s status=failed", session.user_id)
+                logger.warning(
+                    "[SESSION_RESTORE] user_id=%s status=failed reason=%s",
+                    session.user_id,
+                    restore_failure_reason if restore_failure_reason != "unknown" else type(exc).__name__,
+                )
+
+    def persistence_debug(self) -> dict[str, Any]:
+        if self.store is None:
+            return {
+                "stored_sessions": 0,
+                "has_encryption_key": False,
+                "users": [],
+            }
+        return self.store.persistence_debug()
 
     def _mark_disconnected(self, user_id: str, reason: str) -> None:
         logger.warning("[SESSION-DISCONNECTED] %s", user_id)
@@ -618,6 +642,11 @@ def session_status(x_user_id: str | None = Header(default=None)) -> JSONResponse
                 content={"ok": False, "data": {"connected": False}, "error": exc.message},
             )
         raise
+
+
+@app.get("/sessions/persistence-debug")
+def sessions_persistence_debug() -> dict[str, Any]:
+    return session_manager.persistence_debug()
 
 
 @app.post("/sessions/disconnect")

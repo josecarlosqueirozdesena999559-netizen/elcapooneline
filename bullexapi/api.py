@@ -895,6 +895,38 @@ class BullexAPI(object):  # pylint: disable=too-many-instance-attributes
                 pass
         return True, None
 
+    def connect_with_ssid_only(self):
+        global_value.ssl_Mutual_exclusion = False
+        global_value.ssl_Mutual_exclusion_write = False
+        try:
+            self.close()
+        except:
+            pass
+
+        if global_value.SSID is None:
+            return False, "missing_ssid"
+
+        check_websocket, websocket_reason = self.start_websocket()
+        if check_websocket == False:
+            return check_websocket, websocket_reason
+
+        check_ssid = self.send_ssid()
+        if check_ssid == False:
+            self.close()
+            return False, "invalid_ssid"
+
+        requests.utils.add_dict_to_cookiejar(
+            self.session.cookies, {"ssid": global_value.SSID})
+
+        self.timesync.server_timestamp = None
+        while True:
+            try:
+                if self.timesync.server_timestamp != None:
+                    break
+            except:
+                pass
+        return True, None
+
     def connect2fa(self, sms_code):
         response = self.verify_2fa(sms_code, self.token_sms)
 

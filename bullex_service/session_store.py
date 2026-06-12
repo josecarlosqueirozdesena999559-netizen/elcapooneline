@@ -96,6 +96,42 @@ class SessionStore:
             )
         return sessions
 
+    def persistence_debug(self) -> dict[str, object]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select user_id, email, encrypted_session_token, last_connected_at
+                from bullex_sessions
+                order by user_id
+                """
+            ).fetchall()
+
+        users = []
+        for row in rows:
+            encrypted_token = row["encrypted_session_token"]
+            ssid_present = False
+            if encrypted_token:
+                try:
+                    token = self._fernet.decrypt(encrypted_token.encode("ascii")).decode("utf-8")
+                    ssid_present = bool(token)
+                except (InvalidToken, UnicodeError):
+                    ssid_present = False
+            users.append(
+                {
+                    "user_id": row["user_id"],
+                    "email_present": bool(row["email"]),
+                    "ssid_present": ssid_present,
+                    "password_present": False,
+                    "last_connected_at": row["last_connected_at"],
+                }
+            )
+
+        return {
+            "stored_sessions": len(users),
+            "has_encryption_key": True,
+            "users": users,
+        }
+
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.execute(

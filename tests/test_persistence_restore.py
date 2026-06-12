@@ -6,7 +6,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from backend.auto_trader import AutoTrader, STATUS_WAITING_NEXT_CYCLE
 from backend.robot_persistence import SQLiteRobotPersistence
@@ -51,7 +51,8 @@ class SessionPersistenceTests(unittest.TestCase):
             )
 
             fake_client = SimpleNamespace(
-                connect=lambda: (True, None),
+                connect=Mock(side_effect=AssertionError("restore must not login with password")),
+                restore_with_ssid=Mock(return_value=(True, None)),
                 get_balance_mode=lambda: "PRACTICE",
             )
             manager = bullex_main.SessionManager(store)
@@ -65,6 +66,79 @@ class SessionPersistenceTests(unittest.TestCase):
             self.assertIsNotNone(restored)
             self.assertEqual(restored.password, None)
             self.assertEqual(restored.state.SSID, "persisted-ssid")
+            fake_client.restore_with_ssid.assert_called_once_with("persisted-ssid")
+            fake_client.connect.assert_not_called()
+
+    def test_session_manager_marks_restore_unsupported_without_login(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(str(Path(directory) / "sessions.db"), "test-secret")
+            store.save_connected(
+                "user-session",
+                "user@example.com",
+                "PRACTICE",
+                "persisted-ssid",
+            )
+
+            fake_client = SimpleNamespace(
+                connect=Mock(side_effect=AssertionError("restore must not login with password")),
+                get_balance_mode=lambda: "PRACTICE",
+            )
+            manager = bullex_main.SessionManager(store)
+            with (
+                patch.object(bullex_main, "Bullex", return_value=fake_client),
+                self.assertLogs("bullex-service", level="WARNING") as logs,
+            ):
+                manager.restore_sessions()
+
+            self.assertIsNone(manager.get("user-session"))
+            fake_client.connect.assert_not_called()
+            self.assertIn(
+                "[SESSION_RESTORE] status=unsupported reason=no_ssid_restore_method",
+                "\n".join(logs.output),
+            )
+
+    def test_session_persistence_debug_does_not_expose_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(str(Path(directory) / "sessions.db"), "test-secret")
+            store.save_connected(
+                "user-session",
+                "user@example.com",
+                "PRACTICE",
+                "persisted-ssid",
+            )
+
+            debug = store.persistence_debug()
+
+            self.assertEqual(debug["stored_sessions"], 1)
+            self.assertEqual(debug["has_encryption_key"], True)
+            self.assertEqual(
+                debug["users"][0],
+                {
+                    "user_id": "user-session",
+                    "email_present": True,
+                    "ssid_present": True,
+                    "password_present": False,
+                    "last_connected_at": debug["users"][0]["last_connected_at"],
+                },
+            )
+            self.assertNotIn("persisted-ssid", json.dumps(debug))
+
+    def test_session_persistence_debug_endpoint_reports_missing_key(self) -> None:
+        old_manager = bullex_main.session_manager
+        bullex_main.session_manager = bullex_main.SessionManager(None)
+        try:
+            debug = bullex_main.sessions_persistence_debug()
+        finally:
+            bullex_main.session_manager = old_manager
+
+        self.assertEqual(
+            debug,
+            {
+                "stored_sessions": 0,
+                "has_encryption_key": False,
+                "users": [],
+            },
+        )
 
 
 class _FakeContext:
