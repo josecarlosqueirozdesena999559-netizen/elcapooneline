@@ -74,6 +74,8 @@ class RobotState:
             if self.next_cycle_at is not None
             else 0
         )
+        total = self.wins + self.losses
+        data["accuracy"] = round((self.wins / total) * 100, 2) if total else 0.0
         return data
 
 
@@ -81,6 +83,8 @@ class RobotState:
 class AutoTrader:
     _states: dict[str, RobotState] = field(default_factory=dict)
     _locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    _histories: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    _completed_order_ids: dict[str, set[str]] = field(default_factory=dict)
 
     def get(self, user_id: str) -> RobotState:
         return self._states.setdefault(user_id, RobotState())
@@ -127,6 +131,9 @@ class AutoTrader:
         if not state.enabled:
             state.status = STATUS_STOPPED
             return False, state
+        if state.operation_in_progress:
+            state.status = STATUS_PENDING_RESULT
+            return False, state
         if state.next_cycle_at is not None and now < state.next_cycle_at:
             state.status = STATUS_WAITING_NEXT_CYCLE
             return False, state
@@ -157,6 +164,11 @@ class AutoTrader:
 
     def record_trade(self, user_id: str, trade: dict[str, Any]) -> RobotState:
         state = self.get(user_id)
+        order_id = str(trade.get("order_id") or "").strip()
+        if not order_id or order_id in self._completed_order_ids.setdefault(user_id, set()):
+            return state
+        if state.operation_in_progress:
+            return state
         state.last_trade = trade
         state.last_entry_at = utc_now()
         state.operation_in_progress = True
@@ -169,3 +181,87 @@ class AutoTrader:
         state.status = STATUS_REAL_TRADING_LOCKED
         state.rejection_reason = reason
         return state
+
+    def finish_trade(self, user_id: str, order_id: Any, result: str, profit: float) -> tuple[bool, RobotState]:
+        state = self.get(user_id)
+        normalized_order_id = str(order_id or "").strip()
+        completed = self._completed_order_ids.setdefault(user_id, set())
+        if not normalized_order_id or normalized_order_id in completed:
+            return False, state
+        if not state.operation_in_progress or not state.last_trade:
+            return False, state
+        if str(state.last_trade.get("order_id") or "").strip() != normalized_order_id:
+            return False, state
+
+        normalized_result = str(result or "").strip().upper()
+        if normalized_result not in {"WIN", "LOSS"}:
+            return False, state
+
+        trade = dict(state.last_trade)
+        amount = float(trade.get("amount") or 0)
+        trade_profit = float(profit)
+        if normalized_result == "WIN":
+            state.wins += 1
+            state.profit += trade_profit
+        else:
+            state.losses += 1
+            trade_profit = trade_profit if trade_profit < 0 else -amount
+            state.profit += trade_profit
+
+        trade.update(
+            {
+                "result": normalized_result,
+                "profit": round(trade_profit, 2),
+                "finished_at": utc_now().isoformat(),
+            }
+        )
+        completed.add(normalized_order_id)
+        state.last_trade = trade
+        state.operation_in_progress = False
+        state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
+        state.rejection_reason = None
+        state.profit = round(state.profit, 2)
+        history = self._histories.setdefault(user_id, [])
+        history.append(dict(trade))
+        del history[:-100]
+        return True, state
+
+    def timeout_trade(self, user_id: str, order_id: Any) -> tuple[bool, RobotState]:
+        state = self.get(user_id)
+        normalized_order_id = str(order_id or "").strip()
+        completed = self._completed_order_ids.setdefault(user_id, set())
+        if not normalized_order_id or normalized_order_id in completed:
+            return False, state
+        if not state.operation_in_progress or not state.last_trade:
+            return False, state
+        if str(state.last_trade.get("order_id") or "").strip() != normalized_order_id:
+            return False, state
+
+        trade = dict(state.last_trade)
+        trade.update(
+            {
+                "result": "TIMEOUT",
+                "profit": 0.0,
+                "finished_at": utc_now().isoformat(),
+            }
+        )
+        completed.add(normalized_order_id)
+        state.last_trade = trade
+        state.operation_in_progress = False
+        state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
+        state.rejection_reason = "TRADE_RESULT_TIMEOUT"
+        history = self._histories.setdefault(user_id, [])
+        history.append(dict(trade))
+        del history[:-100]
+        return True, state
+
+    def history(self, user_id: str) -> dict[str, Any]:
+        state = self.get(user_id)
+        total = state.wins + state.losses
+        return {
+            "wins": state.wins,
+            "losses": state.losses,
+            "profit": state.profit,
+            "accuracy": round((state.wins / total) * 100, 2) if total else 0.0,
+            "trades": list(reversed(self._histories.get(user_id, []))),
+        }

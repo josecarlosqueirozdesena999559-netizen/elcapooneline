@@ -19,6 +19,7 @@ from backend.auto_trader import (
 )
 from backend.openai_signal_reviewer import review_signal
 from backend.signal_engine import analyze_signal
+from backend.trade_result_monitor import TradeResultMonitor
 from backend.user_store import UserStore, create_user_store
 
 
@@ -455,6 +456,29 @@ async def scan_local_signals(user_id: str, limit: int = 5, include_wait: bool = 
     return 200, build_success(limited_signals)
 
 
+async def fetch_trade_result(user_id: str, order_id: str) -> tuple[int, dict[str, Any]]:
+    status_code, payload = await call_bullex_service("GET", f"/orders/{order_id}/result", user_id)
+    mark_disconnected_from_payload(user_id, payload)
+    return status_code, payload
+
+
+async def finish_monitored_trade(user_id: str, order_id: str, result: str, profit: float) -> None:
+    async with auto_trader.lock(user_id):
+        auto_trader.finish_trade(user_id, order_id, result, profit)
+
+
+async def timeout_monitored_trade(user_id: str, order_id: str) -> None:
+    async with auto_trader.lock(user_id):
+        auto_trader.timeout_trade(user_id, order_id)
+
+
+trade_result_monitor = TradeResultMonitor(
+    fetch_result=fetch_trade_result,
+    finish_trade=finish_monitored_trade,
+    timeout_trade=timeout_monitored_trade,
+)
+
+
 async def execute_robot_cycle(
     user_id: str,
     *,
@@ -470,6 +494,12 @@ async def execute_robot_cycle(
 
         logger.info("[ROBOT TICK] user_id=%s", user_id)
         try:
+            active_stop_reason = robot_stop_reason(state)
+            if active_stop_reason is not None:
+                state = auto_trader.reject(user_id, active_stop_reason)
+                logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=%s", user_id, active_stop_reason)
+                return 200, build_robot_payload(state)
+
             if required_mode is not None and state.account_mode != required_mode:
                 return 409, build_error(f"ACCOUNT_MODE_NOT_{required_mode}")
 
@@ -586,6 +616,12 @@ async def execute_robot_cycle(
                 return order_status, build_robot_payload(state)
 
             order_data = order_payload.get("data") if isinstance(order_payload.get("data"), dict) else {}
+            order_id = order_data.get("order_id")
+            if order_id is None or not str(order_id).strip():
+                state = auto_trader.fail(user_id, "ORDER_ID_MISSING")
+                logger.error("[ROBOT ERROR] user_id=%s error=ORDER_ID_MISSING", user_id)
+                return 502, build_robot_payload(state)
+
             trade = {
                 **order_data,
                 "mode": state.account_mode,
@@ -601,6 +637,8 @@ async def execute_robot_cycle(
             state = auto_trader.record_trade(user_id, trade)
             log_label = "[ROBOT DEMO ORDER SENT]" if state.account_mode == "DEMO" else "[ROBOT REAL ORDER SENT]"
             logger.info("%s user_id=%s order_id=%s", log_label, user_id, trade.get("order_id"))
+            if state.account_mode == "DEMO":
+                trade_result_monitor.start(user_id, order_id)
             return 200, build_robot_payload(state)
         except Exception as exc:
             state = auto_trader.fail(user_id, "ROBOT_CYCLE_ERROR")
@@ -613,7 +651,7 @@ async def robot_worker(user_id: str) -> None:
         while auto_trader.get(user_id).enabled:
             await execute_robot_cycle(user_id)
             state = auto_trader.get(user_id)
-            delay = max(1, state.to_dict()["seconds_until_next_cycle"])
+            delay = 3 if state.operation_in_progress else max(1, state.to_dict()["seconds_until_next_cycle"])
             await asyncio.sleep(delay)
     except asyncio.CancelledError:
         raise
@@ -646,6 +684,7 @@ async def shutdown_robot_workers() -> None:
     for user_id in list(robot_tasks):
         auto_trader.stop(user_id)
         await stop_robot_worker(user_id)
+    await trade_result_monitor.shutdown()
 
 
 @app.get("/health")
@@ -718,6 +757,11 @@ async def signals_top_reviewed(auth: dict[str, str] = Depends(require_headers)) 
 @app.get("/robot/state")
 async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     return json_response(200, build_robot_payload(auto_trader.get(auth["user_id"])))
+
+
+@app.get("/robot/history")
+async def robot_history(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    return json_response(200, build_success(auto_trader.history(auth["user_id"])))
 
 
 @app.post("/robot/config")

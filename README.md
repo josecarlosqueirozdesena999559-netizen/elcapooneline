@@ -291,6 +291,7 @@ confirmacoes sejam fornecidas.
 
 Endpoints:
 - `GET /robot/state`
+- `GET /robot/history`
 - `POST /robot/config`
 - `POST /robot/start`
 - `POST /robot/stop`
@@ -308,9 +309,16 @@ curl -X POST \
   http://localhost:8080/robot/config
 ```
 
-Enquanto nao houver monitor de resultado, uma ordem aceita fica com
-`operation_in_progress: true` e `status: PENDING_RESULT`. WIN, LOSS e profit
-nao sao alterados ate a Fase 14.
+Uma ordem DEMO aceita fica com `operation_in_progress: true` e
+`status: PENDING_RESULT`. O backend consulta o resultado real a cada 3 segundos
+por ate 180 segundos. Quando a BullEx informa o fechamento:
+- WIN incrementa `wins` e soma o lucro real.
+- LOSS incrementa `losses` e desconta o valor perdido.
+- `operation_in_progress` volta para `false`.
+- O status volta para `WAITING_NEXT_CYCLE`.
+
+`GET /robot/history` retorna `wins`, `losses`, `profit`, `accuracy` e as ultimas
+100 operacoes. Um `order_id` finalizado nunca e contabilizado duas vezes.
 
 Para REAL, alem de `account_mode: REAL`, `allow_real: true` e
 `confirm_real: true`, a chamada de `POST /robot/execute-real` exige o header

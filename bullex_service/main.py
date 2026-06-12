@@ -759,7 +759,25 @@ def order_result(order_id: str, x_user_id: str | None = Header(default=None)) ->
 
     def operation(session: ManagedSession) -> dict[str, Any]:
         ensure_session_ready(session)
-        result, profit = session.client.check_win_v4(parsed_order_id)
+        closed_order = session.client.api.socket_option_closed.get(parsed_order_id)
+        if closed_order is None:
+            closed_order = session.client.api.socket_option_closed.get(str(parsed_order_id))
+        if not isinstance(closed_order, dict):
+            return {"order_id": parsed_order_id, "result": "PENDING_RESULT", "profit": None}
+        message = closed_order.get("msg")
+        if not isinstance(message, dict):
+            return {"order_id": parsed_order_id, "result": "PENDING_RESULT", "profit": None}
+
+        result = str(message.get("win") or "").strip().lower()
+        if not result:
+            return {"order_id": parsed_order_id, "result": "PENDING_RESULT", "profit": None}
+        amount = float(message.get("sum") or 0)
+        if result == "equal":
+            profit = 0.0
+        elif result == "loose":
+            profit = -amount
+        else:
+            profit = float(message.get("win_amount") or 0) - amount
         return {"order_id": parsed_order_id, "result": result, "profit": profit}
 
     return build_success(session_manager.run(user_id, operation))

@@ -67,6 +67,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(main, "call_bullex_service", side_effect=fake_bullex),
             patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
+            patch.object(main.trade_result_monitor, "start", return_value=True),
         ):
             first_status, first_payload = await main.execute_robot_cycle(user_id)
             second_status, second_payload = await main.execute_robot_cycle(user_id)
@@ -75,7 +76,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_status, 200)
         self.assertEqual(first_payload["data"]["status"], "PENDING_RESULT")
         self.assertEqual(second_status, 200)
-        self.assertEqual(second_payload["data"]["status"], STATUS_WAITING_NEXT_CYCLE)
+        self.assertEqual(second_payload["data"]["status"], "PENDING_RESULT")
         self.assertEqual(len(orders), 1)
 
     async def test_non_whitelisted_asset_never_operates(self) -> None:
@@ -186,6 +187,6 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         orders = [call for call in calls if call[1] == "/orders/buy-real"]
         self.assertEqual(first_status, 200)
         self.assertEqual(second_status, 200)
-        self.assertEqual(second_payload["data"]["status"], STATUS_WAITING_NEXT_CYCLE)
+        self.assertEqual(second_payload["data"]["status"], "PENDING_RESULT")
         self.assertEqual(len(orders), 1)
         self.assertTrue(orders[0][2]["confirm_real"])
