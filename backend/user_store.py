@@ -11,6 +11,19 @@ import httpx
 
 logger = logging.getLogger("backend-gateway")
 
+BULLEX_CONNECTION_TABLE = "bullex_connections"
+BULLEX_CONNECTION_FIELDS = (
+    "user_id",
+    "bullex_email",
+    "connected",
+    "requires_2fa",
+    "account_mode",
+    "currency",
+    "last_balance",
+    "last_connected_at",
+)
+BULLEX_CONNECTION_OPTIONAL_FIELDS = {"last_connected_at"}
+
 
 @dataclass
 class BullExUserRecord:
@@ -48,6 +61,19 @@ class UserStore(ABC):
     @abstractmethod
     def save_market_asset_payout(self, user_id: str, symbol: str, payout: int | float | None) -> None:
         raise NotImplementedError
+
+    def connection_upsert_diagnostic(
+        self,
+        user_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body = {"user_id": user_id, **(payload or {})}
+        filtered = {key: value for key, value in body.items() if key in BULLEX_CONNECTION_FIELDS}
+        return {
+            "table": BULLEX_CONNECTION_TABLE,
+            "fields": list(BULLEX_CONNECTION_FIELDS),
+            "payload": filtered,
+        }
 
 
 class InMemoryUserStore(UserStore):
@@ -214,14 +240,39 @@ class SupabaseUserStore(UserStore):
         )
 
     def _upsert_connection(self, user_id: str, payload: dict[str, Any]) -> BullExUserRecord:
-        body = {"user_id": user_id, **payload}
-        rows = self._request(
-            "POST",
-            "/bullex_connections?on_conflict=user_id",
-            json=body,
-            extra_headers={"Prefer": "resolution=merge-duplicates,return=representation"},
-        )
+        diagnostic = self.connection_upsert_diagnostic(user_id, payload)
+        body = diagnostic["payload"]
+        path = f"/{BULLEX_CONNECTION_TABLE}?on_conflict=user_id"
+        headers = {"Prefer": "resolution=merge-duplicates,return=representation"}
+        try:
+            rows = self._request("POST", path, json=body, extra_headers=headers)
+        except httpx.HTTPStatusError as exc:
+            if not self._is_optional_field_schema_error(exc, body):
+                raise
+            fallback_body = {
+                key: value for key, value in body.items() if key not in BULLEX_CONNECTION_OPTIONAL_FIELDS
+            }
+            logger.warning(
+                "[SUPABASE UPSERT RETRY] table=%s removed_fields=%s",
+                BULLEX_CONNECTION_TABLE,
+                sorted(BULLEX_CONNECTION_OPTIONAL_FIELDS.intersection(body)),
+            )
+            rows = self._request("POST", path, json=fallback_body, extra_headers=headers)
+            body = fallback_body
         return self._to_record(rows[0] if rows else body)
+
+    def _is_optional_field_schema_error(
+        self,
+        exc: httpx.HTTPStatusError,
+        body: dict[str, Any],
+    ) -> bool:
+        if exc.response.status_code != 400:
+            return False
+        response_text = exc.response.text.lower()
+        return any(
+            field in body and field.lower() in response_text
+            for field in BULLEX_CONNECTION_OPTIONAL_FIELDS
+        )
 
     def _get_existing_market_asset_payouts(self, user_id: str) -> dict[str, Any]:
         rows = self._request(
@@ -266,6 +317,14 @@ class SupabaseUserStore(UserStore):
                 json=json,
             )
 
+        if response.status_code >= 400:
+            logger.warning(
+                "[SUPABASE HTTP ERROR] status=%s url=%s payload=%s response=%s",
+                response.status_code,
+                response.request.url,
+                json,
+                response.text,
+            )
         response.raise_for_status()
         if not response.content:
             return []

@@ -347,21 +347,28 @@ def sync_user_store_from_payload(
     *,
     is_new_connection: bool = False,
 ) -> None:
-    if not payload.get("ok"):
-        if payload.get("error") in {SESSION_DISCONNECTED, SESSION_NOT_FOUND}:
-            user_store.disconnect(user_id)
-        return
+    try:
+        if not payload.get("ok"):
+            if payload.get("error") in {SESSION_DISCONNECTED, SESSION_NOT_FOUND}:
+                user_store.disconnect(user_id)
+            return
 
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        return
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return
 
-    updates = build_connection_payload(data, fallback_email)
-    if updates:
-        if is_new_connection:
-            user_store.save_connection(user_id, updates)
-        else:
-            user_store.update_connection(user_id, updates)
+        updates = build_connection_payload(data, fallback_email)
+        if updates:
+            if is_new_connection:
+                user_store.save_connection(user_id, updates)
+            else:
+                user_store.update_connection(user_id, updates)
+    except Exception as exc:
+        logger.warning(
+            "[SUPABASE PERSISTENCE WARNING] user_id=%s operation=bullex_connection error=%s",
+            user_id,
+            exc,
+        )
 
 
 def mark_disconnected_from_payload(user_id: str, payload: dict[str, Any]) -> None:
@@ -856,6 +863,24 @@ async def robot_persistence_status(auth: dict[str, str] = Depends(require_header
         logger.exception("[ROBOT PERSISTENCE ERROR] user_id=%s", auth["user_id"])
         payload = {"session_restored": False, "robot_restored": False, "last_restore_at": None}
     return JSONResponse(status_code=200, content=payload)
+
+
+@app.get("/debug/bullex-connection-schema")
+async def debug_bullex_connection_schema(
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    payload = build_connection_payload(
+        {
+            "email": "user@example.com",
+            "connected": True,
+            "requires_2fa": False,
+            "active_mode": "PRACTICE",
+            "currency": "USD",
+            "balance": 0,
+        }
+    )
+    diagnostic = user_store.connection_upsert_diagnostic(auth["user_id"], payload)
+    return json_response(200, build_success(diagnostic))
 
 
 @app.post("/robot/config")
