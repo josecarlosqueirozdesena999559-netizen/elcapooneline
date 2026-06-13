@@ -5,7 +5,7 @@ import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -32,6 +32,14 @@ class RobotPersistence(ABC):
 
     @abstractmethod
     def load_trades(self, user_id: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def save_trade_history(self, user_id: str, trade: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def load_trade_history(self, user_id: str, days: int) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     @abstractmethod
@@ -104,6 +112,60 @@ class SQLiteRobotPersistence(RobotPersistence):
             ).fetchall()
         return list(reversed([json.loads(row["trade_json"]) for row in rows]))
 
+    def save_trade_history(self, user_id: str, trade: dict[str, Any]) -> None:
+        item = build_trade_history_item(user_id, trade)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                insert into robot_trade_history (
+                    user_id, created_at, account_mode, active, direction, amount,
+                    confidence, payout, order_id, result, profit, opened_at,
+                    finished_at, timeframe
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(user_id, order_id) do update set
+                    account_mode = excluded.account_mode,
+                    active = excluded.active,
+                    direction = excluded.direction,
+                    amount = excluded.amount,
+                    confidence = excluded.confidence,
+                    payout = excluded.payout,
+                    result = excluded.result,
+                    profit = excluded.profit,
+                    opened_at = excluded.opened_at,
+                    finished_at = excluded.finished_at,
+                    timeframe = excluded.timeframe
+                """,
+                (
+                    item["user_id"],
+                    item["created_at"],
+                    item["account_mode"],
+                    item["active"],
+                    item["direction"],
+                    item["amount"],
+                    item["confidence"],
+                    item["payout"],
+                    item["order_id"],
+                    item["result"],
+                    item["profit"],
+                    item["opened_at"],
+                    item["finished_at"],
+                    item["timeframe"],
+                ),
+            )
+
+    def load_trade_history(self, user_id: str, days: int) -> list[dict[str, Any]]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select * from robot_trade_history
+                where user_id = ? and finished_at >= ?
+                order by finished_at desc, id desc
+                """,
+                (user_id, cutoff),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def save_restore_status(
         self,
         user_id: str,
@@ -159,6 +221,26 @@ class SQLiteRobotPersistence(RobotPersistence):
                     updated_at text not null,
                     primary key (user_id, order_id)
                 );
+                create table if not exists robot_trade_history (
+                    id integer primary key autoincrement,
+                    user_id text not null,
+                    created_at text not null,
+                    account_mode text not null,
+                    active text not null,
+                    direction text not null,
+                    amount real not null,
+                    confidence real not null,
+                    payout real not null,
+                    order_id text not null,
+                    result text not null,
+                    profit real not null,
+                    opened_at text not null,
+                    finished_at text not null,
+                    timeframe text not null,
+                    unique (user_id, order_id)
+                );
+                create index if not exists robot_trade_history_user_finished_idx
+                    on robot_trade_history (user_id, finished_at desc);
                 create table if not exists robot_restore_status (
                     user_id text primary key,
                     session_restored integer not null default 0,
@@ -248,6 +330,26 @@ class SupabaseRobotPersistence(RobotPersistence):
         )
         return list(reversed([row.get("trade_json") or {} for row in rows]))
 
+    def save_trade_history(self, user_id: str, trade: dict[str, Any]) -> None:
+        self._ensure_user(user_id)
+        item = build_trade_history_item(user_id, trade)
+        item.pop("id", None)
+        self._request(
+            "POST",
+            "/robot_trade_history?on_conflict=user_id,order_id",
+            json=item,
+            extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
+
+    def load_trade_history(self, user_id: str, days: int) -> list[dict[str, Any]]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        return self._request(
+            "GET",
+            f"/robot_trade_history?user_id=eq.{quote(user_id, safe='')}"
+            f"&finished_at=gte.{quote(cutoff, safe=':-')}"
+            "&select=*&order=finished_at.desc,id.desc",
+        )
+
     def save_restore_status(
         self,
         user_id: str,
@@ -310,3 +412,32 @@ def create_robot_persistence() -> RobotPersistence:
     default_path = str(Path(tempfile.gettempdir()) / "elcapo-backend-persistence.db")
     database_path = os.getenv("ROBOT_DB_PATH", default_path).strip()
     return SQLiteRobotPersistence(database_path)
+
+
+def build_trade_history_item(user_id: str, trade: dict[str, Any]) -> dict[str, Any]:
+    result = str(trade.get("result") or "").strip().upper()
+    if result not in {"WIN", "LOSS"}:
+        raise ValueError("TRADE_RESULT_NOT_FINAL")
+    order_id = str(trade.get("order_id") or "").strip()
+    if not order_id:
+        raise ValueError("ORDER_ID_MISSING")
+    opened_at = str(trade.get("sent_at") or trade.get("timestamp") or "").strip()
+    finished_at = str(trade.get("finished_at") or "").strip()
+    if not opened_at or not finished_at:
+        raise ValueError("TRADE_TIMESTAMPS_MISSING")
+    return {
+        "user_id": user_id,
+        "created_at": finished_at,
+        "account_mode": str(trade.get("mode") or trade.get("account_mode") or "DEMO").upper(),
+        "active": str(trade.get("active") or ""),
+        "direction": str(trade.get("direction") or "").upper(),
+        "amount": float(trade.get("amount") or 0),
+        "confidence": float(trade.get("confidence") or 0),
+        "payout": float(trade.get("payout") or 0),
+        "order_id": order_id,
+        "result": result,
+        "profit": float(trade.get("profit") or 0),
+        "opened_at": opened_at,
+        "finished_at": finished_at,
+        "timeframe": str(trade.get("expiration") or trade.get("timeframe") or "M1").upper(),
+    }

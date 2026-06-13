@@ -292,6 +292,7 @@ confirmacoes sejam fornecidas.
 Endpoints:
 - `GET /robot/state`
 - `GET /robot/history`
+- `GET /robot/stats`
 - `POST /robot/config`
 - `POST /robot/start`
 - `POST /robot/stop`
@@ -317,8 +318,13 @@ por ate 180 segundos. Quando a BullEx informa o fechamento:
 - `operation_in_progress` volta para `false`.
 - O status volta para `WAITING_NEXT_CYCLE`.
 
-`GET /robot/history` retorna `wins`, `losses`, `profit`, `accuracy` e as ultimas
-100 operacoes. Um `order_id` finalizado nunca e contabilizado duas vezes.
+`GET /robot/history?days=30` retorna `{"items": [...]}` com as operacoes
+WIN/LOSS persistidas do usuario, da mais recente para a mais antiga. Os filtros
+aceitos sao `days=1`, `days=7` e `days=30`. Um `order_id` finalizado nunca e
+gravado duas vezes.
+
+`GET /robot/stats?days=30` retorna wins, losses, total de operacoes, win rate,
+lucro, profit factor e sequencias atuais/melhores de WIN e LOSS.
 
 Para REAL, configure explicitamente `account_mode: REAL`, `allow_real: true` e
 `confirm_real: true`, depois use `POST /robot/start`. O backend tambem exige a
@@ -348,8 +354,8 @@ BullEx, a chave OpenAI e as chaves Supabase nunca sao gravadas no banco de
 persistencia.
 
 Rode novamente `backend/supabase_schema.sql` no Supabase. O script e
-idempotente e cria as tabelas `robot_states`, `robot_trades` e
-`robot_restore_status`.
+idempotente e cria as tabelas `robot_states`, `robot_trades`,
+`robot_trade_history` e `robot_restore_status`.
 
 O Docker Compose usa volumes nomeados para preservar o fallback SQLite:
 

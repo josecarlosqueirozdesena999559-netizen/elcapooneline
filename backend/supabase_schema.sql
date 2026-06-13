@@ -139,6 +139,30 @@ alter table public.robot_trades
 create unique index if not exists robot_trades_user_order_key
   on public.robot_trades (user_id, order_id);
 
+create table if not exists public.robot_trade_history (
+  id bigint generated always as identity primary key,
+  user_id text not null references public.users(id) on delete cascade,
+  created_at timestamptz not null default timezone('utc'::text, now()),
+  account_mode text not null check (account_mode in ('DEMO', 'REAL')),
+  active text not null,
+  direction text not null check (direction in ('CALL', 'PUT')),
+  amount numeric not null,
+  confidence numeric not null,
+  payout numeric not null,
+  order_id text not null,
+  result text not null check (result in ('WIN', 'LOSS')),
+  profit numeric not null,
+  opened_at timestamptz not null,
+  finished_at timestamptz not null,
+  timeframe text not null
+);
+
+create unique index if not exists robot_trade_history_user_order_key
+  on public.robot_trade_history (user_id, order_id);
+
+create index if not exists robot_trade_history_user_finished_idx
+  on public.robot_trade_history (user_id, finished_at desc);
+
 create table if not exists public.robot_history (
   id uuid primary key default gen_random_uuid(),
   user_id text not null references public.users(id) on delete cascade,

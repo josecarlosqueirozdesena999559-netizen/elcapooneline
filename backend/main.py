@@ -611,7 +611,16 @@ async def fetch_trade_result(user_id: str, order_id: str) -> tuple[int, dict[str
 
 async def finish_monitored_trade(user_id: str, order_id: str, result: str, profit: float) -> None:
     async with auto_trader.lock(user_id):
-        auto_trader.finish_trade(user_id, order_id, result, profit)
+        finalized, state = auto_trader.finish_trade(user_id, order_id, result, profit)
+        if finalized and state.last_trade:
+            try:
+                robot_persistence.save_trade_history(user_id, state.last_trade)
+            except Exception:
+                logger.exception(
+                    "[ROBOT HISTORY ERROR] user_id=%s order_id=%s",
+                    user_id,
+                    order_id,
+                )
         persist_robot(user_id)
 
 
@@ -908,8 +917,7 @@ async def execute_robot_cycle(
                     user_id,
                     trade.get("order_id"),
                 )
-            if state.account_mode == "DEMO":
-                trade_result_monitor.start(user_id, order_id)
+            trade_result_monitor.start(user_id, order_id)
             return 200, build_robot_payload(state)
         except Exception as exc:
             state = auto_trader.fail(user_id, "ROBOT_CYCLE_ERROR")
@@ -994,7 +1002,7 @@ async def restore_robot_states() -> None:
             session_restored = await read_restored_session_status(user_id)
             if state.operation_in_progress and state.last_trade:
                 order_id = state.last_trade.get("order_id")
-                if order_id and state.account_mode == "DEMO":
+                if order_id:
                     trade_result_monitor.start(user_id, order_id)
             if state.enabled:
                 ensure_robot_worker(user_id)
@@ -1121,9 +1129,75 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     )
 
 
+def build_robot_stats(items: list[dict[str, Any]]) -> dict[str, Any]:
+    wins = sum(1 for item in items if item.get("result") == "WIN")
+    losses = sum(1 for item in items if item.get("result") == "LOSS")
+    total_trades = wins + losses
+    profit = round(sum(float(item.get("profit") or 0) for item in items), 2)
+    gross_profit = sum(max(0.0, float(item.get("profit") or 0)) for item in items)
+    gross_loss = abs(sum(min(0.0, float(item.get("profit") or 0)) for item in items))
+    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss else round(gross_profit, 2)
+
+    current_win_streak = 0
+    current_loss_streak = 0
+    if items:
+        current_result = items[0].get("result")
+        for item in items:
+            if item.get("result") != current_result:
+                break
+            if current_result == "WIN":
+                current_win_streak += 1
+            elif current_result == "LOSS":
+                current_loss_streak += 1
+
+    best_win_streak = 0
+    best_loss_streak = 0
+    win_streak = 0
+    loss_streak = 0
+    for item in reversed(items):
+        if item.get("result") == "WIN":
+            win_streak += 1
+            loss_streak = 0
+            best_win_streak = max(best_win_streak, win_streak)
+        elif item.get("result") == "LOSS":
+            loss_streak += 1
+            win_streak = 0
+            best_loss_streak = max(best_loss_streak, loss_streak)
+
+    return {
+        "wins": wins,
+        "losses": losses,
+        "total_trades": total_trades,
+        "win_rate": round((wins / total_trades) * 100, 2) if total_trades else 0.0,
+        "profit": profit,
+        "profit_factor": profit_factor,
+        "current_win_streak": current_win_streak,
+        "current_loss_streak": current_loss_streak,
+        "best_win_streak": best_win_streak,
+        "best_loss_streak": best_loss_streak,
+    }
+
+
 @app.get("/robot/history")
-async def robot_history(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    return json_response(200, build_success(auto_trader.history(auth["user_id"])))
+async def robot_history(
+    days: int = Query(default=30),
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    if days not in {1, 7, 30}:
+        raise HTTPException(status_code=422, detail="days must be 1, 7, or 30")
+    items = robot_persistence.load_trade_history(auth["user_id"], days)
+    return json_response(200, build_success({"items": items}))
+
+
+@app.get("/robot/stats")
+async def robot_stats(
+    days: int = Query(default=30),
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    if days not in {1, 7, 30}:
+        raise HTTPException(status_code=422, detail="days must be 1, 7, or 30")
+    items = robot_persistence.load_trade_history(auth["user_id"], days)
+    return json_response(200, build_success(build_robot_stats(items)))
 
 
 @app.get("/robot/persistence")

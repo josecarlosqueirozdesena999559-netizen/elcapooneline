@@ -547,6 +547,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(main, "call_bullex_service", side_effect=fake_bullex),
             patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
+            patch.object(main.trade_result_monitor, "start", return_value=True) as monitor,
         ):
             first_status, _ = await main.execute_robot_cycle(
                 user_id,
@@ -563,6 +564,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_payload["data"]["status"], "PENDING_RESULT")
         self.assertEqual(len(orders), 1)
         self.assertTrue(orders[0][2]["confirm_real"])
+        monitor.assert_called_once_with(user_id, "real-1")
 
     async def test_pending_signal_waits_then_sends_without_reanalysis(self) -> None:
         user_id = "user-window-wait"
