@@ -1,4 +1,5 @@
 import asyncio
+import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -19,9 +20,26 @@ STATUS_ERROR = "ERROR"
 STATUS_REAL_TRADING_LOCKED = "REAL_TRADING_LOCKED"
 STATUS_WAITING_ENTRY_WINDOW = "WAITING_ENTRY_WINDOW"
 
+TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 class RobotConfigUpdate(BaseModel):
@@ -83,6 +101,23 @@ class RobotState:
             if self.next_cycle_at is not None
             else 0
         )
+        configured_expiration = TIMEFRAME_SECONDS[self.timeframe]
+        data["expiration_seconds"] = configured_expiration
+        if self.last_trade is not None:
+            trade = dict(self.last_trade)
+            trade["result"] = trade.get("result") or STATUS_PENDING_RESULT
+            data["last_trade"] = trade
+            if self.operation_in_progress:
+                expires_at = parse_datetime(trade.get("expires_at"))
+                if expires_at is None:
+                    sent_at = parse_datetime(trade.get("sent_at") or trade.get("timestamp"))
+                    if sent_at is not None:
+                        expires_at = sent_at + timedelta(seconds=configured_expiration)
+                if expires_at is not None:
+                    data["expiration_seconds"] = max(
+                        0,
+                        math.ceil((expires_at - now).total_seconds()),
+                    )
         total = self.wins + self.losses
         data["accuracy"] = round((self.wins / total) * 100, 2) if total else 0.0
         return data
@@ -210,11 +245,20 @@ class AutoTrader:
 
     def record_trade(self, user_id: str, trade: dict[str, Any]) -> RobotState:
         state = self.get(user_id)
+        trade = dict(trade)
         order_id = str(trade.get("order_id") or "").strip()
         if not order_id or order_id in self._completed_order_ids.setdefault(user_id, set()):
             return state
         if state.operation_in_progress:
             return state
+        sent_at = parse_datetime(trade.get("sent_at") or trade.get("timestamp")) or utc_now()
+        trade["sent_at"] = sent_at.isoformat()
+        trade.setdefault("timestamp", trade["sent_at"])
+        trade["result"] = trade.get("result") or STATUS_PENDING_RESULT
+        trade.setdefault(
+            "expires_at",
+            (sent_at + timedelta(seconds=TIMEFRAME_SECONDS[state.timeframe])).isoformat(),
+        )
         state.last_trade = trade
         state.last_entry_at = utc_now()
         state.operation_in_progress = True

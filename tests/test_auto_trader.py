@@ -57,6 +57,45 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertFalse(window["entry_window_open"])
         self.assertEqual(window["seconds_until_entry_window"], 56)
 
+    def test_waiting_entry_window_keeps_complete_time_contract(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-waiting-contract")
+        state.timeframe = "M5"
+        trader.update_entry_window(
+            "user-waiting-contract",
+            main.get_entry_window("M5", 120.0),
+        )
+
+        payload = state.to_dict()
+
+        self.assertEqual(payload["status"], "WAITING_ENTRY_WINDOW")
+        self.assertIn("seconds_until_next_cycle", payload)
+        self.assertEqual(payload["seconds_until_entry_window"], 170)
+        self.assertEqual(payload["expiration_seconds"], 300)
+        self.assertFalse(payload["entry_window_open"])
+        self.assertFalse(payload["operation_in_progress"])
+        self.assertIsNone(payload["last_trade"])
+
+    def test_open_operation_returns_real_remaining_expiration(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-open-expiration")
+        state.timeframe = "M5"
+        sent_at = utc_now() - timedelta(seconds=42)
+        trader.record_trade(
+            "user-open-expiration",
+            {
+                "order_id": "open-1",
+                "sent_at": sent_at.isoformat(),
+            },
+        )
+
+        payload = state.to_dict()
+
+        self.assertTrue(payload["operation_in_progress"])
+        self.assertEqual(payload["last_trade"]["result"], "PENDING_RESULT")
+        self.assertGreaterEqual(payload["expiration_seconds"], 257)
+        self.assertLessEqual(payload["expiration_seconds"], 258)
+
 
 class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
