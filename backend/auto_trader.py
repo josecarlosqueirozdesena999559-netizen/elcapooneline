@@ -81,6 +81,7 @@ class RobotState:
     last_entry_at: datetime | None = None
     operation_in_progress: bool = False
     last_signal: dict[str, Any] | None = None
+    pending_signal: dict[str, Any] | None = None
     last_trade: dict[str, Any] | None = None
     status: str = STATUS_STOPPED
     rejection_reason: str | None = None
@@ -148,7 +149,10 @@ class AutoTrader:
                 value = datetime.fromisoformat(value.replace("Z", "+00:00"))
             setattr(state, key, value)
 
-        if state.enabled and not state.operation_in_progress:
+        if state.enabled and state.pending_signal:
+            state.status = STATUS_WAITING_ENTRY_WINDOW
+            state.rejection_reason = STATUS_WAITING_ENTRY_WINDOW
+        elif state.enabled and not state.operation_in_progress:
             state.status = STATUS_WAITING_NEXT_CYCLE
             state.rejection_reason = None
         self._states[user_id] = state
@@ -215,6 +219,9 @@ class AutoTrader:
         if state.operation_in_progress:
             state.status = STATUS_PENDING_RESULT
             return False, state
+        if state.pending_signal:
+            state.status = STATUS_WAITING_ENTRY_WINDOW
+            return False, state
         if state.next_cycle_at is not None and now < state.next_cycle_at:
             state.status = STATUS_WAITING_NEXT_CYCLE
             return False, state
@@ -237,9 +244,32 @@ class AutoTrader:
         state.rejection_reason = reason
         return state
 
-    def select_signal(self, user_id: str, signal: dict[str, Any]) -> RobotState:
+    def set_pending_signal(self, user_id: str, signal: dict[str, Any]) -> RobotState:
         state = self.get(user_id)
-        state.last_signal = signal
+        pending_signal = {
+            "symbol": signal["symbol"],
+            "direction": signal["signal"],
+            "signal": signal["signal"],
+            "confidence": signal["confidence"],
+            "payout": signal["payout"],
+            "timeframe": state.timeframe,
+            "created_at": utc_now().isoformat(),
+        }
+        state.last_signal = dict(pending_signal)
+        state.pending_signal = pending_signal
+        state.status = STATUS_WAITING_ENTRY_WINDOW
+        state.rejection_reason = STATUS_WAITING_ENTRY_WINDOW
+        return state
+
+    def clear_pending_signal(self, user_id: str, *, analyze: bool = False) -> RobotState:
+        state = self.get(user_id)
+        state.pending_signal = None
+        state.last_signal = None
+        state.status = STATUS_ANALYZING if analyze else (
+            STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
+        )
+        if analyze:
+            state.next_cycle_at = utc_now()
         state.rejection_reason = None
         return state
 
@@ -279,11 +309,20 @@ class AutoTrader:
         state.seconds_until_entry_window = int(window["seconds_until_entry_window"])
         state.current_candle_seconds = float(window["current_candle_seconds"])
         state.expiration_seconds = int(window["expiration_seconds"])
-        if not state.entry_window_open and state.enabled and not state.operation_in_progress:
+        if (
+            not state.entry_window_open
+            and state.enabled
+            and not state.operation_in_progress
+            and state.pending_signal
+        ):
             state.status = STATUS_WAITING_ENTRY_WINDOW
             state.rejection_reason = STATUS_WAITING_ENTRY_WINDOW
             state.next_cycle_at = utc_now() + timedelta(seconds=state.seconds_until_entry_window)
-        elif state.entry_window_open and state.status == STATUS_WAITING_ENTRY_WINDOW:
+        elif (
+            state.entry_window_open
+            and state.status == STATUS_WAITING_ENTRY_WINDOW
+            and not state.pending_signal
+        ):
             state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
             state.rejection_reason = None
         return state

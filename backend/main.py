@@ -634,11 +634,19 @@ async def execute_robot_cycle(
     required_mode: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     async with auto_trader.lock(user_id):
-        can_run, state = auto_trader.prepare_cycle(user_id)
-        if not can_run:
-            if state.status == STATUS_WAITING_NEXT_CYCLE:
-                logger.info("[ROBOT WAITING NEXT CYCLE] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
-            return 200, build_robot_payload(state)
+        state = auto_trader.get(user_id)
+        had_pending_signal = state.pending_signal is not None
+        previous_seconds_until_entry = state.seconds_until_entry_window
+        if not had_pending_signal:
+            can_run, state = auto_trader.prepare_cycle(user_id)
+            if not can_run:
+                if state.status == STATUS_WAITING_NEXT_CYCLE:
+                    logger.info(
+                        "[ROBOT WAITING NEXT CYCLE] user_id=%s next_cycle_at=%s",
+                        user_id,
+                        state.next_cycle_at,
+                    )
+                return 200, build_robot_payload(state)
 
         logger.info("[ROBOT TICK] user_id=%s", user_id)
         try:
@@ -690,19 +698,134 @@ async def execute_robot_cycle(
                 state = auto_trader.fail(user_id, "SERVER_TIME_UNAVAILABLE")
                 logger.error("[ROBOT ERROR] user_id=%s error=SERVER_TIME_UNAVAILABLE", user_id)
                 return status_code, build_robot_payload(state)
-            if not entry_window["entry_window_open"]:
-                logger.info(
-                    "[ENTRY_WINDOW_WAIT] user_id=%s server_time=%s timeframe=%s "
-                    "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
-                    user_id,
-                    entry_window["server_time"],
-                    state.timeframe,
-                    entry_window["current_candle_seconds"],
-                    entry_window["seconds_until_close"],
-                    entry_window["expiration"],
+            selected = dict(state.pending_signal) if state.pending_signal else None
+            if selected is not None and not entry_window["entry_window_open"]:
+                missed_window = (
+                    entry_window["seconds_until_entry_window"]
+                    > previous_seconds_until_entry + ENTRY_WINDOW_SECONDS[state.timeframe]
                 )
+                if not missed_window:
+                    logger.info(
+                        "[ENTRY_WINDOW_WAIT] user_id=%s server_time=%s timeframe=%s "
+                        "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
+                        user_id,
+                        entry_window["server_time"],
+                        state.timeframe,
+                        entry_window["current_candle_seconds"],
+                        entry_window["seconds_until_close"],
+                        entry_window["expiration"],
+                    )
+                    return 200, build_robot_payload(state)
+                logger.info(
+                    "[PENDING_SIGNAL_CLEARED] user_id=%s symbol=%s reason=ENTRY_WINDOW_MISSED",
+                    user_id,
+                    selected.get("symbol"),
+                )
+                state = auto_trader.clear_pending_signal(user_id, analyze=True)
                 return 200, build_robot_payload(state)
 
+            if selected is None:
+                scan_status, scan_payload = await scan_local_signals(
+                    user_id,
+                    limit=len(BINARY_ALLOWED_ASSETS),
+                    include_wait=True,
+                    timeframe=state.timeframe,
+                    endtime=int(entry_window["server_timestamp"]),
+                )
+                if not scan_payload.get("ok"):
+                    state = auto_trader.fail(
+                        user_id,
+                        str(scan_payload.get("error") or "SIGNAL_SCAN_FAILED"),
+                    )
+                    logger.error("[ROBOT ERROR] user_id=%s error=%s", user_id, state.rejection_reason)
+                    return scan_status, build_robot_payload(state)
+
+                signals = [item for item in scan_payload.get("data", []) if isinstance(item, dict)]
+                if not signals:
+                    state = auto_trader.reject(user_id, "NO_SIGNAL")
+                    logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=NO_SIGNAL", user_id)
+                    return 200, build_robot_payload(state)
+
+                selected = max(
+                    signals,
+                    key=lambda item: (
+                        int(item.get("confidence") or 0),
+                        int(item.get("strength") or 0),
+                    ),
+                )
+                symbol = normalize_binary_active(str(selected.get("symbol") or ""))
+                payout_status, payout_payload = await call_bullex_service(
+                    "GET",
+                    "/payouts",
+                    user_id,
+                    params={"active": symbol},
+                )
+                mark_disconnected_from_payload(user_id, payout_payload)
+                payout = extract_payout(payout_payload, symbol) if payout_payload.get("ok") else None
+                selected = {**selected, "symbol": symbol, "payout": payout}
+
+                rejection = robot_stop_reason(state)
+                if rejection is None and not is_binary_asset_allowed(symbol):
+                    rejection = ASSET_NOT_ALLOWED
+                if rejection is None and selected.get("signal") not in {"CALL", "PUT"}:
+                    rejection = "SIGNAL_WAIT"
+                if rejection is None and int(selected.get("confidence") or 0) < state.min_confidence:
+                    rejection = "CONFIDENCE_BELOW_MINIMUM"
+                if rejection is None and (payout is None or payout < state.min_payout):
+                    rejection = "PAYOUT_BELOW_MINIMUM"
+                if payout_status >= 400 and rejection is None:
+                    rejection = str(payout_payload.get("error") or "PAYOUT_UNAVAILABLE")
+                if rejection is None and not state.enabled:
+                    rejection = "ROBOT_STOPPED"
+
+                if rejection is not None:
+                    state = auto_trader.reject(user_id, rejection)
+                    logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=%s", user_id, rejection)
+                    return 200, build_robot_payload(state)
+
+                state = auto_trader.set_pending_signal(user_id, selected)
+                selected = dict(state.pending_signal or {})
+                logger.info(
+                    "[PENDING_SIGNAL_SET] user_id=%s symbol=%s signal=%s confidence=%s "
+                    "payout=%s timeframe=%s",
+                    user_id,
+                    selected.get("symbol"),
+                    selected.get("signal"),
+                    selected.get("confidence"),
+                    selected.get("payout"),
+                    selected.get("timeframe"),
+                )
+
+                timing_status, timing_payload, entry_window = await refresh_entry_window(user_id, state)
+                if entry_window is None:
+                    state = auto_trader.fail(user_id, "SERVER_TIME_UNAVAILABLE")
+                    logger.error("[ROBOT ERROR] user_id=%s error=SERVER_TIME_UNAVAILABLE", user_id)
+                    return timing_status, build_robot_payload(state)
+                connected, active_mode = extract_account_status(timing_payload)
+                if not connected or active_mode != expected_bullex_mode:
+                    reason = (
+                        "ACCOUNT_DISCONNECTED"
+                        if not connected
+                        else f"ACCOUNT_MODE_MUST_BE_{expected_bullex_mode}"
+                    )
+                    state = auto_trader.reject(user_id, reason)
+                    return 200, build_robot_payload(state)
+                if not entry_window["entry_window_open"]:
+                    logger.info(
+                        "[ENTRY_WINDOW_WAIT] user_id=%s server_time=%s timeframe=%s "
+                        "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
+                        user_id,
+                        entry_window["server_time"],
+                        state.timeframe,
+                        entry_window["current_candle_seconds"],
+                        entry_window["seconds_until_close"],
+                        entry_window["expiration"],
+                    )
+                    return 200, build_robot_payload(state)
+
+            symbol = str(selected["symbol"])
+            direction = str(selected.get("signal") or selected.get("direction"))
+            payout = selected.get("payout")
             logger.info(
                 "[ENTRY_WINDOW_OPEN] user_id=%s server_time=%s timeframe=%s "
                 "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
@@ -714,96 +837,9 @@ async def execute_robot_cycle(
                 entry_window["expiration"],
             )
 
-            scan_status, scan_payload = await scan_local_signals(
-                user_id,
-                limit=len(BINARY_ALLOWED_ASSETS),
-                include_wait=True,
-                timeframe=state.timeframe,
-                endtime=int(entry_window["server_timestamp"]),
-            )
-            if not scan_payload.get("ok"):
-                state = auto_trader.fail(user_id, str(scan_payload.get("error") or "SIGNAL_SCAN_FAILED"))
-                logger.error("[ROBOT ERROR] user_id=%s error=%s", user_id, state.rejection_reason)
-                return scan_status, build_robot_payload(state)
-
-            signals = [item for item in scan_payload.get("data", []) if isinstance(item, dict)]
-            if not signals:
-                state = auto_trader.reject(user_id, "NO_SIGNAL")
-                logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=NO_SIGNAL", user_id)
-                return 200, build_robot_payload(state)
-
-            selected = max(
-                signals,
-                key=lambda item: (
-                    int(item.get("confidence") or 0),
-                    int(item.get("strength") or 0),
-                ),
-            )
-            symbol = normalize_binary_active(str(selected.get("symbol") or ""))
-            payout_status, payout_payload = await call_bullex_service(
-                "GET",
-                "/payouts",
-                user_id,
-                params={"active": symbol},
-            )
-            mark_disconnected_from_payload(user_id, payout_payload)
-            payout = extract_payout(payout_payload, symbol) if payout_payload.get("ok") else None
-            selected = {**selected, "symbol": symbol, "payout": payout}
-            auto_trader.select_signal(user_id, selected)
-            logger.info(
-                "[ROBOT SIGNAL SELECTED] user_id=%s symbol=%s signal=%s confidence=%s payout=%s",
-                user_id,
-                symbol,
-                selected.get("signal"),
-                selected.get("confidence"),
-                payout,
-            )
-
-            rejection = robot_stop_reason(state)
-            if rejection is None and not is_binary_asset_allowed(symbol):
-                rejection = ASSET_NOT_ALLOWED
-            if rejection is None and selected.get("signal") not in {"CALL", "PUT"}:
-                rejection = "SIGNAL_WAIT"
-            if rejection is None and int(selected.get("confidence") or 0) < state.min_confidence:
-                rejection = "CONFIDENCE_BELOW_MINIMUM"
-            if rejection is None and (payout is None or payout < state.min_payout):
-                rejection = "PAYOUT_BELOW_MINIMUM"
-            if payout_status >= 400 and rejection is None:
-                rejection = str(payout_payload.get("error") or "PAYOUT_UNAVAILABLE")
-            if rejection is None and not state.enabled:
-                rejection = "ROBOT_STOPPED"
-
-            if rejection is not None:
-                state = auto_trader.reject(user_id, rejection)
-                logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=%s", user_id, rejection)
-                return 200, build_robot_payload(state)
-
-            timing_status, timing_payload, entry_window = await refresh_entry_window(user_id, state)
-            if entry_window is None:
-                state = auto_trader.fail(user_id, "SERVER_TIME_UNAVAILABLE")
-                logger.error("[ROBOT ERROR] user_id=%s error=SERVER_TIME_UNAVAILABLE", user_id)
-                return timing_status, build_robot_payload(state)
-            connected, active_mode = extract_account_status(timing_payload)
-            if not connected or active_mode != expected_bullex_mode:
-                reason = "ACCOUNT_DISCONNECTED" if not connected else f"ACCOUNT_MODE_MUST_BE_{expected_bullex_mode}"
-                state = auto_trader.reject(user_id, reason)
-                return 200, build_robot_payload(state)
-            if not entry_window["entry_window_open"]:
-                logger.info(
-                    "[ENTRY_WINDOW_WAIT] user_id=%s server_time=%s timeframe=%s "
-                    "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
-                    user_id,
-                    entry_window["server_time"],
-                    state.timeframe,
-                    entry_window["current_candle_seconds"],
-                    entry_window["seconds_until_close"],
-                    entry_window["expiration"],
-                )
-                return 200, build_robot_payload(state)
-
             order_body = {
                 "active": symbol,
-                "action": str(selected["signal"]).lower(),
+                "action": direction.lower(),
                 "amount": state.entry_value,
                 "expiration": entry_window["expiration_minutes"],
             }
@@ -834,7 +870,7 @@ async def execute_robot_cycle(
                 **order_data,
                 "mode": state.account_mode,
                 "active": symbol,
-                "direction": selected["signal"],
+                "direction": direction,
                 "amount": state.entry_value,
                 "confidence": selected["confidence"],
                 "payout": payout,
@@ -843,6 +879,12 @@ async def execute_robot_cycle(
                 "sent_at": datetime.now(timezone.utc).isoformat(),
             }
             trade["timestamp"] = trade["sent_at"]
+            auto_trader.clear_pending_signal(user_id)
+            logger.info(
+                "[PENDING_SIGNAL_CLEARED] user_id=%s symbol=%s reason=TRADE_SENT",
+                user_id,
+                symbol,
+            )
             state = auto_trader.record_trade(user_id, trade)
             logger.info(
                 "[TRADE_SENT_AT] user_id=%s server_time=%s timeframe=%s "
