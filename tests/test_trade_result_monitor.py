@@ -1,8 +1,16 @@
 import asyncio
 import unittest
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
-from backend.auto_trader import AutoTrader, STATUS_PENDING_RESULT, STATUS_WAITING_NEXT_CYCLE
+from backend.auto_trader import (
+    AutoTrader,
+    STATUS_ANALYZING,
+    STATUS_PENDING_RESULT,
+    STATUS_WAITING_NEXT_CYCLE,
+    parse_datetime,
+    utc_now,
+)
 from backend.trade_result_monitor import TradeResultMonitor, normalize_trade_result
 
 
@@ -40,6 +48,18 @@ class AutoTraderResultTests(unittest.TestCase):
         self.assertEqual(history["accuracy"], 100.0)
         self.assertEqual(len(history["trades"]), 1)
         self.assertEqual(history["trades"][0]["result"], "WIN")
+        finished_at = state.last_trade["finished_at"]
+        self.assertIsNotNone(finished_at)
+        self.assertEqual(
+            state.next_cycle_at,
+            parse_datetime(finished_at) + timedelta(minutes=state.cycle_minutes),
+        )
+        payload = state.to_dict()
+        self.assertEqual(payload["status"], STATUS_WAITING_NEXT_CYCLE)
+        self.assertFalse(payload["operation_in_progress"])
+        self.assertFalse(payload["entry_window_open"])
+        self.assertGreaterEqual(payload["seconds_until_next_cycle"], 599)
+        self.assertLessEqual(payload["seconds_until_next_cycle"], 600)
 
     def test_loss_subtracts_entry_amount(self) -> None:
         trader = AutoTrader()
@@ -79,6 +99,24 @@ class AutoTraderResultTests(unittest.TestCase):
         self.assertEqual(state.last_trade["result"], "TIMEOUT")
         self.assertEqual(state.wins, 0)
         self.assertEqual(state.losses, 0)
+
+    def test_next_operation_is_blocked_until_cycle_delay_finishes(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-cycle-delay")
+        state.cycle_minutes = 10
+        trader.record_trade("user-cycle-delay", pending_trade("cycle-delay"))
+        trader.finish_trade("user-cycle-delay", "cycle-delay", "LOSS", -2)
+
+        can_run, waiting = trader.prepare_cycle("user-cycle-delay")
+
+        self.assertFalse(can_run)
+        self.assertEqual(waiting.status, STATUS_WAITING_NEXT_CYCLE)
+        waiting.next_cycle_at = utc_now() - timedelta(seconds=1)
+
+        can_run, analyzing = trader.prepare_cycle("user-cycle-delay")
+
+        self.assertTrue(can_run)
+        self.assertEqual(analyzing.status, STATUS_ANALYZING)
 
 
 class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):

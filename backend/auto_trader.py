@@ -134,6 +134,18 @@ class AutoTrader:
     def get(self, user_id: str) -> RobotState:
         return self._states.setdefault(user_id, RobotState())
 
+    @staticmethod
+    def _next_cycle_base(state: RobotState) -> datetime | None:
+        if state.last_trade:
+            finished_at = parse_datetime(state.last_trade.get("finished_at"))
+            if finished_at is not None:
+                return finished_at
+        return state.last_entry_at
+
+    def _schedule_next_cycle(self, state: RobotState, base: datetime | None = None) -> None:
+        cycle_base = base or self._next_cycle_base(state) or utc_now()
+        state.next_cycle_at = cycle_base + timedelta(minutes=state.cycle_minutes)
+
     def restore(
         self,
         user_id: str,
@@ -155,6 +167,8 @@ class AutoTrader:
         elif state.enabled and not state.operation_in_progress:
             state.status = STATUS_WAITING_NEXT_CYCLE
             state.rejection_reason = None
+            self._schedule_next_cycle(state)
+            state.entry_window_open = False
         self._states[user_id] = state
 
         restored_trades = [dict(trade) for trade in (trades or [])]
@@ -178,8 +192,8 @@ class AutoTrader:
             setattr(state, key, value)
 
         if "cycle_minutes" in changes and state.next_cycle_at is not None:
-            base = state.current_cycle_started_at or utc_now()
-            state.next_cycle_at = base + timedelta(minutes=state.cycle_minutes)
+            base = self._next_cycle_base(state) or state.current_cycle_started_at or utc_now()
+            self._schedule_next_cycle(state, base)
 
         if changes.get("account_mode") == "REAL":
             state.enabled = False
@@ -290,7 +304,7 @@ class AutoTrader:
             (sent_at + timedelta(seconds=TIMEFRAME_SECONDS[state.timeframe])).isoformat(),
         )
         state.last_trade = trade
-        state.last_entry_at = utc_now()
+        state.last_entry_at = sent_at
         state.operation_in_progress = True
         state.status = STATUS_PENDING_RESULT
         state.rejection_reason = None
@@ -305,7 +319,12 @@ class AutoTrader:
     def update_entry_window(self, user_id: str, window: dict[str, Any]) -> RobotState:
         state = self.get(user_id)
         state.server_time = window["server_time"]
-        state.entry_window_open = bool(window["entry_window_open"])
+        waiting_next_cycle = (
+            state.status == STATUS_WAITING_NEXT_CYCLE
+            and not state.pending_signal
+            and not state.operation_in_progress
+        )
+        state.entry_window_open = bool(window["entry_window_open"]) and not waiting_next_cycle
         state.seconds_until_entry_window = int(window["seconds_until_entry_window"])
         state.current_candle_seconds = float(window["current_candle_seconds"])
         state.expiration_seconds = int(window["expiration_seconds"])
@@ -353,11 +372,12 @@ class AutoTrader:
             trade_profit = trade_profit if trade_profit < 0 else -amount
             state.profit += trade_profit
 
+        finished_at = utc_now()
         trade.update(
             {
                 "result": normalized_result,
                 "profit": round(trade_profit, 2),
-                "finished_at": utc_now().isoformat(),
+                "finished_at": finished_at.isoformat(),
             }
         )
         completed.add(normalized_order_id)
@@ -365,6 +385,9 @@ class AutoTrader:
         state.operation_in_progress = False
         state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
         state.rejection_reason = None
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        self._schedule_next_cycle(state, finished_at)
         state.profit = round(state.profit, 2)
         history = self._histories.setdefault(user_id, [])
         history.append(dict(trade))
@@ -383,11 +406,12 @@ class AutoTrader:
             return False, state
 
         trade = dict(state.last_trade)
+        finished_at = utc_now()
         trade.update(
             {
                 "result": "TIMEOUT",
                 "profit": 0.0,
-                "finished_at": utc_now().isoformat(),
+                "finished_at": finished_at.isoformat(),
             }
         )
         completed.add(normalized_order_id)
@@ -395,6 +419,9 @@ class AutoTrader:
         state.operation_in_progress = False
         state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
         state.rejection_reason = "TRADE_RESULT_TIMEOUT"
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        self._schedule_next_cycle(state, finished_at)
         history = self._histories.setdefault(user_id, [])
         history.append(dict(trade))
         del history[:-100]

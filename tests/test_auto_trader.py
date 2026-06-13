@@ -130,10 +130,104 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertEqual(restored.pending_signal["signal"], "CALL")
         self.assertEqual(restored.last_signal, restored.pending_signal)
 
+    def test_restore_rebuilds_next_cycle_from_finished_at(self) -> None:
+        finished_at = utc_now() - timedelta(minutes=2)
+        trader = AutoTrader()
+
+        restored = trader.restore(
+            "user-finished-restore",
+            {
+                "enabled": True,
+                "cycle_minutes": 10,
+                "last_entry_at": (finished_at - timedelta(minutes=1)).isoformat(),
+                "last_trade": {
+                    "order_id": "finished-1",
+                    "result": "WIN",
+                    "finished_at": finished_at.isoformat(),
+                },
+                "status": "WAITING_NEXT_CYCLE",
+                "entry_window_open": True,
+            },
+        )
+
+        self.assertEqual(restored.status, "WAITING_NEXT_CYCLE")
+        self.assertFalse(restored.entry_window_open)
+        self.assertEqual(
+            restored.next_cycle_at,
+            finished_at + timedelta(minutes=10),
+        )
+        self.assertGreaterEqual(restored.to_dict()["seconds_until_next_cycle"], 479)
+        self.assertLessEqual(restored.to_dict()["seconds_until_next_cycle"], 480)
+
+    def test_restore_uses_last_entry_when_finished_at_is_missing(self) -> None:
+        last_entry_at = utc_now() - timedelta(minutes=3)
+        trader = AutoTrader()
+
+        restored = trader.restore(
+            "user-entry-restore",
+            {
+                "enabled": True,
+                "cycle_minutes": 10,
+                "last_entry_at": last_entry_at.isoformat(),
+                "last_trade": {"order_id": "open-without-finished", "result": "LOSS"},
+            },
+        )
+
+        self.assertEqual(
+            restored.next_cycle_at,
+            last_entry_at + timedelta(minutes=10),
+        )
+
 
 class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         main.auto_trader = AutoTrader()
+
+    async def test_robot_state_after_result_returns_next_cycle_contract(self) -> None:
+        user_id = "user-result-state"
+        state = main.auto_trader.start(user_id)
+        state.cycle_minutes = 10
+        main.auto_trader.record_trade(
+            user_id,
+            {
+                "order_id": "result-state-1",
+                "active": "EURUSD-OTC",
+                "direction": "CALL",
+                "amount": 2,
+                "result": "PENDING_RESULT",
+            },
+        )
+        main.auto_trader.finish_trade(user_id, "result-state-1", "WIN", 1.76)
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success(
+                            {
+                                "connected": True,
+                                "active_mode": "PRACTICE",
+                                "server_time": SERVER_TIME_M1_OPEN,
+                            }
+                        ),
+                    )
+                ),
+            ),
+            patch.object(main, "sync_user_store_from_payload"),
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        payload = json.loads(response.body)["data"]
+        self.assertEqual(payload["status"], "WAITING_NEXT_CYCLE")
+        self.assertEqual(payload["last_trade"]["result"], "WIN")
+        self.assertIsNotNone(payload["last_trade"]["finished_at"])
+        self.assertFalse(payload["operation_in_progress"])
+        self.assertFalse(payload["entry_window_open"])
+        self.assertGreaterEqual(payload["seconds_until_next_cycle"], 599)
+        self.assertLessEqual(payload["seconds_until_next_cycle"], 600)
 
     async def test_demo_sends_at_most_one_order_per_cycle(self) -> None:
         user_id = "user-demo"
