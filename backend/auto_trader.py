@@ -133,11 +133,17 @@ class AutoTrader:
             base = state.current_cycle_started_at or utc_now()
             state.next_cycle_at = base + timedelta(minutes=state.cycle_minutes)
 
+        if changes.get("account_mode") == "REAL":
+            state.enabled = False
+            state.status = STATUS_STOPPED
+            state.next_cycle_at = None
+
         if "enabled" in changes:
-            if state.enabled:
+            if state.enabled and state.account_mode == "DEMO":
                 state.status = STATUS_WAITING_NEXT_CYCLE
                 state.next_cycle_at = utc_now()
             else:
+                state.enabled = False
                 state.status = STATUS_STOPPED
         return state
 

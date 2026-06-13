@@ -320,10 +320,14 @@ por ate 180 segundos. Quando a BullEx informa o fechamento:
 `GET /robot/history` retorna `wins`, `losses`, `profit`, `accuracy` e as ultimas
 100 operacoes. Um `order_id` finalizado nunca e contabilizado duas vezes.
 
-Para REAL, alem de `account_mode: REAL`, `allow_real: true` e
-`confirm_real: true`, a chamada de `POST /robot/execute-real` exige o header
-`x-confirm-real: true`. `entry_value` nao pode ultrapassar
+Para REAL, configure explicitamente `account_mode: REAL`, `allow_real: true` e
+`confirm_real: true`, depois use `POST /robot/start`. O backend tambem exige a
+sessao BullEx conectada em modo `REAL`. `entry_value` nao pode ultrapassar
 `ROBOT_REAL_MAX_ENTRY`, cujo padrao e `10`.
+
+`GET /robot/state` retorna `active_mode`, `real_ready` e
+`real_block_reason` para o painel habilitar a acao REAL somente quando todas as
+travas estiverem satisfeitas.
 
 ## Fase 17 - persistencia de sessao e robo
 

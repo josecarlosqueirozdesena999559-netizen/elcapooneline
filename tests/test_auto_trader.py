@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
@@ -135,16 +136,170 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         state = main.auto_trader.start(user_id)
         state.account_mode = "REAL"
 
-        with patch.object(main, "call_bullex_service", new=AsyncMock()) as service_call:
+        with patch.object(
+            main,
+            "call_bullex_service",
+            new=AsyncMock(
+                return_value=(
+                    200,
+                    main.build_success({"connected": True, "active_mode": "REAL"}),
+                )
+            ),
+        ) as service_call:
             status_code, payload = await main.execute_robot_cycle(
                 user_id,
                 required_mode="REAL",
-                confirm_real_header=True,
             )
 
         self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"], main.REAL_TRADING_LOCKED)
-        service_call.assert_not_awaited()
+        self.assertEqual(payload["error"], "ALLOW_REAL_REQUIRED")
+        service_call.assert_awaited_once()
+
+    async def test_real_without_confirm_real_is_blocked(self) -> None:
+        user_id = "user-real-no-confirm"
+        state = main.auto_trader.get(user_id)
+        state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = False
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success({"connected": True, "active_mode": "REAL"}),
+                    )
+                ),
+            ),
+            patch.object(main, "persist_robot"),
+            patch.object(main, "ensure_robot_worker") as ensure_worker,
+        ):
+            response = await main.robot_start({"user_id": user_id})
+
+        payload = json.loads(response.body)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(payload["error"], "CONFIRM_REAL_REQUIRED")
+        self.assertFalse(state.enabled)
+        ensure_worker.assert_not_called()
+
+    async def test_real_with_practice_active_mode_is_blocked(self) -> None:
+        user_id = "user-real-practice"
+        state = main.auto_trader.get(user_id)
+        state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = True
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success({"connected": True, "active_mode": "PRACTICE"}),
+                    )
+                ),
+            ),
+            patch.object(main, "persist_robot"),
+            patch.object(main, "ensure_robot_worker") as ensure_worker,
+        ):
+            response = await main.robot_start({"user_id": user_id})
+
+        payload = json.loads(response.body)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(payload["error"], "BULLEX_ACTIVE_MODE_NOT_REAL")
+        self.assertFalse(state.enabled)
+        ensure_worker.assert_not_called()
+
+    async def test_confirmed_real_start_is_allowed(self) -> None:
+        user_id = "user-real-start"
+        state = main.auto_trader.get(user_id)
+        state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = True
+        state.entry_value = min(2, main.config.robot_real_max_entry)
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success({"connected": True, "active_mode": "REAL"}),
+                    )
+                ),
+            ),
+            patch.object(main, "persist_robot"),
+            patch.object(main, "ensure_robot_worker") as ensure_worker,
+        ):
+            response = await main.robot_start({"user_id": user_id})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(state.enabled)
+        ensure_worker.assert_called_once_with(user_id)
+
+    async def test_real_entry_above_limit_is_blocked(self) -> None:
+        user_id = "user-real-over-limit"
+        state = main.auto_trader.get(user_id)
+        state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = True
+        state.entry_value = main.config.robot_real_max_entry + 0.01
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success({"connected": True, "active_mode": "REAL"}),
+                    )
+                ),
+            ),
+            patch.object(main, "persist_robot"),
+            patch.object(main, "ensure_robot_worker") as ensure_worker,
+        ):
+            response = await main.robot_start({"user_id": user_id})
+
+        payload = json.loads(response.body)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(payload["error"], "REAL_ENTRY_VALUE_EXCEEDS_MAX")
+        self.assertFalse(state.enabled)
+        ensure_worker.assert_not_called()
+
+    async def test_robot_state_reports_real_readiness(self) -> None:
+        user_id = "user-real-ready"
+        state = main.auto_trader.get(user_id)
+        state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = True
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success({"connected": True, "active_mode": "REAL"}),
+                    )
+                ),
+            ),
+            patch.object(main, "sync_user_store_from_payload"),
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertTrue(data["allow_real"])
+        self.assertTrue(data["confirm_real"])
+        self.assertEqual(data["account_mode"], "REAL")
+        self.assertEqual(data["active_mode"], "REAL")
+        self.assertTrue(data["real_ready"])
+        self.assertIsNone(data["real_block_reason"])
 
     async def test_confirmed_real_sends_at_most_one_order_per_cycle(self) -> None:
         user_id = "user-real"
@@ -176,12 +331,10 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             first_status, _ = await main.execute_robot_cycle(
                 user_id,
                 required_mode="REAL",
-                confirm_real_header=True,
             )
             second_status, second_payload = await main.execute_robot_cycle(
                 user_id,
                 required_mode="REAL",
-                confirm_real_header=True,
             )
 
         orders = [call for call in calls if call[1] == "/orders/buy-real"]

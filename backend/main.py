@@ -27,7 +27,6 @@ from backend.user_store import UserStore, create_user_store
 logger = logging.getLogger("backend-gateway")
 
 ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
-REAL_TRADING_LOCKED = "REAL_TRADING_LOCKED"
 SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
 SESSION_DISCONNECTED = "SESSION_DISCONNECTED"
 BINARY_ALLOWED_ASSETS = [
@@ -397,6 +396,22 @@ def extract_account_status(payload: dict[str, Any]) -> tuple[bool, str | None]:
     return connected, str(mode).strip().upper() if mode else None
 
 
+def real_block_reason(state: Any, *, connected: bool, active_mode: str | None) -> str | None:
+    if state.account_mode != "REAL":
+        return "ACCOUNT_MODE_NOT_REAL"
+    if not connected:
+        return "BULLEX_NOT_CONNECTED"
+    if active_mode != "REAL":
+        return "BULLEX_ACTIVE_MODE_NOT_REAL"
+    if not state.allow_real:
+        return "ALLOW_REAL_REQUIRED"
+    if not state.confirm_real:
+        return "CONFIRM_REAL_REQUIRED"
+    if state.entry_value > config.robot_real_max_entry:
+        return "REAL_ENTRY_VALUE_EXCEEDS_MAX"
+    return None
+
+
 def extract_payout(payload: dict[str, Any], symbol: str) -> float | None:
     data = payload.get("data")
     if not isinstance(data, list):
@@ -425,6 +440,23 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     data = state.to_dict()
     data.update(extra)
     return build_success(data)
+
+
+async def submit_bullex_order(
+    user_id: str,
+    endpoint: str,
+    body: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    service_paths = {
+        "/bullex/buy-demo": "/orders/buy-demo",
+        "/bullex/buy-real": "/orders/buy-real",
+    }
+    return await call_bullex_service(
+        "POST",
+        service_paths[endpoint],
+        user_id,
+        json_body=body,
+    )
 
 
 def persist_robot(user_id: str) -> None:
@@ -514,7 +546,6 @@ async def execute_robot_cycle(
     user_id: str,
     *,
     required_mode: str | None = None,
-    confirm_real_header: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     async with auto_trader.lock(user_id):
         can_run, state = auto_trader.prepare_cycle(user_id)
@@ -534,19 +565,29 @@ async def execute_robot_cycle(
             if required_mode is not None and state.account_mode != required_mode:
                 return 409, build_error(f"ACCOUNT_MODE_NOT_{required_mode}")
 
-            if state.account_mode == "REAL" and (
-                not state.allow_real
-                or not state.confirm_real
-                or not confirm_real_header
-                or state.entry_value > config.robot_real_max_entry
-            ):
-                auto_trader.lock_real(user_id)
-                logger.warning("[ROBOT REAL BLOCKED] user_id=%s", user_id)
-                return 403, build_error(REAL_TRADING_LOCKED)
-
             status_code, account_payload = await call_bullex_service("GET", "/sessions/status", user_id)
             mark_disconnected_from_payload(user_id, account_payload)
             connected, active_mode = extract_account_status(account_payload)
+            if state.account_mode == "REAL":
+                logger.info(
+                    "[REAL_TRADE_ATTEMPT] user_id=%s entry_value=%s",
+                    user_id,
+                    state.entry_value,
+                )
+                block_reason = real_block_reason(
+                    state,
+                    connected=connected,
+                    active_mode=active_mode,
+                )
+                if block_reason is not None:
+                    auto_trader.lock_real(user_id, block_reason)
+                    logger.warning(
+                        "[REAL_TRADE_BLOCKED] user_id=%s reason=%s",
+                        user_id,
+                        block_reason,
+                    )
+                    return 403, build_error(block_reason)
+
             expected_bullex_mode = "PRACTICE" if state.account_mode == "DEMO" else "REAL"
             if not connected:
                 state = auto_trader.reject(user_id, "ACCOUNT_DISCONNECTED")
@@ -629,16 +670,15 @@ async def execute_robot_cycle(
                 "amount": state.entry_value,
                 "expiration": 1,
             }
-            order_path = "/orders/buy-demo"
+            order_path = "/bullex/buy-demo"
             if state.account_mode == "REAL":
-                order_path = "/orders/buy-real"
+                order_path = "/bullex/buy-real"
                 order_body["confirm_real"] = True
 
-            order_status, order_payload = await call_bullex_service(
-                "POST",
-                order_path,
+            order_status, order_payload = await submit_bullex_order(
                 user_id,
-                json_body=order_body,
+                order_path,
+                order_body,
             )
             mark_disconnected_from_payload(user_id, order_payload)
             if not order_payload.get("ok"):
@@ -667,8 +707,18 @@ async def execute_robot_cycle(
             }
             trade["timestamp"] = trade["sent_at"]
             state = auto_trader.record_trade(user_id, trade)
-            log_label = "[ROBOT DEMO ORDER SENT]" if state.account_mode == "DEMO" else "[ROBOT REAL ORDER SENT]"
-            logger.info("%s user_id=%s order_id=%s", log_label, user_id, trade.get("order_id"))
+            if state.account_mode == "REAL":
+                logger.info(
+                    "[REAL_TRADE_SENT] user_id=%s order_id=%s",
+                    user_id,
+                    trade.get("order_id"),
+                )
+            else:
+                logger.info(
+                    "[ROBOT DEMO ORDER SENT] user_id=%s order_id=%s",
+                    user_id,
+                    trade.get("order_id"),
+                )
             if state.account_mode == "DEMO":
                 trade_result_monitor.start(user_id, order_id)
             return 200, build_robot_payload(state)
@@ -857,12 +907,16 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     _, session_payload = await call_bullex_service("GET", "/sessions/status", auth["user_id"])
     sync_user_store_from_payload(auth["user_id"], session_payload)
     connected, active_mode = extract_account_status(session_payload)
+    state = auto_trader.get(auth["user_id"])
+    block_reason = real_block_reason(state, connected=connected, active_mode=active_mode)
     return json_response(
         200,
         build_robot_payload(
-            auto_trader.get(auth["user_id"]),
+            state,
             connected=connected,
             active_mode=active_mode,
+            real_ready=block_reason is None,
+            real_block_reason=block_reason,
         ),
     )
 
@@ -932,10 +986,27 @@ async def robot_config(
 
 @app.post("/robot/start")
 async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    state = auto_trader.start(auth["user_id"])
-    persist_robot(auth["user_id"])
-    ensure_robot_worker(auth["user_id"])
-    logger.info("[ROBOT START] user_id=%s", auth["user_id"])
+    user_id = auth["user_id"]
+    state = auto_trader.get(user_id)
+    if state.account_mode == "REAL":
+        _, session_payload = await call_bullex_service("GET", "/sessions/status", user_id)
+        mark_disconnected_from_payload(user_id, session_payload)
+        connected, active_mode = extract_account_status(session_payload)
+        block_reason = real_block_reason(state, connected=connected, active_mode=active_mode)
+        if block_reason is not None:
+            auto_trader.lock_real(user_id, block_reason)
+            persist_robot(user_id)
+            logger.warning(
+                "[REAL_TRADE_BLOCKED] user_id=%s reason=%s",
+                user_id,
+                block_reason,
+            )
+            return json_response(403, build_error(block_reason))
+
+    state = auto_trader.start(user_id)
+    persist_robot(user_id)
+    ensure_robot_worker(user_id)
+    logger.info("[ROBOT START] user_id=%s", user_id)
     return json_response(200, build_robot_payload(state))
 
 
@@ -962,14 +1033,11 @@ async def robot_execute_demo(auth: dict[str, str] = Depends(require_headers)) ->
 
 @app.post("/robot/execute-real")
 async def robot_execute_real(
-    x_confirm_real: str | None = Header(default=None),
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
-    confirmed = str(x_confirm_real or "").strip().lower() == "true"
     status_code, payload = await execute_robot_cycle(
         auth["user_id"],
         required_mode="REAL",
-        confirm_real_header=confirmed,
     )
     return json_response(status_code, payload)
 
