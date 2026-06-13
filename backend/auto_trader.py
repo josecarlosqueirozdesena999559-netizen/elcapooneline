@@ -15,7 +15,9 @@ STATUS_WAITING_NEXT_CYCLE = "WAITING_NEXT_CYCLE"
 STATUS_ANALYZING = "ANALYZING"
 STATUS_SIGNAL_REJECTED = "SIGNAL_REJECTED"
 STATUS_ENTRY_SENT = "ENTRY_SENT"
+STATUS_SENDING_ORDER = "SENDING_ORDER"
 STATUS_PENDING_RESULT = "PENDING_RESULT"
+STATUS_ORDER_REJECTED = "ORDER_REJECTED"
 STATUS_ERROR = "ERROR"
 STATUS_REAL_TRADING_LOCKED = "REAL_TRADING_LOCKED"
 STATUS_WAITING_ENTRY_WINDOW = "WAITING_ENTRY_WINDOW"
@@ -285,6 +287,21 @@ class AutoTrader:
         if analyze:
             state.next_cycle_at = utc_now()
         state.rejection_reason = None
+        return state
+
+    def start_sending_order(self, user_id: str) -> RobotState:
+        state = self.get(user_id)
+        state.status = STATUS_SENDING_ORDER
+        state.rejection_reason = None
+        return state
+
+    def reject_order(self, user_id: str, reason: str) -> RobotState:
+        state = self.get(user_id)
+        state.pending_signal = None
+        state.last_signal = None
+        state.operation_in_progress = False
+        state.status = STATUS_ORDER_REJECTED
+        state.rejection_reason = reason
         return state
 
     def record_trade(self, user_id: str, trade: dict[str, Any]) -> RobotState:

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 from datetime import timedelta
@@ -5,6 +6,9 @@ from unittest.mock import AsyncMock, patch
 
 from backend.auto_trader import (
     AutoTrader,
+    STATUS_ORDER_REJECTED,
+    STATUS_PENDING_RESULT,
+    STATUS_SENDING_ORDER,
     STATUS_STOPPED,
     STATUS_WAITING_NEXT_CYCLE,
     utc_now,
@@ -275,6 +279,137 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_status, 200)
         self.assertEqual(second_payload["data"]["status"], "PENDING_RESULT")
         self.assertEqual(len(orders), 1)
+
+    async def test_order_status_is_sending_while_bullex_order_is_in_flight(self) -> None:
+        user_id = "user-sending"
+        main.auto_trader.start(user_id)
+        order_started = asyncio.Event()
+        release_order = asyncio.Event()
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {
+                        "connected": True,
+                        "active_mode": "PRACTICE",
+                        "server_time": SERVER_TIME_M1_OPEN,
+                    }
+                )
+            if path == "/payouts":
+                return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 90}])
+            if path == "/orders/buy-demo":
+                order_started.set()
+                await release_order.wait()
+                return 200, main.build_success({"order_id": "sending-1"})
+            raise AssertionError(f"unexpected path: {path}")
+
+        scan_payload = main.build_success(
+            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 92, "strength": 80}]
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
+            patch.object(main.trade_result_monitor, "start", return_value=True),
+        ):
+            task = asyncio.create_task(main.execute_robot_cycle(user_id))
+            await asyncio.wait_for(order_started.wait(), timeout=1)
+            sending_payload = main.auto_trader.get(user_id).to_dict()
+            release_order.set()
+            status_code, payload = await task
+
+        self.assertEqual(sending_payload["status"], STATUS_SENDING_ORDER)
+        self.assertFalse(sending_payload["operation_in_progress"])
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["data"]["status"], STATUS_PENDING_RESULT)
+        self.assertTrue(payload["data"]["operation_in_progress"])
+
+    async def test_successful_order_goes_to_pending_result_with_last_trade_contract(self) -> None:
+        user_id = "user-order-success"
+        state = main.auto_trader.start(user_id)
+        state.entry_value = 3
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {
+                        "connected": True,
+                        "active_mode": "PRACTICE",
+                        "server_time": SERVER_TIME_M1_OPEN,
+                    }
+                )
+            if path == "/payouts":
+                return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 91}])
+            if path == "/orders/buy-demo":
+                return 200, main.build_success({"order_id": "success-1"})
+            raise AssertionError(f"unexpected path: {path}")
+
+        scan_payload = main.build_success(
+            [{"symbol": "EURUSD-OTC", "signal": "PUT", "confidence": 94, "strength": 80}]
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
+            patch.object(main.trade_result_monitor, "start", return_value=True),
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        trade = payload["data"]["last_trade"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["data"]["status"], STATUS_PENDING_RESULT)
+        self.assertTrue(payload["data"]["operation_in_progress"])
+        self.assertEqual(trade["order_id"], "success-1")
+        self.assertEqual(trade["active"], "EURUSD-OTC")
+        self.assertEqual(trade["direction"], "PUT")
+        self.assertEqual(trade["amount"], 3)
+        self.assertIsNotNone(trade["sent_at"])
+        self.assertEqual(trade["expiration"], "M1")
+        self.assertEqual(trade["result"], STATUS_PENDING_RESULT)
+        output = "\n".join(logs.output)
+        self.assertIn("[ORDER_SEND_START]", output)
+        self.assertIn("[ORDER_SEND_SUCCESS]", output)
+
+    async def test_rejected_order_stays_order_rejected_and_clears_pending_signal(self) -> None:
+        user_id = "user-order-rejected"
+        main.auto_trader.start(user_id)
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {
+                        "connected": True,
+                        "active_mode": "PRACTICE",
+                        "server_time": SERVER_TIME_M1_OPEN,
+                    }
+                )
+            if path == "/payouts":
+                return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 90}])
+            if path == "/orders/buy-demo":
+                return 409, main.build_error("MARKET_CLOSED")
+            raise AssertionError(f"unexpected path: {path}")
+
+        scan_payload = main.build_success(
+            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 92, "strength": 80}]
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
+            patch.object(main.trade_result_monitor, "start", return_value=True) as monitor,
+            self.assertLogs("backend-gateway", level="ERROR") as logs,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        self.assertEqual(status_code, 409)
+        self.assertEqual(payload["data"]["status"], STATUS_ORDER_REJECTED)
+        self.assertEqual(payload["data"]["rejection_reason"], "MARKET_CLOSED")
+        self.assertIsNone(payload["data"]["pending_signal"])
+        self.assertFalse(payload["data"]["operation_in_progress"])
+        self.assertNotEqual(payload["data"]["status"], STATUS_WAITING_NEXT_CYCLE)
+        monitor.assert_not_called()
+        self.assertIn("[ORDER_SEND_FAILED]", "\n".join(logs.output))
 
     async def test_non_whitelisted_asset_never_operates(self) -> None:
         user_id = "user-apple"

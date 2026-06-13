@@ -59,6 +59,7 @@ class TradeResultMonitor:
             return False
 
         self._tasks[key] = asyncio.create_task(self._monitor(user_id, normalized_order_id))
+        logger.info("[RESULT_MONITOR_START] user_id=%s order_id=%s", user_id, normalized_order_id)
         return True
 
     async def shutdown(self) -> None:
@@ -82,6 +83,13 @@ class TradeResultMonitor:
                     if normalized is not None:
                         result, profit = normalized
                         await self.finish_trade(user_id, order_id, result, profit)
+                        logger.info(
+                            "[RESULT_MONITOR_FINISHED] user_id=%s order_id=%s result=%s profit=%s",
+                            user_id,
+                            order_id,
+                            result,
+                            profit,
+                        )
                         logger.info(
                             "[ROBOT TRADE %s] user_id=%s order_id=%s profit=%s",
                             result,

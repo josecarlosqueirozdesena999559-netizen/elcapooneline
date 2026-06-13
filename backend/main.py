@@ -857,6 +857,16 @@ async def execute_robot_cycle(
                 order_path = "/bullex/buy-real"
                 order_body["confirm_real"] = True
 
+            state = auto_trader.start_sending_order(user_id)
+            logger.info(
+                "[ORDER_SEND_START] user_id=%s path=%s active=%s direction=%s amount=%s expiration=%s",
+                user_id,
+                order_path,
+                symbol,
+                direction,
+                state.entry_value,
+                entry_window["expiration_minutes"],
+            )
             order_status, order_payload = await submit_bullex_order(
                 user_id,
                 order_path,
@@ -864,15 +874,16 @@ async def execute_robot_cycle(
             )
             mark_disconnected_from_payload(user_id, order_payload)
             if not order_payload.get("ok"):
-                state = auto_trader.fail(user_id, str(order_payload.get("error") or "ORDER_FAILED"))
-                logger.error("[ROBOT ERROR] user_id=%s error=%s", user_id, state.rejection_reason)
+                reason = str(order_payload.get("error") or "ORDER_FAILED")
+                state = auto_trader.reject_order(user_id, reason)
+                logger.error("[ORDER_SEND_FAILED] user_id=%s error=%s", user_id, reason)
                 return order_status, build_robot_payload(state)
 
             order_data = order_payload.get("data") if isinstance(order_payload.get("data"), dict) else {}
             order_id = order_data.get("order_id")
             if order_id is None or not str(order_id).strip():
-                state = auto_trader.fail(user_id, "ORDER_ID_MISSING")
-                logger.error("[ROBOT ERROR] user_id=%s error=ORDER_ID_MISSING", user_id)
+                state = auto_trader.reject_order(user_id, "ORDER_ID_MISSING")
+                logger.error("[ORDER_SEND_FAILED] user_id=%s error=ORDER_ID_MISSING", user_id)
                 return 502, build_robot_payload(state)
 
             trade = {
@@ -895,6 +906,12 @@ async def execute_robot_cycle(
                 symbol,
             )
             state = auto_trader.record_trade(user_id, trade)
+            logger.info(
+                "[ORDER_SEND_SUCCESS] user_id=%s order_id=%s status=%s",
+                user_id,
+                order_id,
+                state.status,
+            )
             logger.info(
                 "[TRADE_SENT_AT] user_id=%s server_time=%s timeframe=%s "
                 "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
