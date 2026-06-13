@@ -45,7 +45,7 @@ class TradeResultMonitor:
     finish_trade: FinishTrade
     timeout_trade: TimeoutTrade
     poll_seconds: float = 3.0
-    timeout_seconds: float = 180.0
+    timeout_seconds: float = 2100.0
     _tasks: dict[tuple[str, str], asyncio.Task[None]] = field(default_factory=dict)
 
     def start(self, user_id: str, order_id: Any) -> bool:

@@ -18,6 +18,7 @@ from backend.auto_trader import (
     STATUS_PENDING_RESULT,
     STATUS_WAITING_ENTRY_WINDOW,
     STATUS_WAITING_NEXT_CYCLE,
+    parse_datetime,
 )
 from backend.openai_signal_reviewer import review_signal
 from backend.robot_persistence import RobotPersistence, create_robot_persistence
@@ -400,6 +401,19 @@ def extract_account_status(payload: dict[str, Any]) -> tuple[bool, str | None]:
 
 TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
 ENTRY_WINDOW_SECONDS = {"M1": 5, "M5": 10, "M15": 20, "M30": 30}
+EXPIRATION_SAFETY_SECONDS = 1
+ORDER_EXPIRATION_FIELDS = (
+    "expected_expire_at",
+    "expires_at",
+    "expire_at",
+    "close_time",
+    "closed_at",
+    "expiration_time",
+    "expiration_at",
+    "expiration_timestamp",
+    "expire_timestamp",
+    "close_timestamp",
+)
 
 
 def extract_server_timestamp(payload: dict[str, Any]) -> float | None:
@@ -445,6 +459,54 @@ def get_entry_window(timeframe: str, server_timestamp: float | None = None) -> d
         "expiration": normalized,
         "expiration_minutes": expiration_seconds // 60,
     }
+
+
+def parse_order_expiration_value(value: Any) -> datetime | None:
+    parsed = parse_datetime(value)
+    if parsed is not None:
+        return parsed
+
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    if timestamp <= 0:
+        return None
+    if timestamp > 1_000_000_000_000:
+        timestamp = timestamp / 1000
+    return datetime.fromtimestamp(timestamp, timezone.utc)
+
+
+def extract_order_expiration(order_data: dict[str, Any]) -> tuple[datetime | None, str | None]:
+    for field in ORDER_EXPIRATION_FIELDS:
+        if field not in order_data:
+            continue
+        parsed = parse_order_expiration_value(order_data.get(field))
+        if parsed is not None:
+            return parsed, field
+    return None, None
+
+
+def calculate_expected_expire_at(
+    timeframe: str,
+    order_data: dict[str, Any],
+    entry_window: dict[str, Any],
+    sent_at: datetime,
+) -> tuple[datetime, str]:
+    returned_expiration, source = extract_order_expiration(order_data)
+    if returned_expiration is not None and source is not None:
+        return returned_expiration, source
+
+    interval = TIMEFRAME_SECONDS[str(timeframe).strip().upper()]
+    try:
+        server_timestamp = float(entry_window["server_timestamp"])
+    except (KeyError, TypeError, ValueError):
+        server_timestamp = sent_at.timestamp()
+    aligned_timestamp = math.ceil(server_timestamp / interval) * interval
+    if aligned_timestamp <= server_timestamp:
+        aligned_timestamp += interval
+    aligned_timestamp += EXPIRATION_SAFETY_SECONDS
+    return datetime.fromtimestamp(aligned_timestamp, timezone.utc), "server_time_aligned"
 
 
 async def refresh_entry_window(user_id: str, state: Any) -> tuple[int, dict[str, Any], dict[str, Any] | None]:
@@ -501,6 +563,19 @@ def robot_stop_reason(state: Any) -> str | None:
 def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     data = state.to_dict()
     data.update(extra)
+    if data.get("operation_in_progress"):
+        logger.info(
+            "[EXPIRATION_COUNTDOWN] status=%s order_id=%s expiration_seconds=%s result_waiting=%s",
+            data.get("status"),
+            (data.get("last_trade") or {}).get("order_id"),
+            data.get("expiration_seconds"),
+            data.get("result_waiting"),
+        )
+        if data.get("result_waiting"):
+            logger.info(
+                "[RESULT_WAITING] order_id=%s",
+                (data.get("last_trade") or {}).get("order_id"),
+            )
     return build_success(data)
 
 
@@ -613,6 +688,13 @@ async def finish_monitored_trade(user_id: str, order_id: str, result: str, profi
     async with auto_trader.lock(user_id):
         finalized, state = auto_trader.finish_trade(user_id, order_id, result, profit)
         if finalized and state.last_trade:
+            logger.info(
+                "[RESULT_RECEIVED] user_id=%s order_id=%s result=%s profit=%s",
+                user_id,
+                order_id,
+                result,
+                state.last_trade.get("profit"),
+            )
             try:
                 robot_persistence.save_trade_history(user_id, state.last_trade)
             except Exception:
@@ -886,6 +968,13 @@ async def execute_robot_cycle(
                 logger.error("[ORDER_SEND_FAILED] user_id=%s error=ORDER_ID_MISSING", user_id)
                 return 502, build_robot_payload(state)
 
+            sent_at = datetime.now(timezone.utc)
+            expected_expire_at, expiration_source = calculate_expected_expire_at(
+                state.timeframe,
+                order_data,
+                entry_window,
+                sent_at,
+            )
             trade = {
                 **order_data,
                 "mode": state.account_mode,
@@ -895,8 +984,14 @@ async def execute_robot_cycle(
                 "confidence": selected["confidence"],
                 "payout": payout,
                 "expiration": state.timeframe,
+                "timeframe": state.timeframe,
                 "result": STATUS_PENDING_RESULT,
-                "sent_at": datetime.now(timezone.utc).isoformat(),
+                "sent_at": sent_at.isoformat(),
+                "expected_expire_at": expected_expire_at.isoformat(),
+                "expires_at": expected_expire_at.isoformat(),
+                "expiration_source": expiration_source,
+                "server_time_at_send": entry_window.get("server_time"),
+                "server_timestamp_at_send": entry_window.get("server_timestamp"),
             }
             trade["timestamp"] = trade["sent_at"]
             auto_trader.clear_pending_signal(user_id)
@@ -906,6 +1001,15 @@ async def execute_robot_cycle(
                 symbol,
             )
             state = auto_trader.record_trade(user_id, trade)
+            logger.info(
+                "[EXPIRATION_SET] user_id=%s order_id=%s timeframe=%s expected_expire_at=%s source=%s server_time_at_send=%s",
+                user_id,
+                order_id,
+                state.timeframe,
+                trade["expected_expire_at"],
+                expiration_source,
+                trade["server_time_at_send"],
+            )
             logger.info(
                 "[ORDER_SEND_SUCCESS] user_id=%s order_id=%s status=%s",
                 user_id,

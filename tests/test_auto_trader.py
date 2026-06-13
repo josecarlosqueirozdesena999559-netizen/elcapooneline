@@ -1,7 +1,7 @@
 import asyncio
 import json
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 from backend.auto_trader import (
@@ -113,6 +113,30 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertEqual(payload["last_trade"]["result"], "PENDING_RESULT")
         self.assertGreaterEqual(payload["expiration_seconds"], 257)
         self.assertLessEqual(payload["expiration_seconds"], 258)
+        self.assertFalse(payload["result_waiting"])
+
+    def test_expired_open_operation_waits_for_final_result(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-result-waiting")
+        expired_at = utc_now() - timedelta(seconds=2)
+        trader.record_trade(
+            "user-result-waiting",
+            {
+                "order_id": "waiting-result-1",
+                "expected_expire_at": expired_at.isoformat(),
+                "result": STATUS_PENDING_RESULT,
+            },
+        )
+
+        payload = state.to_dict()
+        can_run, waiting_state = trader.prepare_cycle("user-result-waiting")
+
+        self.assertEqual(payload["status"], STATUS_PENDING_RESULT)
+        self.assertEqual(payload["expiration_seconds"], 0)
+        self.assertTrue(payload["result_waiting"])
+        self.assertTrue(payload["operation_in_progress"])
+        self.assertFalse(can_run)
+        self.assertEqual(waiting_state.status, STATUS_PENDING_RESULT)
 
     def test_restore_keeps_pending_signal_waiting_for_entry_window(self) -> None:
         trader = AutoTrader()
@@ -367,9 +391,58 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(trade["sent_at"])
         self.assertEqual(trade["expiration"], "M1")
         self.assertEqual(trade["result"], STATUS_PENDING_RESULT)
+        self.assertEqual(trade["server_time_at_send"], "1970-01-01T00:00:56+00:00")
+        self.assertEqual(trade["server_timestamp_at_send"], SERVER_TIME_M1_OPEN)
+        self.assertEqual(trade["expiration_source"], "server_time_aligned")
+        self.assertEqual(
+            trade["expected_expire_at"],
+            datetime.fromtimestamp(61, timezone.utc).isoformat(),
+        )
         output = "\n".join(logs.output)
         self.assertIn("[ORDER_SEND_START]", output)
+        self.assertIn("[EXPIRATION_SET]", output)
         self.assertIn("[ORDER_SEND_SUCCESS]", output)
+
+    async def test_bullex_returned_expiration_is_used_as_primary_source(self) -> None:
+        user_id = "user-order-expiration-source"
+        main.auto_trader.start(user_id)
+        returned_expiration = datetime.fromtimestamp(123, timezone.utc).isoformat()
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {
+                        "connected": True,
+                        "active_mode": "PRACTICE",
+                        "server_time": SERVER_TIME_M1_OPEN,
+                    }
+                )
+            if path == "/payouts":
+                return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 90}])
+            if path == "/orders/buy-demo":
+                return 200, main.build_success(
+                    {
+                        "order_id": "source-1",
+                        "close_time": returned_expiration,
+                    }
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        scan_payload = main.build_success(
+            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 92, "strength": 80}]
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
+            patch.object(main.trade_result_monitor, "start", return_value=True),
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        trade = payload["data"]["last_trade"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(trade["expected_expire_at"], returned_expiration)
+        self.assertEqual(trade["expiration_source"], "close_time")
 
     async def test_rejected_order_stays_order_rejected_and_clears_pending_signal(self) -> None:
         user_id = "user-order-rejected"

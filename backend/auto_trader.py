@@ -106,21 +106,29 @@ class RobotState:
         )
         configured_expiration = TIMEFRAME_SECONDS[self.timeframe]
         data["expiration_seconds"] = configured_expiration
+        data["result_waiting"] = False
         if self.last_trade is not None:
             trade = dict(self.last_trade)
             trade["result"] = trade.get("result") or STATUS_PENDING_RESULT
             data["last_trade"] = trade
             if self.operation_in_progress:
-                expires_at = parse_datetime(trade.get("expires_at"))
+                expires_at = parse_datetime(trade.get("expected_expire_at"))
+                if expires_at is None:
+                    expires_at = parse_datetime(trade.get("expires_at"))
                 if expires_at is None:
                     sent_at = parse_datetime(trade.get("sent_at") or trade.get("timestamp"))
                     if sent_at is not None:
                         expires_at = sent_at + timedelta(seconds=configured_expiration)
                 if expires_at is not None:
-                    data["expiration_seconds"] = max(
+                    expiration_seconds = max(
                         0,
                         math.ceil((expires_at - now).total_seconds()),
                     )
+                    data["expiration_seconds"] = expiration_seconds
+                    result = str(trade.get("result") or "").strip().upper()
+                    data["result_waiting"] = expiration_seconds <= 0 and result not in {"WIN", "LOSS"}
+                    if data["result_waiting"]:
+                        data["status"] = STATUS_PENDING_RESULT
         total = self.wins + self.losses
         data["accuracy"] = round((self.wins / total) * 100, 2) if total else 0.0
         return data
@@ -316,10 +324,12 @@ class AutoTrader:
         trade["sent_at"] = sent_at.isoformat()
         trade.setdefault("timestamp", trade["sent_at"])
         trade["result"] = trade.get("result") or STATUS_PENDING_RESULT
+        trade.setdefault("expiration", state.timeframe)
         trade.setdefault(
-            "expires_at",
+            "expected_expire_at",
             (sent_at + timedelta(seconds=TIMEFRAME_SECONDS[state.timeframe])).isoformat(),
         )
+        trade.setdefault("expires_at", trade["expected_expire_at"])
         state.last_trade = trade
         state.last_entry_at = sent_at
         state.operation_in_progress = True
