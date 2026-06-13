@@ -643,6 +643,7 @@ def session_status(x_user_id: str | None = Header(default=None)) -> JSONResponse
             "requires_2fa": current.requires_2fa,
             "email": current.email,
             "active_mode": active_mode,
+            "server_time": current.client.get_server_timestamp() if connected else None,
         }
 
     try:

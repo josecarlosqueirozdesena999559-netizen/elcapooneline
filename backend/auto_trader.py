@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 AccountMode = Literal["DEMO", "REAL"]
+Timeframe = Literal["M1", "M5", "M15", "M30"]
 
 STATUS_STOPPED = "STOPPED"
 STATUS_WAITING_NEXT_CYCLE = "WAITING_NEXT_CYCLE"
@@ -16,6 +17,7 @@ STATUS_ENTRY_SENT = "ENTRY_SENT"
 STATUS_PENDING_RESULT = "PENDING_RESULT"
 STATUS_ERROR = "ERROR"
 STATUS_REAL_TRADING_LOCKED = "REAL_TRADING_LOCKED"
+STATUS_WAITING_ENTRY_WINDOW = "WAITING_ENTRY_WINDOW"
 
 
 def utc_now() -> datetime:
@@ -27,6 +29,7 @@ class RobotConfigUpdate(BaseModel):
 
     enabled: bool | None = None
     account_mode: AccountMode | None = None
+    timeframe: Timeframe | None = None
     entry_value: float | None = Field(default=None, gt=0)
     cycle_minutes: int | None = Field(default=None, ge=1)
     min_confidence: int | None = Field(default=None, ge=0, le=100)
@@ -42,6 +45,7 @@ class RobotConfigUpdate(BaseModel):
 class RobotState:
     enabled: bool = False
     account_mode: AccountMode = "DEMO"
+    timeframe: Timeframe = "M1"
     entry_value: float = 2.0
     cycle_minutes: int = 10
     min_confidence: int = 85
@@ -62,6 +66,11 @@ class RobotState:
     last_trade: dict[str, Any] | None = None
     status: str = STATUS_STOPPED
     rejection_reason: str | None = None
+    server_time: str | None = None
+    entry_window_open: bool = False
+    seconds_until_entry_window: int = 0
+    current_candle_seconds: float = 0.0
+    expiration_seconds: int = 60
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -217,6 +226,22 @@ class AutoTrader:
         state = self.get(user_id)
         state.status = STATUS_REAL_TRADING_LOCKED
         state.rejection_reason = reason
+        return state
+
+    def update_entry_window(self, user_id: str, window: dict[str, Any]) -> RobotState:
+        state = self.get(user_id)
+        state.server_time = window["server_time"]
+        state.entry_window_open = bool(window["entry_window_open"])
+        state.seconds_until_entry_window = int(window["seconds_until_entry_window"])
+        state.current_candle_seconds = float(window["current_candle_seconds"])
+        state.expiration_seconds = int(window["expiration_seconds"])
+        if not state.entry_window_open and state.enabled and not state.operation_in_progress:
+            state.status = STATUS_WAITING_ENTRY_WINDOW
+            state.rejection_reason = STATUS_WAITING_ENTRY_WINDOW
+            state.next_cycle_at = utc_now() + timedelta(seconds=state.seconds_until_entry_window)
+        elif state.entry_window_open and state.status == STATUS_WAITING_ENTRY_WINDOW:
+            state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
+            state.rejection_reason = None
         return state
 
     def finish_trade(self, user_id: str, order_id: Any, result: str, profit: float) -> tuple[bool, RobotState]:

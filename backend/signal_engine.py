@@ -6,7 +6,7 @@ SignalValue = Literal["CALL", "PUT", "WAIT"]
 TrendValue = Literal["UP", "DOWN", "SIDEWAYS"]
 
 
-def analyze_signal(symbol: str, candles: list[dict[str, Any]]) -> dict[str, Any]:
+def analyze_signal(symbol: str, candles: list[dict[str, Any]], timeframe: str = "M1") -> dict[str, Any]:
     normalized = [_normalize_candle(candle) for candle in candles]
     normalized = [candle for candle in normalized if candle is not None]
     last_price = normalized[-1]["close"] if normalized else None
@@ -20,6 +20,7 @@ def analyze_signal(symbol: str, candles: list[dict[str, Any]]) -> dict[str, Any]
             last_price=last_price,
             trend="SIDEWAYS",
             strength=0,
+            timeframe=timeframe,
         )
 
     closes = [candle["close"] for candle in normalized]
@@ -62,6 +63,7 @@ def analyze_signal(symbol: str, candles: list[dict[str, Any]]) -> dict[str, Any]
             last_price=last_price,
             trend=trend,
             strength=trend_strength,
+            timeframe=timeframe,
         )
 
     return _build_signal(
@@ -72,6 +74,7 @@ def analyze_signal(symbol: str, candles: list[dict[str, Any]]) -> dict[str, Any]
         last_price=last_price,
         trend=trend,
         strength=trend_strength,
+        timeframe=timeframe,
     )
 
 
@@ -84,13 +87,14 @@ def _build_signal(
     last_price: float | None,
     trend: TrendValue,
     strength: int,
+    timeframe: str,
 ) -> dict[str, Any]:
     return {
         "symbol": symbol,
         "signal": signal,
         "confidence": max(0, min(100, int(round(confidence)))),
         "reason": reason,
-        "timeframe": "M1",
+        "timeframe": timeframe,
         "last_price": last_price,
         "trend": trend,
         "strength": max(0, min(100, int(round(strength)))),

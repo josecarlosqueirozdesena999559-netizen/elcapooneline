@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import asyncio
 from contextlib import suppress
@@ -15,6 +16,7 @@ from backend.auto_trader import (
     AutoTrader,
     RobotConfigUpdate,
     STATUS_PENDING_RESULT,
+    STATUS_WAITING_ENTRY_WINDOW,
     STATUS_WAITING_NEXT_CYCLE,
 )
 from backend.openai_signal_reviewer import review_signal
@@ -396,6 +398,66 @@ def extract_account_status(payload: dict[str, Any]) -> tuple[bool, str | None]:
     return connected, str(mode).strip().upper() if mode else None
 
 
+TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
+ENTRY_WINDOW_SECONDS = {"M1": 5, "M5": 10, "M15": 20, "M30": 30}
+
+
+def extract_server_timestamp(payload: dict[str, Any]) -> float | None:
+    data = payload.get("data")
+    if not payload.get("ok") or not isinstance(data, dict):
+        return None
+    try:
+        timestamp = float(data["server_time"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return timestamp if timestamp > 0 else None
+
+
+def get_entry_window(timeframe: str, server_timestamp: float | None = None) -> dict[str, Any]:
+    normalized = str(timeframe).strip().upper()
+    if normalized not in TIMEFRAME_SECONDS:
+        raise ValueError("INVALID_TIMEFRAME")
+    if server_timestamp is None:
+        raise ValueError("SERVER_TIME_UNAVAILABLE")
+
+    expiration_seconds = TIMEFRAME_SECONDS[normalized]
+    window_seconds = ENTRY_WINDOW_SECONDS[normalized]
+    seconds_in_candle = float(server_timestamp) % expiration_seconds
+    seconds_until_close = expiration_seconds - seconds_in_candle
+    window_start = expiration_seconds - window_seconds
+    entry_window_open = seconds_in_candle >= window_start and seconds_until_close >= 1.0
+    if entry_window_open:
+        seconds_until_entry_window = 0
+    elif seconds_in_candle < window_start:
+        seconds_until_entry_window = math.ceil(window_start - seconds_in_candle)
+    else:
+        seconds_until_entry_window = math.ceil(seconds_until_close + window_start)
+
+    return {
+        "server_timestamp": float(server_timestamp),
+        "server_time": datetime.fromtimestamp(server_timestamp, timezone.utc).isoformat(),
+        "timeframe": normalized,
+        "entry_window_open": entry_window_open,
+        "seconds_until_entry_window": seconds_until_entry_window,
+        "current_candle_seconds": round(seconds_in_candle, 3),
+        "seconds_until_close": round(seconds_until_close, 3),
+        "expiration_seconds": expiration_seconds,
+        "expiration": normalized,
+        "expiration_minutes": expiration_seconds // 60,
+    }
+
+
+async def refresh_entry_window(user_id: str, state: Any) -> tuple[int, dict[str, Any], dict[str, Any] | None]:
+    status_code, payload = await call_bullex_service("GET", "/sessions/status", user_id)
+    mark_disconnected_from_payload(user_id, payload)
+    timestamp = extract_server_timestamp(payload)
+    if timestamp is None:
+        return status_code if status_code >= 400 else 502, payload, None
+    window = get_entry_window(state.timeframe, timestamp)
+    auto_trader.update_entry_window(user_id, window)
+    return status_code, payload, window
+
+
 def real_block_reason(state: Any, *, connected: bool, active_mode: str | None) -> str | None:
     if state.account_mode != "REAL":
         return "ACCOUNT_MODE_NOT_REAL"
@@ -469,12 +531,25 @@ def persist_robot(user_id: str) -> None:
         logger.exception("[ROBOT PERSISTENCE ERROR] user_id=%s", user_id)
 
 
-async def analyze_active_signal(user_id: str, symbol: str) -> tuple[int, dict[str, Any]]:
+async def analyze_active_signal(
+    user_id: str,
+    symbol: str,
+    timeframe: str = "M1",
+    endtime: int | None = None,
+) -> tuple[int, dict[str, Any]]:
+    interval = TIMEFRAME_SECONDS[timeframe]
+    candle_params: dict[str, Any] = {
+        "active": symbol,
+        "interval": interval,
+        "count": 100,
+    }
+    if endtime is not None:
+        candle_params["endtime"] = endtime
     status_code, payload = await call_bullex_service(
         "GET",
         "/candles",
         user_id,
-        params={"active": symbol, "interval": 60, "count": 100},
+        params=candle_params,
     )
     mark_disconnected_from_payload(user_id, payload)
     if not payload.get("ok"):
@@ -482,18 +557,29 @@ async def analyze_active_signal(user_id: str, symbol: str) -> tuple[int, dict[st
             return 409, build_error(SESSION_DISCONNECTED)
         return status_code, payload
 
-    signal = analyze_signal(symbol, extract_candles(payload))
+    signal = analyze_signal(symbol, extract_candles(payload), timeframe=timeframe)
     logger.info("[SIGNAL ANALYZE] %s %s %s", symbol, signal["signal"], signal["confidence"])
     return 200, build_success(signal)
 
 
-async def scan_local_signals(user_id: str, limit: int = 5, include_wait: bool = False) -> tuple[int, dict[str, Any]]:
+async def scan_local_signals(
+    user_id: str,
+    limit: int = 5,
+    include_wait: bool = False,
+    timeframe: str = "M1",
+    endtime: int | None = None,
+) -> tuple[int, dict[str, Any]]:
     logger.info("[SIGNAL SCAN START]")
     signals = []
 
     for symbol in BINARY_ALLOWED_ASSETS:
         try:
-            status_code, payload = await analyze_active_signal(user_id, symbol)
+            status_code, payload = await analyze_active_signal(
+                user_id,
+                symbol,
+                timeframe=timeframe,
+                endtime=endtime,
+            )
             if not payload.get("ok"):
                 if is_session_disconnected(payload):
                     logger.warning("[SIGNAL ERROR] %s %s", symbol, payload.get("error"))
@@ -565,8 +651,7 @@ async def execute_robot_cycle(
             if required_mode is not None and state.account_mode != required_mode:
                 return 409, build_error(f"ACCOUNT_MODE_NOT_{required_mode}")
 
-            status_code, account_payload = await call_bullex_service("GET", "/sessions/status", user_id)
-            mark_disconnected_from_payload(user_id, account_payload)
+            status_code, account_payload, entry_window = await refresh_entry_window(user_id, state)
             connected, active_mode = extract_account_status(account_payload)
             if state.account_mode == "REAL":
                 logger.info(
@@ -601,11 +686,40 @@ async def execute_robot_cycle(
                     expected_bullex_mode,
                 )
                 return 200, build_robot_payload(state)
+            if entry_window is None:
+                state = auto_trader.fail(user_id, "SERVER_TIME_UNAVAILABLE")
+                logger.error("[ROBOT ERROR] user_id=%s error=SERVER_TIME_UNAVAILABLE", user_id)
+                return status_code, build_robot_payload(state)
+            if not entry_window["entry_window_open"]:
+                logger.info(
+                    "[ENTRY_WINDOW_WAIT] user_id=%s server_time=%s timeframe=%s "
+                    "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
+                    user_id,
+                    entry_window["server_time"],
+                    state.timeframe,
+                    entry_window["current_candle_seconds"],
+                    entry_window["seconds_until_close"],
+                    entry_window["expiration"],
+                )
+                return 200, build_robot_payload(state)
+
+            logger.info(
+                "[ENTRY_WINDOW_OPEN] user_id=%s server_time=%s timeframe=%s "
+                "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
+                user_id,
+                entry_window["server_time"],
+                state.timeframe,
+                entry_window["current_candle_seconds"],
+                entry_window["seconds_until_close"],
+                entry_window["expiration"],
+            )
 
             scan_status, scan_payload = await scan_local_signals(
                 user_id,
                 limit=len(BINARY_ALLOWED_ASSETS),
                 include_wait=True,
+                timeframe=state.timeframe,
+                endtime=int(entry_window["server_timestamp"]),
             )
             if not scan_payload.get("ok"):
                 state = auto_trader.fail(user_id, str(scan_payload.get("error") or "SIGNAL_SCAN_FAILED"))
@@ -664,11 +778,34 @@ async def execute_robot_cycle(
                 logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=%s", user_id, rejection)
                 return 200, build_robot_payload(state)
 
+            timing_status, timing_payload, entry_window = await refresh_entry_window(user_id, state)
+            if entry_window is None:
+                state = auto_trader.fail(user_id, "SERVER_TIME_UNAVAILABLE")
+                logger.error("[ROBOT ERROR] user_id=%s error=SERVER_TIME_UNAVAILABLE", user_id)
+                return timing_status, build_robot_payload(state)
+            connected, active_mode = extract_account_status(timing_payload)
+            if not connected or active_mode != expected_bullex_mode:
+                reason = "ACCOUNT_DISCONNECTED" if not connected else f"ACCOUNT_MODE_MUST_BE_{expected_bullex_mode}"
+                state = auto_trader.reject(user_id, reason)
+                return 200, build_robot_payload(state)
+            if not entry_window["entry_window_open"]:
+                logger.info(
+                    "[ENTRY_WINDOW_WAIT] user_id=%s server_time=%s timeframe=%s "
+                    "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
+                    user_id,
+                    entry_window["server_time"],
+                    state.timeframe,
+                    entry_window["current_candle_seconds"],
+                    entry_window["seconds_until_close"],
+                    entry_window["expiration"],
+                )
+                return 200, build_robot_payload(state)
+
             order_body = {
                 "active": symbol,
                 "action": str(selected["signal"]).lower(),
                 "amount": state.entry_value,
-                "expiration": 1,
+                "expiration": entry_window["expiration_minutes"],
             }
             order_path = "/bullex/buy-demo"
             if state.account_mode == "REAL":
@@ -701,12 +838,22 @@ async def execute_robot_cycle(
                 "amount": state.entry_value,
                 "confidence": selected["confidence"],
                 "payout": payout,
-                "expiration": "M1",
+                "expiration": state.timeframe,
                 "result": STATUS_PENDING_RESULT,
                 "sent_at": datetime.now(timezone.utc).isoformat(),
             }
             trade["timestamp"] = trade["sent_at"]
             state = auto_trader.record_trade(user_id, trade)
+            logger.info(
+                "[TRADE_SENT_AT] user_id=%s server_time=%s timeframe=%s "
+                "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
+                user_id,
+                entry_window["server_time"],
+                state.timeframe,
+                entry_window["current_candle_seconds"],
+                entry_window["seconds_until_close"],
+                entry_window["expiration"],
+            )
             if state.account_mode == "REAL":
                 logger.info(
                     "[REAL_TRADE_SENT] user_id=%s order_id=%s",
@@ -735,7 +882,12 @@ async def robot_worker(user_id: str) -> None:
         while auto_trader.get(user_id).enabled:
             await execute_robot_cycle(user_id)
             state = auto_trader.get(user_id)
-            delay = 3 if state.operation_in_progress else max(1, state.to_dict()["seconds_until_next_cycle"])
+            if state.operation_in_progress:
+                delay = 3
+            elif state.status == STATUS_WAITING_ENTRY_WINDOW:
+                delay = max(1, state.seconds_until_entry_window)
+            else:
+                delay = max(1, state.to_dict()["seconds_until_next_cycle"])
             await asyncio.sleep(delay)
     except asyncio.CancelledError:
         raise
@@ -908,6 +1060,12 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     sync_user_store_from_payload(auth["user_id"], session_payload)
     connected, active_mode = extract_account_status(session_payload)
     state = auto_trader.get(auth["user_id"])
+    server_timestamp = extract_server_timestamp(session_payload)
+    if server_timestamp is not None:
+        auto_trader.update_entry_window(
+            auth["user_id"],
+            get_entry_window(state.timeframe, server_timestamp),
+        )
     block_reason = real_block_reason(state, connected=connected, active_mode=active_mode)
     return json_response(
         200,

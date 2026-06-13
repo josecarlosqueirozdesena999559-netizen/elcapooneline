@@ -329,6 +329,12 @@ sessao BullEx conectada em modo `REAL`. `entry_value` nao pode ultrapassar
 `real_block_reason` para o painel habilitar a acao REAL somente quando todas as
 travas estiverem satisfeitas.
 
+O campo `timeframe` aceita `M1`, `M5`, `M15` ou `M30` e controla tanto os
+candles analisados quanto a expiracao enviada para a BullEx. Antes de cada
+ordem, o robo usa `server_time` da sessao BullEx e so compra na janela final do
+candle. Fora dela, o estado fica `WAITING_ENTRY_WINDOW` e informa
+`seconds_until_entry_window`.
+
 ## Fase 17 - persistencia de sessao e robo
 
 Antes de subir os containers, configure uma chave longa e estavel:
