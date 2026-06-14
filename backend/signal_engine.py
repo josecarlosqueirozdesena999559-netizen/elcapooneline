@@ -4,15 +4,30 @@ from typing import Any, Literal
 
 SignalValue = Literal["CALL", "PUT", "WAIT"]
 TrendValue = Literal["UP", "DOWN", "SIDEWAYS"]
+StrategyMode = Literal["aggressive", "balanced", "conservative"]
 
 
-def analyze_signal(symbol: str, candles: list[dict[str, Any]], timeframe: str = "M1") -> dict[str, Any]:
+STRATEGY_PROFILES = {
+    "aggressive": {"confidence": 70, "payout": 70, "strength": 8, "body_ratio": 0.25},
+    "balanced": {"confidence": 80, "payout": 80, "strength": 12, "body_ratio": 0.45},
+    "conservative": {"confidence": 90, "payout": 85, "strength": 20, "body_ratio": 0.55},
+}
+
+
+def analyze_signal(
+    symbol: str,
+    candles: list[dict[str, Any]],
+    timeframe: str = "M1",
+    *,
+    strategy_mode: StrategyMode = "conservative",
+    payout: float | None = None,
+) -> dict[str, Any]:
     normalized = [_normalize_candle(candle) for candle in candles]
     normalized = [candle for candle in normalized if candle is not None]
     last_price = normalized[-1]["close"] if normalized else None
 
     if len(normalized) < 30:
-        return _build_signal(
+        signal = _build_signal(
             symbol=symbol,
             signal="WAIT",
             confidence=0,
@@ -22,6 +37,7 @@ def analyze_signal(symbol: str, candles: list[dict[str, Any]], timeframe: str = 
             strength=0,
             timeframe=timeframe,
         )
+        return _apply_quality_filters(signal, normalized, strategy_mode, payout)
 
     closes = [candle["close"] for candle in normalized]
     ema9 = _ema(closes, 9)
@@ -30,6 +46,7 @@ def analyze_signal(symbol: str, candles: list[dict[str, Any]], timeframe: str = 
     trend, trend_strength = _trend(ema9[-1], ema21[-1], closes[-1])
     last_candle = normalized[-1]
     avg_range = _average_range(normalized[-20:])
+    atr_pct = (avg_range / abs(last_price)) if last_price else 0.0
     extreme_candle = _is_extreme_candle(last_candle, avg_range)
 
     call_score, call_reasons = _score_direction("CALL", normalized, ema9[-1], ema21[-1], rsi14)
@@ -55,7 +72,7 @@ def analyze_signal(symbol: str, candles: list[dict[str, Any]], timeframe: str = 
         wait_reasons.append("Ultimo candle exagerado.")
 
     if wait_reasons:
-        return _build_signal(
+        signal = _build_signal(
             symbol=symbol,
             signal="WAIT",
             confidence=confidence,
@@ -65,8 +82,10 @@ def analyze_signal(symbol: str, candles: list[dict[str, Any]], timeframe: str = 
             strength=trend_strength,
             timeframe=timeframe,
         )
+        _attach_indicators(signal, normalized, ema9[-1], ema21[-1], rsi14, avg_range, atr_pct)
+        return _apply_quality_filters(signal, normalized, strategy_mode, payout)
 
-    return _build_signal(
+    signal = _build_signal(
         symbol=symbol,
         signal=selected_signal,
         confidence=confidence,
@@ -76,6 +95,8 @@ def analyze_signal(symbol: str, candles: list[dict[str, Any]], timeframe: str = 
         strength=trend_strength,
         timeframe=timeframe,
     )
+    _attach_indicators(signal, normalized, ema9[-1], ema21[-1], rsi14, avg_range, atr_pct)
+    return _apply_quality_filters(signal, normalized, strategy_mode, payout)
 
 
 def _build_signal(
@@ -226,6 +247,126 @@ def _sequence_score(direction: SignalValue, candles: list[dict[str, float]]) -> 
     if directional >= 2 and closes_confirm:
         return 14
     return 0
+
+
+def _attach_indicators(
+    signal: dict[str, Any],
+    candles: list[dict[str, float]],
+    ema9: float,
+    ema21: float,
+    rsi: float,
+    atr: float,
+    atr_pct: float,
+) -> None:
+    last = candles[-1]
+    candle_range = max(last["max"] - last["min"], 0)
+    body = abs(last["close"] - last["open"])
+    upper_wick = last["max"] - max(last["open"], last["close"])
+    lower_wick = min(last["open"], last["close"]) - last["min"]
+    body_ratio = body / candle_range if candle_range else 0.0
+    upper_wick_ratio = upper_wick / candle_range if candle_range else 0.0
+    lower_wick_ratio = lower_wick / candle_range if candle_range else 0.0
+    direction = signal.get("signal")
+    directional_last_5 = _directional_count(str(direction), candles[-5:])
+
+    signal.update(
+        {
+            "ema9": round(ema9, 6),
+            "ema21": round(ema21, 6),
+            "rsi": round(rsi, 2),
+            "atr": round(atr, 6),
+            "atr_pct": round(atr_pct, 8),
+            "body_ratio": round(body_ratio, 4),
+            "upper_wick_ratio": round(upper_wick_ratio, 4),
+            "lower_wick_ratio": round(lower_wick_ratio, 4),
+            "directional_candles_5": directional_last_5,
+            "alternating_last_3": _alternating_last_3(candles[-3:]),
+        }
+    )
+
+
+def _apply_quality_filters(
+    signal: dict[str, Any],
+    candles: list[dict[str, float]],
+    strategy_mode: StrategyMode,
+    payout: float | None,
+) -> dict[str, Any]:
+    mode = strategy_mode if strategy_mode in STRATEGY_PROFILES else "conservative"
+    profile = STRATEGY_PROFILES[mode]
+    blocked: list[str] = []
+    approved: list[str] = []
+    direction = str(signal.get("signal") or "WAIT")
+
+    def check(name: str, passed: bool) -> None:
+        if passed:
+            approved.append(name)
+        else:
+            blocked.append(name)
+
+    if direction not in {"CALL", "PUT"}:
+        blocked.append("SIGNAL_WAIT")
+    check("MIN_CONFIDENCE", int(signal.get("confidence") or 0) >= profile["confidence"])
+    check("MIN_PAYOUT", payout is not None and float(payout) >= profile["payout"])
+    check("TREND_CLEAR", signal.get("trend") != "SIDEWAYS" and int(signal.get("strength") or 0) >= profile["strength"])
+    check("SIDEWAYS_FILTER", signal.get("trend") != "SIDEWAYS")
+
+    ema9 = float(signal.get("ema9") or 0)
+    ema21 = float(signal.get("ema21") or 0)
+    rsi = float(signal.get("rsi") or 50)
+    if direction == "CALL":
+        check("EMA_TREND", ema9 > ema21)
+        check("RSI_RANGE", 55 <= rsi <= 75)
+        check("WICK_REJECTION", float(signal.get("upper_wick_ratio") or 1) <= 0.45)
+    elif direction == "PUT":
+        check("EMA_TREND", ema9 < ema21)
+        check("RSI_RANGE", 25 <= rsi <= 45)
+        check("WICK_REJECTION", float(signal.get("lower_wick_ratio") or 1) <= 0.45)
+
+    body_ratio = float(signal.get("body_ratio") or 0)
+    check("CANDLE_STRENGTH", body_ratio >= profile["body_ratio"])
+    check("DOJI_FILTER", body_ratio >= profile["body_ratio"])
+    check("VOLATILITY", float(signal.get("atr_pct") or 0) >= 0.0001)
+    check("LAST_5_CONFIRMATION", int(signal.get("directional_candles_5") or 0) >= 3)
+    check("NO_ALTERNATING_LAST_3", not bool(signal.get("alternating_last_3")))
+
+    total = len(approved) + len(blocked)
+    filter_score = round((len(approved) / total) * 100) if total else 0
+    quality_score = min(int(signal.get("confidence") or 0), filter_score)
+    trade_allowed = not blocked
+    signal.update(
+        {
+            "strategy_mode": mode,
+            "payout": payout,
+            "quality_score": quality_score,
+            "blocked_filters": blocked,
+            "approved_filters": approved,
+            "trade_allowed": trade_allowed,
+            "quality_reason": "OK" if trade_allowed else "Sinal bloqueado por baixa qualidade",
+        }
+    )
+    return signal
+
+
+def _directional_count(direction: str, candles: list[dict[str, float]]) -> int:
+    if direction == "CALL":
+        return sum(1 for candle in candles if candle["close"] > candle["open"])
+    if direction == "PUT":
+        return sum(1 for candle in candles if candle["close"] < candle["open"])
+    return 0
+
+
+def _alternating_last_3(candles: list[dict[str, float]]) -> bool:
+    if len(candles) < 3:
+        return False
+    colors = []
+    for candle in candles:
+        if candle["close"] > candle["open"]:
+            colors.append("GREEN")
+        elif candle["close"] < candle["open"]:
+            colors.append("RED")
+        else:
+            colors.append("DOJI")
+    return colors[0] != "DOJI" and colors[1] != "DOJI" and colors[2] != "DOJI" and colors[0] != colors[1] and colors[1] != colors[2]
 
 
 def _current_candle_force_score(direction: SignalValue, candle: dict[str, float]) -> int:

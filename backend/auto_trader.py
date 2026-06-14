@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 AccountMode = Literal["DEMO", "REAL"]
 Timeframe = Literal["M1", "M5", "M15", "M30"]
+StrategyMode = Literal["aggressive", "balanced", "conservative"]
 
 STATUS_STOPPED = "STOPPED"
 STATUS_WAITING_NEXT_CYCLE = "WAITING_NEXT_CYCLE"
@@ -50,6 +51,7 @@ class RobotConfigUpdate(BaseModel):
     enabled: bool | None = None
     account_mode: AccountMode | None = None
     timeframe: Timeframe | None = None
+    strategy_mode: StrategyMode | None = None
     entry_value: float | None = Field(default=None, gt=0)
     cycle_minutes: int | None = Field(default=None, ge=1)
     min_confidence: int | None = Field(default=None, ge=0, le=100)
@@ -66,6 +68,7 @@ class RobotState:
     enabled: bool = False
     account_mode: AccountMode = "DEMO"
     timeframe: Timeframe = "M1"
+    strategy_mode: StrategyMode = "conservative"
     entry_value: float = 2.0
     cycle_minutes: int = 10
     min_confidence: int = 85
@@ -92,6 +95,10 @@ class RobotState:
     seconds_until_entry_window: int = 0
     current_candle_seconds: float = 0.0
     expiration_seconds: int = 60
+    last_rejection_reason: str | None = None
+    blocked_filters: list[str] = field(default_factory=list)
+    approved_filters: list[str] = field(default_factory=list)
+    quality_score: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -260,12 +267,29 @@ class AutoTrader:
         state = self.get(user_id)
         state.status = STATUS_SIGNAL_REJECTED
         state.rejection_reason = reason
+        state.last_rejection_reason = reason
+        return state
+
+    def reject_strategy(
+        self,
+        user_id: str,
+        reason: str,
+        *,
+        blocked_filters: list[str] | None = None,
+        approved_filters: list[str] | None = None,
+        quality_score: int = 0,
+    ) -> RobotState:
+        state = self.reject(user_id, reason)
+        state.blocked_filters = list(blocked_filters or [])
+        state.approved_filters = list(approved_filters or [])
+        state.quality_score = int(quality_score or 0)
         return state
 
     def fail(self, user_id: str, reason: str) -> RobotState:
         state = self.get(user_id)
         state.status = STATUS_ERROR
         state.rejection_reason = reason
+        state.last_rejection_reason = reason
         return state
 
     def set_pending_signal(self, user_id: str, signal: dict[str, Any]) -> RobotState:
@@ -277,12 +301,20 @@ class AutoTrader:
             "confidence": signal["confidence"],
             "payout": signal["payout"],
             "timeframe": state.timeframe,
+            "quality_score": signal.get("quality_score", 0),
+            "blocked_filters": list(signal.get("blocked_filters") or []),
+            "approved_filters": list(signal.get("approved_filters") or []),
+            "strategy_mode": signal.get("strategy_mode", state.strategy_mode),
             "created_at": utc_now().isoformat(),
         }
         state.last_signal = dict(pending_signal)
         state.pending_signal = pending_signal
         state.status = STATUS_WAITING_ENTRY_WINDOW
         state.rejection_reason = STATUS_WAITING_ENTRY_WINDOW
+        state.last_rejection_reason = None
+        state.blocked_filters = list(pending_signal["blocked_filters"])
+        state.approved_filters = list(pending_signal["approved_filters"])
+        state.quality_score = int(pending_signal["quality_score"] or 0)
         return state
 
     def clear_pending_signal(self, user_id: str, *, analyze: bool = False) -> RobotState:
@@ -295,6 +327,9 @@ class AutoTrader:
         if analyze:
             state.next_cycle_at = utc_now()
         state.rejection_reason = None
+        state.blocked_filters = []
+        state.approved_filters = []
+        state.quality_score = 0
         return state
 
     def start_sending_order(self, user_id: str) -> RobotState:
@@ -310,6 +345,7 @@ class AutoTrader:
         state.operation_in_progress = False
         state.status = STATUS_ORDER_REJECTED
         state.rejection_reason = reason
+        state.last_rejection_reason = reason
         return state
 
     def record_trade(self, user_id: str, trade: dict[str, Any]) -> RobotState:
@@ -341,6 +377,7 @@ class AutoTrader:
         state = self.get(user_id)
         state.status = STATUS_REAL_TRADING_LOCKED
         state.rejection_reason = reason
+        state.last_rejection_reason = reason
         return state
 
     def update_entry_window(self, user_id: str, window: dict[str, Any]) -> RobotState:
@@ -412,6 +449,7 @@ class AutoTrader:
         state.operation_in_progress = False
         state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
         state.rejection_reason = None
+        state.last_rejection_reason = None
         state.entry_window_open = False
         state.seconds_until_entry_window = 0
         self._schedule_next_cycle(state, finished_at)
@@ -446,6 +484,7 @@ class AutoTrader:
         state.operation_in_progress = False
         state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
         state.rejection_reason = "TRADE_RESULT_TIMEOUT"
+        state.last_rejection_reason = "TRADE_RESULT_TIMEOUT"
         state.entry_window_open = False
         state.seconds_until_entry_window = 0
         self._schedule_next_cycle(state, finished_at)

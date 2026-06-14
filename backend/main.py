@@ -3,7 +3,7 @@ import math
 import os
 import asyncio
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -32,6 +32,7 @@ logger = logging.getLogger("backend-gateway")
 ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
 SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
 SESSION_DISCONNECTED = "SESSION_DISCONNECTED"
+LOW_QUALITY_SIGNAL = "Sinal bloqueado por baixa qualidade"
 BINARY_ALLOWED_ASSETS = [
     "EURUSD-OTC",
     "EURGBP-OTC",
@@ -550,6 +551,135 @@ def extract_payout(payload: dict[str, Any], symbol: str) -> float | None:
     return None
 
 
+def daily_stop_reason(user_id: str, state: Any) -> str | None:
+    today = datetime.now(timezone.utc).date()
+    daily_profit = 0.0
+    daily_loss = 0.0
+    for trade in auto_trader.history(user_id).get("trades", []):
+        finished_at = parse_datetime(trade.get("finished_at"))
+        if finished_at is None or finished_at.date() != today:
+            continue
+        trade_profit = float(trade.get("profit") or 0)
+        daily_profit += trade_profit
+        if trade_profit < 0:
+            daily_loss += abs(trade_profit)
+    if state.stop_loss > 0 and daily_loss >= state.stop_loss:
+        return "DAILY_STOP_LOSS_REACHED"
+    if state.stop_win > 0 and daily_profit >= state.stop_win:
+        return "DAILY_STOP_WIN_REACHED"
+    return None
+
+
+def asset_cooldown_reason(user_id: str, symbol: str) -> str | None:
+    losses = []
+    for trade in auto_trader.history(user_id).get("trades", []):
+        if normalize_binary_active(str(trade.get("active") or "")) != symbol:
+            continue
+        if trade.get("result") != "LOSS":
+            break
+        finished_at = parse_datetime(trade.get("finished_at"))
+        if finished_at is None:
+            break
+        losses.append(finished_at)
+        if len(losses) == 2:
+            break
+    if len(losses) < 2:
+        return None
+    if datetime.now(timezone.utc) < losses[0] + timedelta(minutes=30):
+        return "ASSET_COOLDOWN"
+    return None
+
+
+def apply_strategy_guard(
+    user_id: str,
+    state: Any,
+    signal: dict[str, Any],
+    *,
+    payout: float | None,
+) -> tuple[bool, dict[str, Any], str | None]:
+    selected = {
+        **signal,
+        "strategy_mode": signal.get("strategy_mode") or state.strategy_mode,
+        "payout": payout,
+    }
+    blocked_filters = list(selected.get("blocked_filters") or [])
+    approved_filters = list(selected.get("approved_filters") or [])
+
+    if state.strategy_mode == "conservative":
+        if payout is None or float(payout) < 85:
+            if "MIN_PAYOUT" not in blocked_filters:
+                blocked_filters.append("MIN_PAYOUT")
+        elif "MIN_PAYOUT" not in approved_filters:
+            approved_filters.append("MIN_PAYOUT")
+        if int(selected.get("confidence") or 0) < 90 and "MIN_CONFIDENCE" not in blocked_filters:
+            blocked_filters.append("MIN_CONFIDENCE")
+        if int(selected.get("strength") or 0) < 20 and "TREND_CLEAR" not in blocked_filters:
+            blocked_filters.append("TREND_CLEAR")
+        if selected.get("trend") == "SIDEWAYS" and "SIDEWAYS_FILTER" not in blocked_filters:
+            blocked_filters.append("SIDEWAYS_FILTER")
+
+    direction = selected.get("signal")
+    if {"ema9", "ema21"}.issubset(selected):
+        ema9 = float(selected.get("ema9") or 0)
+        ema21 = float(selected.get("ema21") or 0)
+        ema_ok = (direction == "CALL" and ema9 > ema21) or (direction == "PUT" and ema9 < ema21)
+        if not ema_ok and "EMA_TREND" not in blocked_filters:
+            blocked_filters.append("EMA_TREND")
+    if "rsi" in selected:
+        rsi = float(selected.get("rsi") or 50)
+        rsi_ok = (direction == "CALL" and 55 <= rsi <= 75) or (direction == "PUT" and 25 <= rsi <= 45)
+        if not rsi_ok and "RSI_RANGE" not in blocked_filters:
+            blocked_filters.append("RSI_RANGE")
+    if "body_ratio" in selected and float(selected.get("body_ratio") or 0) < 0.55:
+        if "CANDLE_STRENGTH" not in blocked_filters:
+            blocked_filters.append("CANDLE_STRENGTH")
+    if direction == "CALL" and "upper_wick_ratio" in selected and float(selected.get("upper_wick_ratio") or 0) > 0.45:
+        if "WICK_REJECTION" not in blocked_filters:
+            blocked_filters.append("WICK_REJECTION")
+    if direction == "PUT" and "lower_wick_ratio" in selected and float(selected.get("lower_wick_ratio") or 0) > 0.45:
+        if "WICK_REJECTION" not in blocked_filters:
+            blocked_filters.append("WICK_REJECTION")
+    if "atr_pct" in selected and float(selected.get("atr_pct") or 0) < 0.0001:
+        if "VOLATILITY" not in blocked_filters:
+            blocked_filters.append("VOLATILITY")
+    if "directional_candles_5" in selected and int(selected.get("directional_candles_5") or 0) < 3:
+        if "LAST_5_CONFIRMATION" not in blocked_filters:
+            blocked_filters.append("LAST_5_CONFIRMATION")
+    if selected.get("alternating_last_3") and "NO_ALTERNATING_LAST_3" not in blocked_filters:
+        blocked_filters.append("NO_ALTERNATING_LAST_3")
+
+    symbol = normalize_binary_active(str(selected.get("symbol") or ""))
+    cooldown = asset_cooldown_reason(user_id, symbol)
+    if cooldown is not None:
+        blocked_filters.append(cooldown)
+        logger.warning("[ASSET_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
+
+    trade_allowed = bool(selected.get("trade_allowed", True)) and not blocked_filters
+    selected["blocked_filters"] = blocked_filters
+    selected["approved_filters"] = approved_filters
+    selected["trade_allowed"] = trade_allowed
+    selected["quality_score"] = int(selected.get("quality_score") or (100 if trade_allowed else 0))
+    selected["quality_reason"] = "OK" if trade_allowed else LOW_QUALITY_SIGNAL
+    if trade_allowed:
+        logger.info(
+            "[STRATEGY_FILTER_PASS] user_id=%s symbol=%s mode=%s quality_score=%s",
+            user_id,
+            symbol,
+            state.strategy_mode,
+            selected["quality_score"],
+        )
+        return True, selected, None
+
+    logger.info(
+        "[STRATEGY_FILTER_BLOCK] user_id=%s symbol=%s mode=%s blocked_filters=%s",
+        user_id,
+        symbol,
+        state.strategy_mode,
+        blocked_filters,
+    )
+    return False, selected, LOW_QUALITY_SIGNAL
+
+
 def robot_stop_reason(state: Any) -> str | None:
     if state.operation_in_progress:
         return "OPERATION_IN_PROGRESS"
@@ -611,6 +741,7 @@ async def analyze_active_signal(
     symbol: str,
     timeframe: str = "M1",
     endtime: int | None = None,
+    strategy_mode: str = "conservative",
 ) -> tuple[int, dict[str, Any]]:
     interval = TIMEFRAME_SECONDS[timeframe]
     candle_params: dict[str, Any] = {
@@ -632,7 +763,25 @@ async def analyze_active_signal(
             return 409, build_error(SESSION_DISCONNECTED)
         return status_code, payload
 
-    signal = analyze_signal(symbol, extract_candles(payload), timeframe=timeframe)
+    payout_status, payout_payload = await call_bullex_service(
+        "GET",
+        "/payouts",
+        user_id,
+        params={"active": symbol},
+    )
+    mark_disconnected_from_payload(user_id, payout_payload)
+    payout = extract_payout(payout_payload, symbol) if payout_payload.get("ok") else None
+    signal = analyze_signal(
+        symbol,
+        extract_candles(payload),
+        timeframe=timeframe,
+        strategy_mode=strategy_mode,
+        payout=payout,
+    )
+    if payout_status >= 400 and payout is None:
+        signal["blocked_filters"] = list(signal.get("blocked_filters") or []) + ["PAYOUT_UNAVAILABLE"]
+        signal["trade_allowed"] = False
+        signal["quality_reason"] = LOW_QUALITY_SIGNAL
     logger.info("[SIGNAL ANALYZE] %s %s %s", symbol, signal["signal"], signal["confidence"])
     return 200, build_success(signal)
 
@@ -643,6 +792,7 @@ async def scan_local_signals(
     include_wait: bool = False,
     timeframe: str = "M1",
     endtime: int | None = None,
+    strategy_mode: str = "conservative",
 ) -> tuple[int, dict[str, Any]]:
     logger.info("[SIGNAL SCAN START]")
     signals = []
@@ -654,6 +804,7 @@ async def scan_local_signals(
                 symbol,
                 timeframe=timeframe,
                 endtime=endtime,
+                strategy_mode=strategy_mode,
             )
             if not payload.get("ok"):
                 if is_session_disconnected(payload):
@@ -663,9 +814,9 @@ async def scan_local_signals(
                 continue
 
             signal = payload["data"]
-            if signal["confidence"] < 70:
+            if signal["confidence"] < 70 and not include_wait:
                 continue
-            if signal["signal"] == "WAIT" and not include_wait:
+            if (signal["signal"] == "WAIT" or not signal.get("trade_allowed", True)) and not include_wait:
                 continue
             signals.append(signal)
         except Exception as exc:
@@ -741,8 +892,11 @@ async def execute_robot_cycle(
 
         logger.info("[ROBOT TICK] user_id=%s", user_id)
         try:
-            active_stop_reason = robot_stop_reason(state)
+            active_stop_reason = daily_stop_reason(user_id, state) or robot_stop_reason(state)
             if active_stop_reason is not None:
+                if active_stop_reason.startswith("DAILY_STOP"):
+                    state.enabled = False
+                    logger.warning("[DAILY_STOP_HIT] user_id=%s reason=%s", user_id, active_stop_reason)
                 state = auto_trader.reject(user_id, active_stop_reason)
                 logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=%s", user_id, active_stop_reason)
                 return 200, build_robot_payload(state)
@@ -822,6 +976,7 @@ async def execute_robot_cycle(
                     include_wait=True,
                     timeframe=state.timeframe,
                     endtime=int(entry_window["server_timestamp"]),
+                    strategy_mode=state.strategy_mode,
                 )
                 if not scan_payload.get("ok"):
                     state = auto_trader.fail(
@@ -845,14 +1000,18 @@ async def execute_robot_cycle(
                     ),
                 )
                 symbol = normalize_binary_active(str(selected.get("symbol") or ""))
-                payout_status, payout_payload = await call_bullex_service(
-                    "GET",
-                    "/payouts",
-                    user_id,
-                    params={"active": symbol},
-                )
-                mark_disconnected_from_payload(user_id, payout_payload)
-                payout = extract_payout(payout_payload, symbol) if payout_payload.get("ok") else None
+                payout = selected.get("payout")
+                payout_status = 200
+                payout_payload = build_success([])
+                if payout is None:
+                    payout_status, payout_payload = await call_bullex_service(
+                        "GET",
+                        "/payouts",
+                        user_id,
+                        params={"active": symbol},
+                    )
+                    mark_disconnected_from_payload(user_id, payout_payload)
+                    payout = extract_payout(payout_payload, symbol) if payout_payload.get("ok") else None
                 selected = {**selected, "symbol": symbol, "payout": payout}
 
                 rejection = robot_stop_reason(state)
@@ -868,9 +1027,24 @@ async def execute_robot_cycle(
                     rejection = str(payout_payload.get("error") or "PAYOUT_UNAVAILABLE")
                 if rejection is None and not state.enabled:
                     rejection = "ROBOT_STOPPED"
+                if rejection is None:
+                    allowed, selected, strategy_rejection = apply_strategy_guard(
+                        user_id,
+                        state,
+                        selected,
+                        payout=payout,
+                    )
+                    if not allowed:
+                        rejection = strategy_rejection or LOW_QUALITY_SIGNAL
 
                 if rejection is not None:
-                    state = auto_trader.reject(user_id, rejection)
+                    state = auto_trader.reject_strategy(
+                        user_id,
+                        rejection,
+                        blocked_filters=list(selected.get("blocked_filters") or []),
+                        approved_filters=list(selected.get("approved_filters") or []),
+                        quality_score=int(selected.get("quality_score") or 0),
+                    )
                     logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=%s", user_id, rejection)
                     return 200, build_robot_payload(state)
 
@@ -1166,13 +1340,18 @@ async def cors_test() -> dict[str, bool]:
 @app.get("/signals/analyze")
 async def signals_analyze(
     active: str,
+    strategy_mode: str = Query(default="conservative"),
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
     if not is_binary_asset_allowed(active):
         return json_response(400, build_error(ASSET_NOT_ALLOWED))
 
     symbol = normalize_binary_active(active)
-    status_code, payload = await analyze_active_signal(auth["user_id"], symbol)
+    status_code, payload = await analyze_active_signal(
+        auth["user_id"],
+        symbol,
+        strategy_mode=strategy_mode,
+    )
     return json_response(status_code, payload)
 
 
@@ -1198,9 +1377,15 @@ async def signals_review(
 async def signals_scan(
     limit: int = Query(default=5, ge=1, le=len(BINARY_ALLOWED_ASSETS)),
     include_wait: bool = False,
+    strategy_mode: str = Query(default="conservative"),
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
-    status_code, payload = await scan_local_signals(auth["user_id"], limit=limit, include_wait=include_wait)
+    status_code, payload = await scan_local_signals(
+        auth["user_id"],
+        limit=limit,
+        include_wait=include_wait,
+        strategy_mode=strategy_mode,
+    )
     return json_response(status_code, payload)
 
 
