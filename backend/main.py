@@ -14,11 +14,11 @@ from fastapi.responses import JSONResponse
 
 from backend.auto_trader import (
     AutoTrader,
-    NO_MINIMUM_SCORE_MESSAGE,
     RobotConfigUpdate,
     STATUS_ACCOUNT_DISCONNECTED,
     STATUS_ORDER_REJECTED,
     STATUS_PENDING_RESULT,
+    STATUS_WAITING_ANALYSIS_WINDOW,
     STATUS_WAITING_ENTRY_WINDOW,
     STATUS_WAITING_NEXT_CYCLE,
     parse_datetime,
@@ -517,6 +517,12 @@ ENTRY_WINDOWS = {
     "M15": (865, 869),
     "M30": (1765, 1769),
 }
+ANALYSIS_WINDOWS = {
+    "M1": (5, 20),
+    "M5": (5, 20),
+    "M15": (5, 20),
+    "M30": (5, 20),
+}
 EXPIRATION_SAFETY_SECONDS = 1
 ORDER_EXPIRATION_FIELDS = (
     "expected_expire_at",
@@ -552,9 +558,19 @@ def get_entry_window(timeframe: str, server_timestamp: float | None = None) -> d
 
     expiration_seconds = TIMEFRAME_SECONDS[normalized]
     window_start, window_end = ENTRY_WINDOWS[normalized]
+    analysis_window_start, analysis_window_end = ANALYSIS_WINDOWS[normalized]
     seconds_in_candle = float(server_timestamp) % expiration_seconds
     seconds_until_close = expiration_seconds - seconds_in_candle
+    analysis_window_open = analysis_window_start <= seconds_in_candle <= analysis_window_end
     entry_window_open = window_start <= seconds_in_candle <= window_end
+    if analysis_window_open:
+        seconds_until_analysis_window = 0
+    elif seconds_in_candle < analysis_window_start:
+        seconds_until_analysis_window = math.ceil(analysis_window_start - seconds_in_candle)
+    else:
+        seconds_until_analysis_window = math.ceil(
+            expiration_seconds - seconds_in_candle + analysis_window_start
+        )
     missed_entry_window = seconds_in_candle > window_end
     if entry_window_open:
         seconds_until_entry_window = 0
@@ -567,6 +583,10 @@ def get_entry_window(timeframe: str, server_timestamp: float | None = None) -> d
         "server_timestamp": float(server_timestamp),
         "server_time": datetime.fromtimestamp(server_timestamp, timezone.utc).isoformat(),
         "timeframe": normalized,
+        "analysis_window_open": analysis_window_open,
+        "seconds_until_analysis_window": seconds_until_analysis_window,
+        "analysis_window_start_second": analysis_window_start,
+        "analysis_window_end_second": analysis_window_end,
         "entry_window_open": entry_window_open,
         "missed_entry_window": missed_entry_window,
         "seconds_until_entry_window": seconds_until_entry_window,
@@ -638,10 +658,14 @@ async def refresh_entry_window(user_id: str, state: Any) -> tuple[int, dict[str,
     auto_trader.update_entry_window(user_id, window)
     logger.info(
         "[ENTRY_WINDOW_CALCULATED] user_id=%s timeframe=%s current_candle_seconds=%s "
+        "analysis_window_start=%s analysis_window_end=%s analysis_open=%s "
         "window_start=%s window_end=%s buy_target_second=%s open=%s",
         user_id,
         state.timeframe,
         window["current_candle_seconds"],
+        window["analysis_window_start_second"],
+        window["analysis_window_end_second"],
+        window["analysis_window_open"],
         window["entry_window_start_second"],
         window["entry_window_end_second"],
         window["buy_target_second"],
@@ -885,6 +909,16 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
                 (data.get("last_trade") or {}).get("order_id"),
             )
     return build_success(data)
+
+
+def recover_timed_out_analysis_if_needed(user_id: str) -> Any:
+    recovered, state = auto_trader.recover_timed_out_analysis(user_id)
+    if recovered:
+        logger.warning("[ANALYSIS_TIMEOUT] user_id=%s", user_id)
+        logger.info("[ANALYSIS_RECOVERED] user_id=%s reason=%s", user_id, state.rejection_reason)
+        logger.info("[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
+        persist_robot(user_id)
+    return state
 
 
 def readable_order_error(error: Any) -> str:
@@ -1137,7 +1171,7 @@ async def execute_robot_cycle(
     required_mode: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     async with auto_trader.lock(user_id):
-        state = auto_trader.get(user_id)
+        state = recover_timed_out_analysis_if_needed(user_id)
         had_pending_signal = state.pending_signal is not None
         if not had_pending_signal:
             can_run, state = auto_trader.prepare_cycle(user_id)
@@ -1154,11 +1188,6 @@ async def execute_robot_cycle(
                 user_id,
                 state.cycle_id,
                 state.current_cycle_started_at,
-            )
-            logger.info(
-                "[ANALYSIS_STARTED] user_id=%s cycle_id=%s",
-                user_id,
-                state.cycle_id,
             )
 
         logger.info("[ROBOT TICK] user_id=%s", user_id)
@@ -1223,8 +1252,10 @@ async def execute_robot_cycle(
                 )
                 return 200, build_robot_payload(state)
             if entry_window is None:
-                state = auto_trader.fail(user_id, "SERVER_TIME_UNAVAILABLE")
+                state = auto_trader.reject_analysis_error(user_id, "SERVER_TIME_UNAVAILABLE")
                 logger.error("[ROBOT ERROR] user_id=%s error=SERVER_TIME_UNAVAILABLE", user_id)
+                logger.error("[ANALYSIS_ERROR] user_id=%s error=SERVER_TIME_UNAVAILABLE", user_id)
+                logger.info("[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
                 return status_code, build_robot_payload(state)
             selected = dict(state.pending_signal) if state.pending_signal else None
             if selected is not None and not entry_window["entry_window_open"]:
@@ -1270,6 +1301,39 @@ async def execute_robot_cycle(
                 return 200, build_robot_payload(state)
 
             if selected is None:
+                if not entry_window["analysis_window_open"]:
+                    state = auto_trader.wait_analysis_window(user_id, entry_window)
+                    logger.info(
+                        "[WAITING_ANALYSIS_WINDOW] user_id=%s timeframe=%s "
+                        "current_candle_seconds=%s analysis_window_start=%s "
+                        "analysis_window_end=%s seconds_until_analysis_window=%s",
+                        user_id,
+                        state.timeframe,
+                        entry_window["current_candle_seconds"],
+                        entry_window["analysis_window_start_second"],
+                        entry_window["analysis_window_end_second"],
+                        entry_window["seconds_until_analysis_window"],
+                    )
+                    logger.info(
+                        "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                        user_id,
+                        state.next_cycle_at,
+                    )
+                    return 200, build_robot_payload(state)
+                logger.info(
+                    "[ANALYSIS_WINDOW_OPEN] user_id=%s timeframe=%s "
+                    "current_candle_seconds=%s analysis_window_start=%s analysis_window_end=%s",
+                    user_id,
+                    state.timeframe,
+                    entry_window["current_candle_seconds"],
+                    entry_window["analysis_window_start_second"],
+                    entry_window["analysis_window_end_second"],
+                )
+                logger.info(
+                    "[ANALYSIS_STARTED] user_id=%s cycle_id=%s",
+                    user_id,
+                    state.cycle_id,
+                )
                 scan_status, scan_payload = await scan_local_signals(
                     user_id,
                     limit=len(BINARY_ALLOWED_ASSETS),
@@ -1279,11 +1343,14 @@ async def execute_robot_cycle(
                     strategy_mode=state.strategy_mode,
                 )
                 if not scan_payload.get("ok"):
-                    state = auto_trader.fail(
+                    error = str(scan_payload.get("error") or "SIGNAL_SCAN_FAILED")
+                    state = auto_trader.reject_analysis_error(
                         user_id,
-                        str(scan_payload.get("error") or "SIGNAL_SCAN_FAILED"),
+                        error,
                     )
                     logger.error("[ROBOT ERROR] user_id=%s error=%s", user_id, state.rejection_reason)
+                    logger.error("[ANALYSIS_ERROR] user_id=%s error=%s", user_id, error)
+                    logger.info("[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
                     return scan_status, build_robot_payload(state)
 
                 signals = [item for item in scan_payload.get("data", []) if isinstance(item, dict)]
@@ -1294,13 +1361,13 @@ async def execute_robot_cycle(
                     len(signals),
                 )
                 if not signals:
-                    state = auto_trader.reject_no_valid_signal(
+                    state = auto_trader.reject_no_candidates(
                         user_id,
-                        "CANDLES_UNAVAILABLE",
+                        last_rejection_reason="CANDLES_UNAVAILABLE",
                     )
                     auto_trader.set_analysis_candidates(user_id, [], None)
                     logger.info(
-                        "[NO_VALID_SIGNAL] user_id=%s reason=%s",
+                        "[NO_CANDIDATES] user_id=%s reason=%s",
                         user_id,
                         state.last_rejection_reason,
                     )
@@ -1464,9 +1531,9 @@ async def execute_robot_cycle(
                         if critical_reasons
                         else "CANDLES_UNAVAILABLE"
                     )
-                    state = auto_trader.reject_no_valid_signal(
+                    state = auto_trader.reject_no_candidates(
                         user_id,
-                        last_rejection_reason,
+                        last_rejection_reason=last_rejection_reason,
                         blocked_filters=list(
                             (highest_rejected or {}).get("blocked_filters") or []
                         ),
@@ -1479,7 +1546,7 @@ async def execute_robot_cycle(
                     )
                     auto_trader.set_analysis_candidates(user_id, candidates, None)
                     logger.info(
-                        "[NO_VALID_SIGNAL] user_id=%s reason=%s candidates=%s",
+                        "[NO_CANDIDATES] user_id=%s reason=%s candidates=%s",
                         user_id,
                         last_rejection_reason,
                         len(candidates),
@@ -1551,33 +1618,34 @@ async def execute_robot_cycle(
                     )
                     return 200, build_robot_payload(state)
                 if entry_window is None:
-                    state = auto_trader.fail(user_id, "SERVER_TIME_UNAVAILABLE")
+                    state = auto_trader.reject_analysis_error(user_id, "SERVER_TIME_UNAVAILABLE")
                     logger.error("[ROBOT ERROR] user_id=%s error=SERVER_TIME_UNAVAILABLE", user_id)
+                    logger.error("[ANALYSIS_ERROR] user_id=%s error=SERVER_TIME_UNAVAILABLE", user_id)
+                    logger.info("[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
                     return timing_status, build_robot_payload(state)
                 if not entry_window["entry_window_open"]:
                     if entry_window["missed_entry_window"]:
                         logger.info(
                             "[PENDING_SIGNAL_CLEARED] user_id=%s symbol=%s "
-                            "reason=MISSED_ENTRY_WINDOW",
+                            "reason=WAITING_NEXT_ANALYSIS_WINDOW",
                             user_id,
                             selected.get("symbol"),
                         )
-                        state = auto_trader.reject_strategy(
+                        state = auto_trader.wait_analysis_window(
                             user_id,
-                            "MISSED_ENTRY_WINDOW",
-                            blocked_filters=["MISSED_ENTRY_WINDOW"],
-                            approved_filters=list(
-                                selected.get("approved_filters") or []
-                            ),
-                            quality_score=int(selected.get("quality_score") or 0),
+                            entry_window,
+                            clear_pending=True,
                         )
                         logger.info(
-                            "[MISSED_ENTRY_WINDOW] user_id=%s timeframe=%s "
-                            "current_candle_seconds=%s window_end=%s",
+                            "[WAITING_ANALYSIS_WINDOW] user_id=%s timeframe=%s "
+                            "current_candle_seconds=%s analysis_window_start=%s "
+                            "analysis_window_end=%s seconds_until_analysis_window=%s",
                             user_id,
                             state.timeframe,
                             entry_window["current_candle_seconds"],
-                            entry_window["entry_window_end_second"],
+                            entry_window["analysis_window_start_second"],
+                            entry_window["analysis_window_end_second"],
+                            entry_window["seconds_until_analysis_window"],
                         )
                         logger.info(
                             "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
@@ -1792,8 +1860,11 @@ async def execute_robot_cycle(
             trade_result_monitor.start(user_id, order_id)
             return 200, build_robot_payload(state)
         except Exception as exc:
-            state = auto_trader.fail(user_id, "ROBOT_CYCLE_ERROR")
+            error = str(exc).strip() or type(exc).__name__
+            state = auto_trader.reject_analysis_error(user_id, error)
             logger.exception("[ROBOT ERROR] user_id=%s error=%s", user_id, exc)
+            logger.error("[ANALYSIS_ERROR] user_id=%s error=%s", user_id, error)
+            logger.info("[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
             return 500, build_robot_payload(state)
         finally:
             persist_robot(user_id)
@@ -1808,6 +1879,8 @@ async def robot_worker(user_id: str) -> None:
                 delay = 3
             elif state.status == STATUS_WAITING_ENTRY_WINDOW:
                 delay = max(1, state.seconds_until_entry_window)
+            elif state.status == STATUS_WAITING_ANALYSIS_WINDOW:
+                delay = max(1, state.seconds_until_analysis_window)
             elif state.status == STATUS_ORDER_REJECTED and state.rejected_at is not None:
                 delay = max(1, 5 - int((utc_now() - state.rejected_at).total_seconds()))
             else:
@@ -1998,6 +2071,7 @@ async def signals_top_reviewed(auth: dict[str, str] = Depends(require_headers)) 
 async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     user_id = auth["user_id"]
     state = get_user_robot_state(user_id)
+    state = recover_timed_out_analysis_if_needed(user_id)
     _, session_payload, state, connected, active_mode, source = await fetch_and_sync_robot_connection(user_id)
     if not connected:
         if state.status == STATUS_ACCOUNT_DISCONNECTED:

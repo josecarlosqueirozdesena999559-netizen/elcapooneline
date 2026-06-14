@@ -229,7 +229,7 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
             if path == "/sessions/status":
                 return 200, main.build_success(
-                    {"connected": True, "active_mode": "PRACTICE", "server_time": 25.0}
+                    {"connected": True, "active_mode": "PRACTICE", "server_time": 20.0}
                 )
             raise AssertionError(f"unexpected path: {path}")
 
@@ -270,7 +270,7 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
             if path == "/sessions/status":
                 return 200, main.build_success(
-                    {"connected": True, "active_mode": "PRACTICE", "server_time": 25.0}
+                    {"connected": True, "active_mode": "PRACTICE", "server_time": 20.0}
                 )
             if path == "/payouts":
                 return 500, main.build_error("PAYOUT_UNAVAILABLE")
@@ -301,7 +301,7 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
             if path == "/sessions/status":
                 return 200, main.build_success(
-                    {"connected": True, "active_mode": "PRACTICE", "server_time": 25.0}
+                    {"connected": True, "active_mode": "PRACTICE", "server_time": 20.0}
                 )
             if path == "/payouts":
                 return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 90}])

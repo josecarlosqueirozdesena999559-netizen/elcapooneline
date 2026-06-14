@@ -24,11 +24,17 @@ STATUS_ORDER_REJECTED = "ORDER_REJECTED"
 STATUS_ERROR = "ERROR"
 STATUS_REAL_TRADING_LOCKED = "REAL_TRADING_LOCKED"
 STATUS_WAITING_ENTRY_WINDOW = "WAITING_ENTRY_WINDOW"
+STATUS_WAITING_ANALYSIS_WINDOW = "WAITING_ANALYSIS_WINDOW"
 STATUS_ACCOUNT_DISCONNECTED = "ACCOUNT_DISCONNECTED"
+STATUS_ANALYSIS_TIMEOUT = "ANALYSIS_TIMEOUT"
+STATUS_ANALYSIS_ERROR = "ANALYSIS_ERROR"
+STATUS_NO_CANDIDATES = "NO_CANDIDATES"
 
 TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
 RESULT_WAITING_MESSAGE = "Aguardando resultado..."
 ANALYSIS_MESSAGE = "Analisando mercado..."
+ANALYSIS_TIMEOUT_SECONDS = 15
+ANALYSIS_TIMEOUT_MESSAGE = "Análise demorou demais e foi reiniciada."
 NO_MINIMUM_SCORE_MESSAGE = "Nenhum ativo atingiu score mínimo."
 
 
@@ -115,6 +121,10 @@ class RobotState:
     connection_checked_at: datetime | None = None
     connection_status_source: str = "cached"
     connection_failure_count: int = 0
+    analysis_window_open: bool = False
+    seconds_until_analysis_window: int = 0
+    analysis_window_start_second: int = 5
+    analysis_window_end_second: int = 20
     entry_window_open: bool = False
     seconds_until_entry_window: int = 0
     current_candle_seconds: float = 0.0
@@ -158,6 +168,15 @@ class RobotState:
             if self.next_cycle_at is not None
             else 0
         )
+        running_analysis = self.analysis_result == "RUNNING" or self.last_analysis_result == "RUNNING"
+        if (
+            self.status == STATUS_WAITING_NEXT_CYCLE
+            and running_analysis
+            and data["seconds_until_next_cycle"] <= 0
+            and not self.pending_signal
+            and not self.operation_in_progress
+        ):
+            data["status"] = STATUS_ANALYZING
         if (
             self.enabled
             and self.status == STATUS_WAITING_NEXT_CYCLE
@@ -417,6 +436,85 @@ class AutoTrader:
         state.strategy_score = 0
         return True, state
 
+    def reject_analysis(
+        self,
+        user_id: str,
+        reason: str,
+        *,
+        last_rejection_reason: str,
+        last_order_error: str | None = None,
+    ) -> RobotState:
+        state = self.get(user_id)
+        rejected_at = utc_now()
+        state.status = STATUS_SIGNAL_REJECTED
+        state.rejection_reason = reason
+        state.last_rejection_reason = last_rejection_reason
+        state.last_order_error = last_order_error
+        state.rejected_at = rejected_at
+        state.pending_signal = None
+        state.last_signal = None
+        state.operation_in_progress = False
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        state.next_cycle_at = rejected_at + timedelta(minutes=state.cycle_minutes)
+        state.last_analysis_at = rejected_at
+        state.last_analysis_result = reason
+        state.analysis_result = reason
+        state.analysis_message = None
+        return state
+
+    def reject_analysis_timeout(self, user_id: str) -> RobotState:
+        return self.reject_analysis(
+            user_id,
+            STATUS_ANALYSIS_TIMEOUT,
+            last_rejection_reason=ANALYSIS_TIMEOUT_MESSAGE,
+        )
+
+    def reject_analysis_error(self, user_id: str, error: str) -> RobotState:
+        return self.reject_analysis(
+            user_id,
+            STATUS_ANALYSIS_ERROR,
+            last_rejection_reason=error,
+            last_order_error=error,
+        )
+
+    def reject_no_candidates(
+        self,
+        user_id: str,
+        *,
+        last_rejection_reason: str,
+        blocked_filters: list[str] | None = None,
+        approved_filters: list[str] | None = None,
+        quality_score: int = 0,
+    ) -> RobotState:
+        state = self.reject_analysis(
+            user_id,
+            STATUS_NO_CANDIDATES,
+            last_rejection_reason=last_rejection_reason,
+        )
+        state.blocked_filters = list(blocked_filters or [])
+        state.approved_filters = list(approved_filters or [])
+        state.quality_score = int(quality_score or 0)
+        state.strategy_score = 0
+        state.candidates_count = 0
+        state.candidates = []
+        state.best_candidate = None
+        state.strategy_name = None
+        state.strategy_reason = None
+        state.used_strategies = []
+        return state
+
+    def recover_timed_out_analysis(self, user_id: str) -> tuple[bool, RobotState]:
+        state = self.get(user_id)
+        if state.analysis_result != "RUNNING" and state.last_analysis_result != "RUNNING":
+            return False, state
+        started_at = state.analysis_started_at or state.last_analysis_at or state.current_cycle_started_at
+        if started_at is None:
+            return False, state
+        if (utc_now() - started_at).total_seconds() <= ANALYSIS_TIMEOUT_SECONDS:
+            return False, state
+        return True, self.reject_analysis_timeout(user_id)
+
     def reject(self, user_id: str, reason: str) -> RobotState:
         state = self.get(user_id)
         state.status = STATUS_SIGNAL_REJECTED
@@ -530,6 +628,33 @@ class AutoTrader:
         state.strategy_name = pending_signal["strategy_name"]
         state.strategy_reason = pending_signal["strategy_reason"]
         state.used_strategies = list(pending_signal["used_strategies"])
+        return state
+
+    def wait_analysis_window(
+        self,
+        user_id: str,
+        window: dict[str, Any],
+        *,
+        clear_pending: bool = False,
+    ) -> RobotState:
+        state = self.get(user_id)
+        if clear_pending:
+            state.pending_signal = None
+            state.last_signal = None
+            state.best_candidate = None
+            state.strategy_score = 0
+        state.status = STATUS_WAITING_ANALYSIS_WINDOW
+        state.rejection_reason = "WAITING_NEXT_ANALYSIS_WINDOW"
+        state.last_rejection_reason = "WAITING_NEXT_ANALYSIS_WINDOW"
+        state.analysis_result = "WAITING_NEXT_ANALYSIS_WINDOW"
+        state.last_analysis_result = "WAITING_NEXT_ANALYSIS_WINDOW"
+        state.analysis_message = None
+        state.operation_in_progress = False
+        state.analysis_window_open = bool(window["analysis_window_open"])
+        state.seconds_until_analysis_window = int(window["seconds_until_analysis_window"])
+        state.analysis_window_start_second = int(window["analysis_window_start_second"])
+        state.analysis_window_end_second = int(window["analysis_window_end_second"])
+        state.next_cycle_at = utc_now() + timedelta(seconds=state.seconds_until_analysis_window)
         return state
 
     def set_analysis_candidates(
@@ -692,6 +817,10 @@ class AutoTrader:
             and not state.pending_signal
             and not state.operation_in_progress
         )
+        state.analysis_window_open = bool(window["analysis_window_open"])
+        state.seconds_until_analysis_window = int(window["seconds_until_analysis_window"])
+        state.analysis_window_start_second = int(window["analysis_window_start_second"])
+        state.analysis_window_end_second = int(window["analysis_window_end_second"])
         state.entry_window_open = bool(window["entry_window_open"]) and not waiting_next_cycle
         state.seconds_until_entry_window = int(window["seconds_until_entry_window"])
         state.current_candle_seconds = float(window["current_candle_seconds"])

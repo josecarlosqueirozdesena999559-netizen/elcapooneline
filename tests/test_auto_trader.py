@@ -175,9 +175,24 @@ class AutoTraderStateTests(unittest.TestCase):
 
         self.assertFalse(window["entry_window_open"])
         self.assertEqual(window["seconds_until_entry_window"], 1)
+        self.assertFalse(window["analysis_window_open"])
+        self.assertEqual(window["seconds_until_analysis_window"], 41)
+        self.assertEqual(window["analysis_window_start_second"], 5)
+        self.assertEqual(window["analysis_window_end_second"], 20)
         self.assertEqual(window["entry_window_start_second"], 25)
         self.assertEqual(window["entry_window_end_second"], 29)
         self.assertEqual(window["buy_target_second"], 25)
+
+    def test_analysis_window_contract_for_m1(self) -> None:
+        window_at_10 = main.get_entry_window("M1", 10)
+        window_at_20 = main.get_entry_window("M1", 20)
+        window_at_30 = main.get_entry_window("M1", 30)
+
+        self.assertTrue(window_at_10["analysis_window_open"])
+        self.assertEqual(window_at_10["seconds_until_analysis_window"], 0)
+        self.assertTrue(window_at_20["analysis_window_open"])
+        self.assertFalse(window_at_30["analysis_window_open"])
+        self.assertEqual(window_at_30["seconds_until_analysis_window"], 35)
 
     def test_waiting_entry_window_keeps_complete_time_contract(self) -> None:
         trader = AutoTrader()
@@ -475,7 +490,15 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_demo_sends_at_most_one_order_per_cycle(self) -> None:
         user_id = "user-demo"
         main.auto_trader.start(user_id)
-        make_cycle_due(user_id)
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "confidence": 94,
+                "payout": 90,
+            },
+        )
         calls = []
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
@@ -488,8 +511,6 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                         "server_time": SERVER_TIME_M1_OPEN,
                     }
                 )
-            if path == "/payouts":
-                return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 90}])
             if path == "/orders/buy-demo":
                 return 200, main.build_success({"order_id": "demo-1"})
             raise AssertionError(f"unexpected path: {path}")
@@ -578,19 +599,19 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(logs.output)
         self.assertEqual(status_code, 200)
         self.assertEqual(data["status"], "SIGNAL_REJECTED")
-        self.assertEqual(data["rejection_reason"], "NO_VALID_SIGNAL")
+        self.assertEqual(data["rejection_reason"], "NO_CANDIDATES")
         self.assertEqual(
             data["last_rejection_reason"],
             "CANDLES_UNAVAILABLE",
         )
-        self.assertEqual(data["last_analysis_result"], "NO_VALID_SIGNAL")
+        self.assertEqual(data["last_analysis_result"], "NO_CANDIDATES")
         self.assertIsNotNone(data["last_analysis_at"])
         self.assertIsNone(data["pending_signal"])
         self.assertGreaterEqual(data["seconds_until_next_cycle"], 59)
         self.assertIn("[CYCLE_DUE]", output)
         self.assertIn("[ANALYSIS_STARTED]", output)
         self.assertIn("[ANALYSIS_FINISHED]", output)
-        self.assertIn("[NO_VALID_SIGNAL]", output)
+        self.assertIn("[NO_CANDIDATES]", output)
         self.assertIn("[NEXT_CYCLE_SCHEDULED]", output)
         scan.assert_awaited_once()
 
@@ -635,6 +656,11 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(logs.output)
         self.assertEqual(status_code, 200)
         self.assertEqual(data["status"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(data["analysis_window_start_second"], 5)
+        self.assertEqual(data["analysis_window_end_second"], 20)
+        self.assertEqual(data["entry_window_start_second"], 25)
+        self.assertEqual(data["entry_window_end_second"], 29)
+        self.assertEqual(data["current_candle_seconds"], 20.0)
         self.assertEqual(data["last_analysis_result"], "BEST_CANDIDATE_SELECTED")
         self.assertEqual(data["analysis_result"], "BEST_CANDIDATE_SELECTED")
         self.assertIsNotNone(data["analysis_started_at"])
@@ -649,11 +675,95 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["strategy_score"], data["pending_signal"]["strategy_score"])
         self.assertIn("[CYCLE_DUE]", output)
         self.assertIn("[ANALYSIS_STARTED]", output)
+        self.assertIn("[ANALYSIS_WINDOW_OPEN]", output)
         self.assertIn("[ANALYSIS_FINISHED]", output)
         self.assertIn("[ANALYSIS_CANDIDATES]", output)
         self.assertIn("[BEST_CANDIDATE_SELECTED]", output)
         self.assertIn("[PENDING_SIGNAL_SET]", output)
         scan.assert_awaited_once()
+
+    async def test_due_cycle_analyzes_at_second_10_and_prepares_pending_signal(self) -> None:
+        user_id = "user-analysis-window-open"
+        state = main.auto_trader.start(user_id)
+        state.cycle_minutes = 1
+        make_cycle_due(user_id)
+        status_times = iter((10.0, 10.0))
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {
+                        "connected": True,
+                        "active_mode": "PRACTICE",
+                        "server_time": next(status_times),
+                    }
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        scan_payload = main.build_success(
+            [
+                {
+                    "symbol": "EURUSD-OTC",
+                    "signal": "PUT",
+                    "confidence": 95,
+                    "strength": 81,
+                    "payout": 90,
+                }
+            ]
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))) as scan,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "WAITING_ENTRY_WINDOW")
+        self.assertTrue(data["analysis_window_open"])
+        self.assertEqual(data["seconds_until_analysis_window"], 0)
+        self.assertEqual(data["seconds_until_entry_window"], 15)
+        self.assertEqual(data["pending_signal"]["symbol"], "EURUSD-OTC")
+        self.assertEqual(data["pending_signal"]["signal"], "PUT")
+        scan.assert_awaited_once()
+
+    async def test_due_cycle_after_second_20_waits_next_analysis_window_without_scan(self) -> None:
+        user_id = "user-analysis-window-missed"
+        main.auto_trader.start(user_id)
+        make_cycle_due(user_id)
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {
+                        "connected": True,
+                        "active_mode": "PRACTICE",
+                        "server_time": 30.0,
+                    }
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", new=AsyncMock()) as scan,
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        output = "\n".join(logs.output)
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(data["rejection_reason"], "WAITING_NEXT_ANALYSIS_WINDOW")
+        self.assertNotEqual(data["rejection_reason"], "MISSED_ENTRY_WINDOW")
+        self.assertIsNone(data["pending_signal"])
+        self.assertFalse(data["analysis_window_open"])
+        self.assertEqual(data["seconds_until_analysis_window"], 35)
+        self.assertEqual(data["current_candle_seconds"], 30.0)
+        self.assertIn("[WAITING_ANALYSIS_WINDOW]", output)
+        self.assertNotIn("[MISSED_ENTRY_WINDOW]", output)
+        scan.assert_not_awaited()
 
     async def test_analysis_state_is_visible_while_scan_is_running(self) -> None:
         user_id = "user-analysis-running"
@@ -707,6 +817,108 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             finished_payload["data"]["seconds_until_next_cycle"],
             300,
         )
+
+    async def test_running_analysis_over_15_seconds_recovers_with_timeout(self) -> None:
+        user_id = "user-analysis-timeout"
+        state = main.auto_trader.start(user_id)
+        state.status = STATUS_WAITING_NEXT_CYCLE
+        state.next_cycle_at = utc_now() - timedelta(seconds=1)
+        state.analysis_result = "RUNNING"
+        state.last_analysis_result = "RUNNING"
+        state.analysis_started_at = utc_now() - timedelta(seconds=16)
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success({"connected": True, "active_mode": "PRACTICE"}),
+                    )
+                ),
+            ),
+            patch.object(main, "sync_user_store_from_payload"),
+            patch.object(main, "persist_robot"),
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        output = "\n".join(logs.output)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["status"], "SIGNAL_REJECTED")
+        self.assertEqual(data["rejection_reason"], "ANALYSIS_TIMEOUT")
+        self.assertEqual(data["last_rejection_reason"], "Análise demorou demais e foi reiniciada.")
+        self.assertGreaterEqual(data["seconds_until_next_cycle"], 299)
+        self.assertIn("[ANALYSIS_TIMEOUT]", output)
+        self.assertIn("[ANALYSIS_RECOVERED]", output)
+        self.assertIn("[NEXT_CYCLE_SCHEDULED]", output)
+
+    async def test_analysis_exception_schedules_next_cycle(self) -> None:
+        user_id = "user-analysis-error"
+        main.auto_trader.start(user_id)
+        make_cycle_due(user_id)
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {"connected": True, "active_mode": "PRACTICE", "server_time": 20.0}
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        async def broken_scan(*args, **kwargs):
+            raise RuntimeError("scan exploded")
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", side_effect=broken_scan),
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        output = "\n".join(logs.output)
+        self.assertEqual(status_code, 500)
+        self.assertEqual(data["status"], "SIGNAL_REJECTED")
+        self.assertEqual(data["rejection_reason"], "ANALYSIS_ERROR")
+        self.assertEqual(data["last_order_error"], "scan exploded")
+        self.assertGreaterEqual(data["seconds_until_next_cycle"], 299)
+        self.assertIn("[ANALYSIS_ERROR]", output)
+        self.assertIn("[NEXT_CYCLE_SCHEDULED]", output)
+
+    async def test_waiting_next_cycle_running_result_never_returns_invalid_zero_state(self) -> None:
+        user_id = "user-invalid-running-state"
+        state = main.auto_trader.start(user_id)
+        state.status = STATUS_WAITING_NEXT_CYCLE
+        state.next_cycle_at = utc_now() - timedelta(seconds=1)
+        state.analysis_result = "RUNNING"
+        state.last_analysis_result = "RUNNING"
+        state.analysis_started_at = utc_now()
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success({"connected": True, "active_mode": "PRACTICE"}),
+                    )
+                ),
+            ),
+            patch.object(main, "sync_user_store_from_payload"),
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(
+            data["status"] == STATUS_WAITING_NEXT_CYCLE
+            and data["seconds_until_next_cycle"] == 0
+            and data["analysis_result"] == "RUNNING"
+        )
+        self.assertEqual(data["status"], "ANALYZING")
 
     async def test_pending_signal_blocks_new_analysis(self) -> None:
         user_id = "user-pending-blocks-analysis"
@@ -860,7 +1072,15 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_order_status_is_sending_while_bullex_order_is_in_flight(self) -> None:
         user_id = "user-sending"
         main.auto_trader.start(user_id)
-        make_cycle_due(user_id)
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "confidence": 94,
+                "payout": 90,
+            },
+        )
         order_started = asyncio.Event()
         release_order = asyncio.Event()
 
@@ -873,8 +1093,6 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                         "server_time": SERVER_TIME_M1_OPEN,
                     }
                 )
-            if path == "/payouts":
-                return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 90}])
             if path == "/orders/buy-demo":
                 order_started.set()
                 await release_order.wait()
@@ -918,7 +1136,15 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         user_id = "user-order-success"
         state = main.auto_trader.start(user_id)
         state.entry_value = 3
-        make_cycle_due(user_id)
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "PUT",
+                "confidence": 94,
+                "payout": 91,
+            },
+        )
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
             if path == "/sessions/status":
@@ -929,8 +1155,6 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                         "server_time": SERVER_TIME_M1_OPEN,
                     }
                 )
-            if path == "/payouts":
-                return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 91}])
             if path == "/orders/buy-demo":
                 return 200, main.build_success({"order_id": "success-1"})
             raise AssertionError(f"unexpected path: {path}")
@@ -974,7 +1198,15 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_bullex_returned_expiration_is_used_as_primary_source(self) -> None:
         user_id = "user-order-expiration-source"
         main.auto_trader.start(user_id)
-        make_cycle_due(user_id)
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "confidence": 94,
+                "payout": 90,
+            },
+        )
         returned_expiration = datetime.fromtimestamp(123, timezone.utc).isoformat()
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
@@ -986,8 +1218,6 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                         "server_time": SERVER_TIME_M1_OPEN,
                     }
                 )
-            if path == "/payouts":
-                return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 90}])
             if path == "/orders/buy-demo":
                 return 200, main.build_success(
                     {
@@ -1016,7 +1246,15 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejected_order_stays_order_rejected_and_clears_pending_signal(self) -> None:
         user_id = "user-order-rejected"
         main.auto_trader.start(user_id)
-        make_cycle_due(user_id)
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "confidence": 94,
+                "payout": 90,
+            },
+        )
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
             if path == "/sessions/status":
@@ -1027,8 +1265,6 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                         "server_time": SERVER_TIME_M1_OPEN,
                     }
                 )
-            if path == "/payouts":
-                return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 90}])
             if path == "/orders/buy-demo":
                 return 409, main.build_error("MARKET_CLOSED")
             raise AssertionError(f"unexpected path: {path}")
@@ -1097,7 +1333,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "connected": True,
                         "active_mode": "PRACTICE",
-                        "server_time": SERVER_TIME_M1_OPEN,
+                        "server_time": 10.0,
                     }
                 )
             if path == "/payouts":
@@ -1115,7 +1351,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             status_code, payload = await main.execute_robot_cycle(user_id)
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["data"]["rejection_reason"], "NO_VALID_SIGNAL")
+        self.assertEqual(payload["data"]["rejection_reason"], "NO_CANDIDATES")
         self.assertEqual(
             payload["data"]["last_rejection_reason"],
             "ACTIVE_CLOSED",
@@ -1476,7 +1712,15 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         state.allow_real = True
         state.confirm_real = True
         state.entry_value = min(2, main.config.robot_real_max_entry)
-        make_cycle_due(user_id)
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "PUT",
+                "confidence": 95,
+                "payout": 90,
+            },
+        )
         calls = []
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
@@ -1489,8 +1733,6 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                         "server_time": SERVER_TIME_M1_OPEN,
                     }
                 )
-            if path == "/payouts":
-                return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 90}])
             if path == "/orders/buy-real":
                 return 200, main.build_success({"order_id": "real-1"})
             raise AssertionError(f"unexpected path: {path}")
@@ -1719,7 +1961,15 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         user_id = "user-m5"
         state = main.auto_trader.start(user_id)
         state.timeframe = "M5"
-        make_cycle_due(user_id)
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "confidence": 94,
+                "payout": 90,
+            },
+        )
         calls = []
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
@@ -1728,8 +1978,6 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                 return 200, main.build_success(
                     {"connected": True, "active_mode": "PRACTICE", "server_time": 265.0}
                 )
-            if path == "/payouts":
-                return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 90}])
             if path == "/orders/buy-demo":
                 return 200, main.build_success({"order_id": "demo-m5"})
             raise AssertionError(f"unexpected path: {path}")
@@ -1752,14 +2000,13 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_code, 200)
         self.assertEqual(payload["data"]["last_trade"]["expiration"], "M5")
         self.assertEqual(orders[0]["expiration"], 5)
-        self.assertEqual(scan.await_args.kwargs["timeframe"], "M5")
-        self.assertEqual(scan.await_args.kwargs["endtime"], 265)
+        scan.assert_not_awaited()
 
     async def test_window_closing_during_analysis_blocks_late_order(self) -> None:
         user_id = "user-window-closing"
         main.auto_trader.start(user_id)
         make_cycle_due(user_id)
-        status_times = iter((25.0, 30.0))
+        status_times = iter((10.0, 30.0))
         calls = []
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
@@ -1786,7 +2033,9 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             status_code, payload = await main.execute_robot_cycle(user_id)
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["data"]["status"], "SIGNAL_REJECTED")
-        self.assertEqual(payload["data"]["rejection_reason"], "MISSED_ENTRY_WINDOW")
+        self.assertEqual(payload["data"]["status"], "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(payload["data"]["rejection_reason"], "WAITING_NEXT_ANALYSIS_WINDOW")
+        self.assertIsNone(payload["data"]["pending_signal"])
+        self.assertEqual(payload["data"]["seconds_until_analysis_window"], 35)
         self.assertFalse(payload["data"]["entry_window_open"])
         self.assertNotIn("/orders/buy-demo", calls)
