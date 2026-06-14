@@ -17,6 +17,32 @@ def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+ROBOT_SETTING_FIELDS = (
+    "entry_value",
+    "stop_win",
+    "stop_loss",
+    "cycle_minutes",
+    "min_confidence",
+    "min_payout",
+    "strategy_mode",
+    "account_mode",
+    "allow_real",
+    "confirm_real",
+    "max_entries_per_cycle",
+)
+
+
+def require_user_id(user_id: str) -> str:
+    normalized = str(user_id or "").strip()
+    if not normalized:
+        raise ValueError("USER_ID_REQUIRED")
+    return normalized
+
+
+def extract_robot_settings(state: dict[str, Any]) -> dict[str, Any]:
+    return {field: state[field] for field in ROBOT_SETTING_FIELDS if field in state}
+
+
 class RobotPersistence(ABC):
     @abstractmethod
     def save_state(self, user_id: str, state: dict[str, Any]) -> None:
@@ -28,6 +54,14 @@ class RobotPersistence(ABC):
 
     @abstractmethod
     def load_state(self, user_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def save_settings(self, user_id: str, settings: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def load_settings(self, user_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
     @abstractmethod
@@ -68,6 +102,7 @@ class SQLiteRobotPersistence(RobotPersistence):
         self._initialize()
 
     def save_state(self, user_id: str, state: dict[str, Any]) -> None:
+        user_id = require_user_id(user_id)
         with self._connect() as connection:
             connection.execute(
                 """
@@ -88,12 +123,77 @@ class SQLiteRobotPersistence(RobotPersistence):
         return [(row["user_id"], json.loads(row["state_json"])) for row in rows]
 
     def load_state(self, user_id: str) -> dict[str, Any] | None:
+        user_id = require_user_id(user_id)
         with self._connect() as connection:
             row = connection.execute(
                 "select state_json from robot_states where user_id = ?",
                 (user_id,),
             ).fetchone()
         return json.loads(row["state_json"]) if row is not None else None
+
+    def save_settings(self, user_id: str, settings: dict[str, Any]) -> None:
+        user_id = require_user_id(user_id)
+        values = extract_robot_settings(settings)
+        now = utc_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                insert into robot_user_settings (
+                    user_id, entry_value, stop_win, stop_loss, cycle_minutes,
+                    min_confidence, min_payout, strategy_mode, account_mode,
+                    allow_real, confirm_real, max_entries_per_cycle,
+                    created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(user_id) do update set
+                    entry_value = excluded.entry_value,
+                    stop_win = excluded.stop_win,
+                    stop_loss = excluded.stop_loss,
+                    cycle_minutes = excluded.cycle_minutes,
+                    min_confidence = excluded.min_confidence,
+                    min_payout = excluded.min_payout,
+                    strategy_mode = excluded.strategy_mode,
+                    account_mode = excluded.account_mode,
+                    allow_real = excluded.allow_real,
+                    confirm_real = excluded.confirm_real,
+                    max_entries_per_cycle = excluded.max_entries_per_cycle,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    values.get("entry_value", 2),
+                    values.get("stop_win", 50),
+                    values.get("stop_loss", 30),
+                    values.get("cycle_minutes", 5),
+                    values.get("min_confidence", 94),
+                    values.get("min_payout", 88),
+                    values.get("strategy_mode", "conservative"),
+                    values.get("account_mode", "DEMO"),
+                    int(bool(values.get("allow_real", False))),
+                    int(bool(values.get("confirm_real", False))),
+                    values.get("max_entries_per_cycle", 1),
+                    now,
+                    now,
+                ),
+            )
+
+    def load_settings(self, user_id: str) -> dict[str, Any] | None:
+        user_id = require_user_id(user_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select entry_value, stop_win, stop_loss, cycle_minutes,
+                       min_confidence, min_payout, strategy_mode, account_mode,
+                       allow_real, confirm_real, max_entries_per_cycle
+                from robot_user_settings where user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        settings = dict(row)
+        settings["allow_real"] = bool(settings["allow_real"])
+        settings["confirm_real"] = bool(settings["confirm_real"])
+        return settings
 
     def save_trade(self, user_id: str, trade: dict[str, Any]) -> None:
         order_id = str(trade.get("order_id") or "").strip()
@@ -225,6 +325,22 @@ class SQLiteRobotPersistence(RobotPersistence):
                     state_json text not null,
                     updated_at text not null
                 );
+                create table if not exists robot_user_settings (
+                    user_id text primary key,
+                    entry_value real not null default 2,
+                    stop_win real not null default 50,
+                    stop_loss real not null default 30,
+                    cycle_minutes integer not null default 5,
+                    min_confidence integer not null default 94,
+                    min_payout real not null default 88,
+                    strategy_mode text not null default 'conservative',
+                    account_mode text not null default 'DEMO',
+                    allow_real integer not null default 0,
+                    confirm_real integer not null default 0,
+                    max_entries_per_cycle integer not null default 1,
+                    created_at text not null,
+                    updated_at text not null
+                );
                 create table if not exists robot_trades (
                     user_id text not null,
                     order_id text not null,
@@ -283,6 +399,7 @@ class SupabaseRobotPersistence(RobotPersistence):
         }
 
     def save_state(self, user_id: str, state: dict[str, Any]) -> None:
+        user_id = require_user_id(user_id)
         self._ensure_user(user_id)
         body = {
             "user_id": user_id,
@@ -290,8 +407,8 @@ class SupabaseRobotPersistence(RobotPersistence):
             "account_mode": state.get("account_mode", "DEMO"),
             "entry_value": state.get("entry_value", 2),
             "cycle_minutes": state.get("cycle_minutes", 5),
-            "min_confidence": state.get("min_confidence", 90),
-            "min_payout": state.get("min_payout", 85),
+            "min_confidence": state.get("min_confidence", 94),
+            "min_payout": state.get("min_payout", 88),
             "stop_win": state.get("stop_win", 50),
             "stop_loss": state.get("stop_loss", 30),
             "wins": state.get("wins", 0),
@@ -312,6 +429,7 @@ class SupabaseRobotPersistence(RobotPersistence):
         return [(row["user_id"], row.get("state_json") or {}) for row in rows]
 
     def load_state(self, user_id: str) -> dict[str, Any] | None:
+        user_id = require_user_id(user_id)
         rows = self._request(
             "GET",
             f"/robot_states?user_id=eq.{quote(user_id, safe='')}"
@@ -320,6 +438,27 @@ class SupabaseRobotPersistence(RobotPersistence):
         if not rows:
             return None
         return rows[0].get("state_json") or {}
+
+    def save_settings(self, user_id: str, settings: dict[str, Any]) -> None:
+        user_id = require_user_id(user_id)
+        self._ensure_user(user_id)
+        body = {"user_id": user_id, **extract_robot_settings(settings)}
+        self._request(
+            "POST",
+            "/robot_user_settings?on_conflict=user_id",
+            json=body,
+            extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
+
+    def load_settings(self, user_id: str) -> dict[str, Any] | None:
+        user_id = require_user_id(user_id)
+        fields = ",".join(ROBOT_SETTING_FIELDS)
+        rows = self._request(
+            "GET",
+            f"/robot_user_settings?user_id=eq.{quote(user_id, safe='')}"
+            f"&select={fields}&limit=1",
+        )
+        return rows[0] if rows else None
 
     def save_trade(self, user_id: str, trade: dict[str, Any]) -> None:
         self._ensure_user(user_id)

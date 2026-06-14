@@ -243,6 +243,100 @@ class _FakeContext:
 
 
 class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_robot_user_settings_survive_restart_without_cross_user_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "robot-settings.db")
+            persistence = SQLiteRobotPersistence(database_path)
+            persistence.save_settings(
+                "user-a",
+                {
+                    "entry_value": 15,
+                    "stop_win": 80,
+                    "stop_loss": 25,
+                    "cycle_minutes": 5,
+                    "min_confidence": 96,
+                    "min_payout": 90,
+                    "strategy_mode": "balanced",
+                    "account_mode": "DEMO",
+                    "allow_real": False,
+                    "confirm_real": False,
+                    "max_entries_per_cycle": 1,
+                },
+            )
+            persistence.save_settings(
+                "user-b",
+                {
+                    "entry_value": 2,
+                    "stop_win": 50,
+                    "stop_loss": 12,
+                    "cycle_minutes": 5,
+                    "min_confidence": 94,
+                    "min_payout": 88,
+                    "strategy_mode": "conservative",
+                    "account_mode": "DEMO",
+                    "allow_real": False,
+                    "confirm_real": False,
+                    "max_entries_per_cycle": 1,
+                },
+            )
+
+            restarted = SQLiteRobotPersistence(database_path)
+            settings_a = restarted.load_settings("user-a")
+            settings_b = restarted.load_settings("user-b")
+
+            self.assertEqual(settings_a["entry_value"], 15)
+            self.assertEqual(settings_a["stop_loss"], 25)
+            self.assertEqual(settings_b["entry_value"], 2)
+            self.assertEqual(settings_b["stop_loss"], 12)
+            self.assertIsNone(restarted.load_settings("user-new"))
+
+    async def test_robot_state_loads_dedicated_settings_after_memory_reset(self) -> None:
+        from backend import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            persistence = SQLiteRobotPersistence(
+                str(Path(directory) / "robot-settings-state.db")
+            )
+            old_trader = main.auto_trader
+            old_persistence = main.robot_persistence
+            main.auto_trader = AutoTrader()
+            main.robot_persistence = persistence
+            try:
+                state_a = main.get_user_robot_state("user-a")
+                state_a.entry_value = 15
+                state_a.stop_loss = 22
+                main.persist_robot("user-a")
+
+                state_b = main.get_user_robot_state("user-b")
+                state_b.stop_loss = 11
+                main.persist_robot("user-b")
+
+                main.auto_trader = AutoTrader()
+                refreshed_a = main.get_user_robot_state("user-a")
+                refreshed_b = main.get_user_robot_state("user-b")
+                new_user = main.get_user_robot_state("user-new")
+
+                self.assertEqual(refreshed_a.entry_value, 15)
+                self.assertEqual(refreshed_a.stop_loss, 22)
+                self.assertEqual(refreshed_b.entry_value, 2)
+                self.assertEqual(refreshed_b.stop_loss, 11)
+                self.assertEqual(new_user.entry_value, 2)
+                self.assertEqual(new_user.cycle_minutes, 5)
+                self.assertEqual(new_user.min_confidence, 94)
+                self.assertEqual(new_user.min_payout, 88)
+            finally:
+                main.auto_trader = old_trader
+                main.robot_persistence = old_persistence
+
+    async def test_robot_settings_requires_user_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            persistence = SQLiteRobotPersistence(str(Path(directory) / "robot.db"))
+
+            with self.assertRaisesRegex(ValueError, "USER_ID_REQUIRED"):
+                persistence.save_settings("", {})
+            with self.assertRaisesRegex(ValueError, "USER_ID_REQUIRED"):
+                persistence.load_settings("")
+
     async def test_robot_state_and_history_survive_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             persistence = SQLiteRobotPersistence(str(Path(directory) / "robot.db"))
@@ -310,8 +404,8 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(state.enabled)
             self.assertNotEqual(state.status, "STOPPED")
             self.assertEqual(state.entry_value, 2)
-            self.assertEqual(state.min_confidence, 90)
-            self.assertEqual(state.min_payout, 85)
+            self.assertEqual(state.min_confidence, 94)
+            self.assertEqual(state.min_payout, 88)
             self.assertEqual(main.auto_trader.source("user-restore"), "memory")
             ensure_worker.assert_called_once_with("user-restore")
             persistence.save_restore_status.assert_called_once_with(

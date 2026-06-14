@@ -38,8 +38,8 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertEqual(user_a.entry_value, 15)
         self.assertEqual(user_b.entry_value, 2)
         self.assertEqual(user_b.cycle_minutes, 5)
-        self.assertEqual(user_b.min_confidence, 90)
-        self.assertEqual(user_b.min_payout, 85)
+        self.assertEqual(user_b.min_confidence, 94)
+        self.assertEqual(user_b.min_payout, 88)
         self.assertEqual(user_b.stop_win, 50)
         self.assertEqual(user_b.stop_loss, 30)
         self.assertEqual(user_b.strategy_mode, "conservative")
@@ -394,6 +394,23 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             main.RobotConfigUpdate(entry_value=15, stop_win=90),
         )
 
+    async def test_robot_settings_debug_returns_current_user_settings(self) -> None:
+        main.auto_trader.update_config(
+            "user-settings-a",
+            main.RobotConfigUpdate(entry_value=15, min_confidence=97),
+        )
+
+        response = await main.debug_robot_settings(
+            {"user_id": "user-settings-a"}
+        )
+        payload = json.loads(response.body)
+
+        self.assertEqual(payload["user_id"], "user-settings-a")
+        self.assertEqual(payload["source"], "memory")
+        self.assertEqual(payload["settings"]["entry_value"], 15)
+        self.assertEqual(payload["settings"]["min_confidence"], 97)
+        self.assertNotIn("enabled", payload["settings"])
+
         response = await main.debug_user_isolation({"user_id": "user-b"})
 
         payload = json.loads(response.body)
@@ -482,7 +499,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "symbol": "EURUSD-OTC",
                     "signal": "CALL",
-                    "confidence": 92,
+                    "confidence": 94,
                     "strength": 80,
                 }
             ]
@@ -600,7 +617,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "symbol": "EURUSD-OTC",
                     "signal": "CALL",
-                    "confidence": 92,
+                    "confidence": 94,
                     "strength": 80,
                     "payout": 90,
                 }
@@ -809,7 +826,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "symbol": "GBPUSD-OTC",
                     "signal": "PUT",
-                    "confidence": 93,
+                    "confidence": 95,
                     "strength": 30,
                     "trend": "DOWN",
                     "payout": 91,
@@ -865,7 +882,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(f"unexpected path: {path}")
 
         scan_payload = main.build_success(
-            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 92, "strength": 80}]
+            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 94, "strength": 80}]
         )
         sending_from_statuses = []
         original_start_sending = main.auto_trader.start_sending_order
@@ -981,7 +998,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(f"unexpected path: {path}")
 
         scan_payload = main.build_success(
-            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 92, "strength": 80}]
+            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 94, "strength": 80}]
         )
 
         with (
@@ -1017,7 +1034,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(f"unexpected path: {path}")
 
         scan_payload = main.build_success(
-            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 92, "strength": 80}]
+            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 94, "strength": 80}]
         )
 
         with (
@@ -1397,7 +1414,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(f"unexpected path: {path}")
 
         scan_payload = main.build_success(
-            [{"symbol": "EURUSD-OTC", "signal": "PUT", "confidence": 93, "strength": 81}]
+            [{"symbol": "EURUSD-OTC", "signal": "PUT", "confidence": 95, "strength": 81}]
         )
 
         with (
@@ -1446,7 +1463,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(f"unexpected path: {path}")
 
         scan_payload = main.build_success(
-            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 92, "strength": 80}]
+            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 94, "strength": 80}]
         )
         with (
             patch.object(main, "call_bullex_service", side_effect=fake_bullex),
@@ -1467,7 +1484,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending["symbol"], "EURUSD-OTC")
         self.assertEqual(pending["signal"], "CALL")
         self.assertEqual(pending["direction"], "CALL")
-        self.assertEqual(pending["confidence"], 92)
+        self.assertEqual(pending["confidence"], 94)
         self.assertEqual(pending["payout"], 90.0)
         self.assertEqual(pending["timeframe"], "M1")
         self.assertIsNotNone(pending["created_at"])
@@ -1636,7 +1653,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(f"unexpected path: {path}")
 
         scan_payload = main.build_success(
-            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 92, "strength": 80}]
+            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 94, "strength": 80}]
         )
         with (
             patch.object(main, "call_bullex_service", side_effect=fake_bullex),
@@ -1678,7 +1695,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(f"late order reached unexpected path: {path}")
 
         scan_payload = main.build_success(
-            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 92, "strength": 80}]
+            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 94, "strength": 80}]
         )
         with (
             patch.object(main, "call_bullex_service", side_effect=fake_bullex),

@@ -83,8 +83,8 @@ class RobotState:
     strategy_mode: StrategyMode = "conservative"
     entry_value: float = 2.0
     cycle_minutes: int = 5
-    min_confidence: int = 90
-    min_payout: float = 85.0
+    min_confidence: int = 94
+    min_payout: float = 88.0
     stop_win: float = 50.0
     stop_loss: float = 30.0
     max_entries_per_cycle: int = 1
@@ -237,6 +237,9 @@ class AutoTrader:
 
     def source(self, user_id: str) -> StateSource:
         return self._sources.get(user_id, "default")
+
+    def mark_source(self, user_id: str, source: StateSource) -> None:
+        self._sources[user_id] = source
 
     @staticmethod
     def _next_cycle_base(state: RobotState) -> datetime | None:

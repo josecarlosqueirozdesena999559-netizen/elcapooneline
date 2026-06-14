@@ -24,7 +24,11 @@ from backend.auto_trader import (
     utc_now,
 )
 from backend.openai_signal_reviewer import review_signal
-from backend.robot_persistence import RobotPersistence, create_robot_persistence
+from backend.robot_persistence import (
+    RobotPersistence,
+    create_robot_persistence,
+    extract_robot_settings,
+)
 from backend.signal_engine import analyze_signal
 from backend.trade_result_monitor import TradeResultMonitor
 from backend.user_store import UserStore, create_user_store
@@ -832,7 +836,11 @@ async def submit_bullex_order(
 def persist_robot(user_id: str) -> None:
     try:
         state = auto_trader.get(user_id)
-        robot_persistence.save_state(user_id, state.to_dict())
+        state_payload = state.to_dict()
+        robot_persistence.save_state(user_id, state_payload)
+        save_settings = getattr(robot_persistence, "save_settings", None)
+        if callable(save_settings):
+            save_settings(user_id, extract_robot_settings(state_payload))
         if state.last_trade:
             robot_persistence.save_trade(user_id, state.last_trade)
     except Exception:
@@ -849,8 +857,12 @@ def get_user_robot_state(user_id: str) -> Any:
     if auto_trader.has_state(user_id):
         return auto_trader.get(user_id)
     try:
+        load_settings = getattr(robot_persistence, "load_settings", None)
+        settings = load_settings(user_id) if callable(load_settings) else None
         payload = robot_persistence.load_state(user_id)
         if payload is not None:
+            if settings is not None:
+                payload = {**payload, **settings}
             trades = robot_persistence.load_trades(user_id)
             return auto_trader.restore(
                 user_id,
@@ -858,6 +870,13 @@ def get_user_robot_state(user_id: str) -> Any:
                 trades,
                 source=robot_persistence_source(),
             )
+        if settings is not None:
+            state = auto_trader.get(user_id)
+            for field, value in settings.items():
+                if hasattr(state, field):
+                    setattr(state, field, value)
+            auto_trader.mark_source(user_id, robot_persistence_source())
+            return state
     except Exception:
         logger.exception("[ROBOT USER LOAD ERROR] user_id=%s", user_id)
     return auto_trader.get(user_id)
@@ -1956,6 +1975,22 @@ async def debug_user_isolation(
             "stop_win": state.stop_win,
             "stop_loss": state.stop_loss,
             "source": auto_trader.source(user_id),
+        },
+    )
+
+
+@app.get("/debug/robot-settings")
+async def debug_robot_settings(
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    user_id = auth["user_id"]
+    state = get_user_robot_state(user_id)
+    return JSONResponse(
+        status_code=200,
+        content={
+            "user_id": user_id,
+            "source": auto_trader.source(user_id),
+            "settings": extract_robot_settings(state.to_dict()),
         },
     )
 
