@@ -299,11 +299,14 @@ def _apply_quality_filters(
             blocked.append(name)
 
     if direction not in {"CALL", "PUT"}:
-        blocked.append("SIGNAL_WAIT")
+        blocked.append("CANDLES_UNAVAILABLE")
     if signal.get("insufficient_candles"):
-        blocked.append("INSUFFICIENT_CANDLES")
+        blocked.append("CANDLES_UNAVAILABLE")
     check("MIN_CONFIDENCE", int(signal.get("confidence") or 0) >= profile["confidence"])
-    check("MIN_PAYOUT", payout is not None and float(payout) >= profile["payout"])
+    if payout is None:
+        blocked.append("PAYOUT_UNAVAILABLE")
+    else:
+        check("MIN_PAYOUT", float(payout) >= profile["payout"])
     check("TREND_CLEAR", signal.get("trend") != "SIDEWAYS" and int(signal.get("strength") or 0) >= profile["strength"])
     check("SIDEWAYS_FILTER", signal.get("trend") != "SIDEWAYS")
 
@@ -331,7 +334,17 @@ def _apply_quality_filters(
     hard_blocks = [
         name
         for name in blocked
-        if name in {"SIGNAL_WAIT", "MIN_CONFIDENCE", "MIN_PAYOUT", "INSUFFICIENT_CANDLES"}
+        if name
+        in {
+            "ACCOUNT_DISCONNECTED",
+            "STOP_WIN_HIT",
+            "STOP_LOSS_HIT",
+            "ACTIVE_CLOSED",
+            "ACTIVE_SUSPENDED",
+            "PAYOUT_UNAVAILABLE",
+            "OPERATION_IN_PROGRESS",
+            "CANDLES_UNAVAILABLE",
+        }
     ]
     quality_score = strategy_score
     trade_allowed = not hard_blocks

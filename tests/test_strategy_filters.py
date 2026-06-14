@@ -5,17 +5,6 @@ from unittest.mock import AsyncMock, patch
 
 from backend import main
 from backend.auto_trader import AutoTrader, utc_now
-from backend.signal_engine import analyze_signal
-
-
-def candle(open_price: float, close_price: float, low: float | None = None, high: float | None = None) -> dict:
-    return {
-        "open": open_price,
-        "close": close_price,
-        "min": min(open_price, close_price) if low is None else low,
-        "max": max(open_price, close_price) if high is None else high,
-        "volume": 1,
-    }
 
 
 class StrategyFilterTests(unittest.TestCase):
@@ -150,7 +139,7 @@ class StrategyFilterTests(unittest.TestCase):
             )
             trader.finish_trade(user_id, f"daily-loss-{index}", "LOSS", -2)
 
-        self.assertEqual(main.daily_stop_reason(user_id, state), "DAILY_STOP_LOSS_REACHED")
+        self.assertEqual(main.daily_stop_reason(user_id, state), "STOP_LOSS_HIT")
 
     def test_daily_stop_win_stops_robot(self) -> None:
         user_id = "user-daily-win"
@@ -163,23 +152,25 @@ class StrategyFilterTests(unittest.TestCase):
         )
         trader.finish_trade(user_id, "daily-win-1", "WIN", 3)
 
-        self.assertEqual(main.daily_stop_reason(user_id, state), "DAILY_STOP_WIN_REACHED")
+        self.assertEqual(main.daily_stop_reason(user_id, state), "STOP_WIN_HIT")
 
 
 class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         main.auto_trader = AutoTrader()
 
-    async def test_no_approved_candidate_schedules_next_cycle_and_clears_signal(self) -> None:
-        user_id = "user-low-quality"
+    async def test_low_confidence_candidate_stays_triggered_waiting_entry_window(self) -> None:
+        user_id = "user-low-confidence"
         state = main.auto_trader.start(user_id)
         state.next_cycle_at = utc_now() - timedelta(seconds=1)
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
             if path == "/sessions/status":
                 return 200, main.build_success(
-                    {"connected": True, "active_mode": "PRACTICE", "server_time": 25.0}
+                    {"connected": True, "active_mode": "PRACTICE", "server_time": 20.0}
                 )
+            if path == "/payouts":
+                return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 90}])
             raise AssertionError(f"unexpected path: {path}")
 
         scan_payload = main.build_success(
@@ -207,22 +198,140 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
             status_code, payload = await main.execute_robot_cycle(user_id)
 
         data = payload["data"]
+        pending = data["pending_signal"]
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], "SIGNAL_REJECTED")
-        self.assertEqual(data["rejection_reason"], "NO_VALID_SIGNAL")
-        self.assertEqual(
-            data["last_rejection_reason"],
-            "Nenhum ativo atingiu score mínimo.",
-        )
-        self.assertEqual(data["last_analysis_result"], "NO_VALID_SIGNAL")
-        self.assertIn("TREND_CLEAR", data["blocked_filters"])
-        self.assertIn("MIN_CONFIDENCE", data["blocked_filters"])
-        self.assertIsNone(data["pending_signal"])
-        self.assertGreaterEqual(data["seconds_until_next_cycle"], 299)
+        self.assertEqual(data["status"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(data["rejection_reason"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(data["last_analysis_result"], "BEST_CANDIDATE_SELECTED")
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["symbol"], "EURUSD-OTC")
+        self.assertEqual(pending["signal"], "CALL")
+        self.assertEqual(pending["confidence"], 80)
+        self.assertEqual(pending["payout"], 90)
+        self.assertEqual(pending["strategy_score"], 70)
+        self.assertEqual(pending["score"], 70)
+        self.assertLess(pending["strategy_score"], pending["confidence"])
+        self.assertIn("TREND_CLEAR", pending["blocked_filters"])
+        self.assertIn("MIN_CONFIDENCE", pending["blocked_filters"])
+        self.assertEqual(pending["target_entry_second"], 25)
+        self.assertEqual(pending["entry_window_start_second"], 25)
+        self.assertEqual(pending["entry_window_end_second"], 29)
         output = "\n".join(logs.output)
         self.assertIn("[ANALYSIS_CANDIDATES]", output)
-        self.assertIn("[NO_VALID_SIGNAL]", output)
-        self.assertIn("[NEXT_CYCLE_SCHEDULED]", output)
+        self.assertIn("[BEST_CANDIDATE_SELECTED]", output)
+        self.assertIn("[PENDING_SIGNAL_SET]", output)
+
+    async def test_missing_candles_still_blocks_candidate(self) -> None:
+        user_id = "user-no-candles"
+        state = main.auto_trader.start(user_id)
+        state.next_cycle_at = utc_now() - timedelta(seconds=1)
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {"connected": True, "active_mode": "PRACTICE", "server_time": 25.0}
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        scan_payload = main.build_success(
+            [
+                {
+                    "symbol": "EURUSD-OTC",
+                    "signal": "WAIT",
+                    "confidence": 95,
+                    "strength": 95,
+                    "payout": 90,
+                    "blocked_filters": ["CANDLES_UNAVAILABLE"],
+                    "approved_filters": [],
+                    "quality_score": 95,
+                }
+            ]
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "SIGNAL_REJECTED")
+        self.assertEqual(data["last_rejection_reason"], "CANDLES_UNAVAILABLE")
+        self.assertIn("CANDLES_UNAVAILABLE", data["blocked_filters"])
+        self.assertIsNone(data["pending_signal"])
+        self.assertGreaterEqual(data["seconds_until_next_cycle"], 299)
+
+    async def test_missing_payout_still_blocks_candidate(self) -> None:
+        user_id = "user-no-payout"
+        state = main.auto_trader.start(user_id)
+        state.next_cycle_at = utc_now() - timedelta(seconds=1)
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {"connected": True, "active_mode": "PRACTICE", "server_time": 25.0}
+                )
+            if path == "/payouts":
+                return 500, main.build_error("PAYOUT_UNAVAILABLE")
+            raise AssertionError(f"unexpected path: {path}")
+
+        scan_payload = main.build_success(
+            [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 95, "strength": 95}]
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "SIGNAL_REJECTED")
+        self.assertEqual(data["last_rejection_reason"], "PAYOUT_UNAVAILABLE")
+        self.assertIn("PAYOUT_UNAVAILABLE", data["blocked_filters"])
+        self.assertIsNone(data["pending_signal"])
+
+    async def test_closed_asset_still_blocks_candidate(self) -> None:
+        user_id = "user-closed-asset"
+        state = main.auto_trader.start(user_id)
+        state.next_cycle_at = utc_now() - timedelta(seconds=1)
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {"connected": True, "active_mode": "PRACTICE", "server_time": 25.0}
+                )
+            if path == "/payouts":
+                return 200, main.build_success([{"symbol": "EURUSD-OTC", "payout": 90}])
+            raise AssertionError(f"unexpected path: {path}")
+
+        scan_payload = main.build_success(
+            [
+                {
+                    "symbol": "EURUSD-OTC",
+                    "signal": "CALL",
+                    "confidence": 95,
+                    "strength": 95,
+                    "payout": 90,
+                    "is_open": False,
+                }
+            ]
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "SIGNAL_REJECTED")
+        self.assertEqual(data["last_rejection_reason"], "ACTIVE_CLOSED")
+        self.assertIn("ACTIVE_CLOSED", data["blocked_filters"])
+        self.assertIsNone(data["pending_signal"])
 
     async def test_low_quality_rejection_returns_waiting_after_five_seconds(self) -> None:
         user_id = "user-low-quality-state"

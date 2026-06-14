@@ -581,7 +581,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["rejection_reason"], "NO_VALID_SIGNAL")
         self.assertEqual(
             data["last_rejection_reason"],
-            "Nenhum ativo atingiu score mínimo.",
+            "CANDLES_UNAVAILABLE",
         )
         self.assertEqual(data["last_analysis_result"], "NO_VALID_SIGNAL")
         self.assertIsNotNone(data["last_analysis_at"])
@@ -697,7 +697,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finished_payload["data"]["status"], "SIGNAL_REJECTED")
         self.assertEqual(
             finished_payload["data"]["last_rejection_reason"],
-            "Nenhum ativo atingiu score mínimo.",
+            "CANDLES_UNAVAILABLE",
         )
         self.assertGreaterEqual(
             finished_payload["data"]["seconds_until_next_cycle"],
@@ -1118,7 +1118,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["data"]["rejection_reason"], "NO_VALID_SIGNAL")
         self.assertEqual(
             payload["data"]["last_rejection_reason"],
-            "Nenhum ativo atingiu score mínimo.",
+            "ACTIVE_CLOSED",
         )
         self.assertNotIn("/orders/buy-demo", calls)
         self.assertNotIn("/orders/buy-real", calls)

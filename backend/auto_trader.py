@@ -488,6 +488,7 @@ class AutoTrader:
             "confidence": signal["confidence"],
             "payout": signal["payout"],
             "strategy_score": int(signal.get("strategy_score") or 0),
+            "score": int(signal.get("strategy_score") or signal.get("score") or 0),
             "reason": signal.get("reason") or signal.get("signal_explanation"),
             "strategy_name": signal.get("strategy_name"),
             "strategy_reason": signal.get("strategy_reason")
@@ -501,6 +502,9 @@ class AutoTrader:
             "strategy_mode": signal.get("strategy_mode", state.strategy_mode),
             "cycle_id": state.cycle_id,
             "created_at": utc_now().isoformat(),
+            "target_entry_second": state.buy_target_second,
+            "entry_window_start_second": state.entry_window_start_second,
+            "entry_window_end_second": state.entry_window_end_second,
         }
         state.last_signal = dict(pending_signal)
         state.pending_signal = pending_signal

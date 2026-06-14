@@ -40,6 +40,16 @@ ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
 SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
 SESSION_DISCONNECTED = "SESSION_DISCONNECTED"
 LOW_QUALITY_SIGNAL = "Sinal bloqueado por baixa qualidade"
+CRITICAL_TRADE_BLOCKS = {
+    "ACCOUNT_DISCONNECTED",
+    "STOP_WIN_HIT",
+    "STOP_LOSS_HIT",
+    "ACTIVE_CLOSED",
+    "ACTIVE_SUSPENDED",
+    "PAYOUT_UNAVAILABLE",
+    "OPERATION_IN_PROGRESS",
+    "CANDLES_UNAVAILABLE",
+}
 BINARY_ALLOWED_ASSETS = [
     "EURUSD-OTC",
     "EURGBP-OTC",
@@ -591,9 +601,9 @@ def daily_stop_reason(user_id: str, state: Any) -> str | None:
         if trade_profit < 0:
             daily_loss += abs(trade_profit)
     if state.stop_loss > 0 and daily_loss >= state.stop_loss:
-        return "DAILY_STOP_LOSS_REACHED"
+        return "STOP_LOSS_HIT"
     if state.stop_win > 0 and daily_profit >= state.stop_win:
-        return "DAILY_STOP_WIN_REACHED"
+        return "STOP_WIN_HIT"
     return None
 
 
@@ -646,7 +656,11 @@ def apply_strategy_guard(
 
     confidence = int(selected.get("confidence") or 0)
     direction = str(selected.get("signal") or selected.get("direction") or "WAIT").upper()
-    set_filter("MIN_PAYOUT", payout is not None and float(payout) >= state.min_payout)
+    if payout is None:
+        set_filter("PAYOUT_UNAVAILABLE", False)
+    else:
+        set_filter("PAYOUT_UNAVAILABLE", True)
+        set_filter("MIN_PAYOUT", float(payout) >= state.min_payout)
     set_filter("MIN_CONFIDENCE", confidence >= state.min_confidence)
     if direction in {"CALL", "PUT"}:
         if "SIGNAL_WAIT" in blocked_filters:
@@ -656,8 +670,12 @@ def apply_strategy_guard(
         if "DIRECTION_VALID" not in approved_filters:
             approved_filters.append("DIRECTION_VALID")
     else:
-        if "SIGNAL_WAIT" not in blocked_filters:
-            blocked_filters.append("SIGNAL_WAIT")
+        if "CANDLES_UNAVAILABLE" not in blocked_filters:
+            blocked_filters.append("CANDLES_UNAVAILABLE")
+    if "INSUFFICIENT_CANDLES" in blocked_filters:
+        blocked_filters.remove("INSUFFICIENT_CANDLES")
+        if "CANDLES_UNAVAILABLE" not in blocked_filters:
+            blocked_filters.append("CANDLES_UNAVAILABLE")
     set_filter(
         "TREND_CLEAR",
         selected.get("trend") != "SIDEWAYS" and int(selected.get("strength") or 0) >= 20,
@@ -713,7 +731,7 @@ def apply_strategy_guard(
     hard_blocks = [
         name
         for name in blocked_filters
-        if name in {"MIN_PAYOUT", "MIN_CONFIDENCE", "SIGNAL_WAIT", "INSUFFICIENT_CANDLES"}
+        if name in CRITICAL_TRADE_BLOCKS
     ]
     trade_allowed = not hard_blocks
     reason = str(selected.get("reason") or selected.get("signal_explanation") or "").strip()
@@ -752,9 +770,9 @@ def robot_stop_reason(state: Any) -> str | None:
     if state.operation_in_progress:
         return "OPERATION_IN_PROGRESS"
     if state.stop_win > 0 and state.profit >= state.stop_win:
-        return "STOP_WIN_REACHED"
+        return "STOP_WIN_HIT"
     if state.stop_loss > 0 and state.profit <= -state.stop_loss:
-        return "STOP_LOSS_REACHED"
+        return "STOP_LOSS_HIT"
     return None
 
 
@@ -1174,7 +1192,7 @@ async def execute_robot_cycle(
                 if not signals:
                     state = auto_trader.reject_no_valid_signal(
                         user_id,
-                        NO_MINIMUM_SCORE_MESSAGE,
+                        "CANDLES_UNAVAILABLE",
                     )
                     auto_trader.set_analysis_candidates(user_id, [], None)
                     logger.info(
@@ -1218,10 +1236,36 @@ async def execute_robot_cycle(
                         ranked["trade_allowed"] = False
                         ranked["blocked_filters"] = list(
                             dict.fromkeys(
-                                [*ranked.get("blocked_filters", []), ASSET_NOT_ALLOWED]
+                                [*ranked.get("blocked_filters", []), "ACTIVE_CLOSED"]
                             )
                         )
-                        ranked["quality_reason"] = ASSET_NOT_ALLOWED
+                        ranked["quality_reason"] = "ACTIVE_CLOSED"
+                    active_status = str(
+                        raw_signal.get("active_status")
+                        or raw_signal.get("status")
+                        or ""
+                    ).upper()
+                    if raw_signal.get("suspended") or "SUSPEND" in active_status:
+                        allowed = False
+                        ranked["trade_allowed"] = False
+                        ranked["blocked_filters"] = list(
+                            dict.fromkeys(
+                                [*ranked.get("blocked_filters", []), "ACTIVE_SUSPENDED"]
+                            )
+                        )
+                        ranked["quality_reason"] = "ACTIVE_SUSPENDED"
+                    elif raw_signal.get("is_open") is False or active_status in {
+                        "CLOSED",
+                        "INACTIVE",
+                    }:
+                        allowed = False
+                        ranked["trade_allowed"] = False
+                        ranked["blocked_filters"] = list(
+                            dict.fromkeys(
+                                [*ranked.get("blocked_filters", []), "ACTIVE_CLOSED"]
+                            )
+                        )
+                        ranked["quality_reason"] = "ACTIVE_CLOSED"
                     candidate = {
                         **{
                             key: ranked[key]
@@ -1238,6 +1282,7 @@ async def execute_robot_cycle(
                         "direction": ranked.get("direction") or ranked.get("signal") or "WAIT",
                         "signal": ranked.get("direction") or ranked.get("signal") or "WAIT",
                         "strategy_score": int(ranked.get("strategy_score") or 0),
+                        "score": int(ranked.get("strategy_score") or 0),
                         "quality_score": int(ranked.get("quality_score") or 0),
                         "confidence": int(ranked.get("confidence") or 0),
                         "payout": payout,
@@ -1246,6 +1291,9 @@ async def execute_robot_cycle(
                         "blocked_filters": list(ranked.get("blocked_filters") or []),
                         "trade_allowed": bool(allowed and ranked.get("trade_allowed")),
                         "strategy_mode": ranked.get("strategy_mode") or state.strategy_mode,
+                        "target_entry_second": state.buy_target_second,
+                        "entry_window_start_second": state.entry_window_start_second,
+                        "entry_window_end_second": state.entry_window_end_second,
                     }
                     strategy_name, strategy_reason, used_strategies = (
                         build_strategy_narration(candidate)
@@ -1292,7 +1340,26 @@ async def execute_robot_cycle(
                         ),
                         default=None,
                     )
-                    last_rejection_reason = NO_MINIMUM_SCORE_MESSAGE
+                    blocked_reasons = list((highest_rejected or {}).get("blocked_filters", []))
+                    critical_reasons = [
+                        reason
+                        for reason in (
+                            "ACTIVE_SUSPENDED",
+                            "ACTIVE_CLOSED",
+                            "CANDLES_UNAVAILABLE",
+                            "PAYOUT_UNAVAILABLE",
+                            "ACCOUNT_DISCONNECTED",
+                            "STOP_WIN_HIT",
+                            "STOP_LOSS_HIT",
+                            "OPERATION_IN_PROGRESS",
+                        )
+                        if reason in blocked_reasons
+                    ]
+                    last_rejection_reason = (
+                        critical_reasons[0]
+                        if critical_reasons
+                        else "CANDLES_UNAVAILABLE"
+                    )
                     state = auto_trader.reject_no_valid_signal(
                         user_id,
                         last_rejection_reason,
