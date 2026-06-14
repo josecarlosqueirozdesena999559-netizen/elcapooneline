@@ -29,12 +29,13 @@ STATUS_ACCOUNT_DISCONNECTED = "ACCOUNT_DISCONNECTED"
 STATUS_ANALYSIS_TIMEOUT = "ANALYSIS_TIMEOUT"
 STATUS_ANALYSIS_ERROR = "ANALYSIS_ERROR"
 STATUS_NO_CANDIDATES = "NO_CANDIDATES"
+STATUS_NO_CANDIDATE_THIS_CANDLE = "NO_CANDIDATE_THIS_CANDLE"
 
 TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
 RESULT_WAITING_MESSAGE = "Aguardando resultado..."
 ANALYSIS_MESSAGE = "Analisando mercado..."
-ANALYSIS_TIMEOUT_SECONDS = 15
-ANALYSIS_TIMEOUT_MESSAGE = "Análise demorou demais e foi reiniciada."
+ANALYSIS_TIMEOUT_SECONDS = 10
+ANALYSIS_TIMEOUT_MESSAGE = "Análise demorou demais, aguardando próxima vela."
 NO_MINIMUM_SCORE_MESSAGE = "Nenhum ativo atingiu score mínimo."
 
 
@@ -636,6 +637,10 @@ class AutoTrader:
         window: dict[str, Any],
         *,
         clear_pending: bool = False,
+        analysis_result: str = "WAITING_NEXT_ANALYSIS_WINDOW",
+        rejection_reason: str = "WAITING_NEXT_ANALYSIS_WINDOW",
+        last_rejection_reason: str | None = None,
+        force_next: bool = False,
     ) -> RobotState:
         state = self.get(user_id)
         if clear_pending:
@@ -643,19 +648,68 @@ class AutoTrader:
             state.last_signal = None
             state.best_candidate = None
             state.strategy_score = 0
+            state.candidates_count = 0
+            state.candidates = []
         state.status = STATUS_WAITING_ANALYSIS_WINDOW
-        state.rejection_reason = "WAITING_NEXT_ANALYSIS_WINDOW"
-        state.last_rejection_reason = "WAITING_NEXT_ANALYSIS_WINDOW"
-        state.analysis_result = "WAITING_NEXT_ANALYSIS_WINDOW"
-        state.last_analysis_result = "WAITING_NEXT_ANALYSIS_WINDOW"
+        state.rejection_reason = rejection_reason
+        state.last_rejection_reason = last_rejection_reason or "WAITING_NEXT_ANALYSIS_WINDOW"
+        state.analysis_result = analysis_result
+        state.last_analysis_result = analysis_result
         state.analysis_message = None
         state.operation_in_progress = False
         state.analysis_window_open = bool(window["analysis_window_open"])
-        state.seconds_until_analysis_window = int(window["seconds_until_analysis_window"])
+        if force_next:
+            seconds_until_analysis_window = math.ceil(
+                float(window["expiration_seconds"])
+                - float(window["current_candle_seconds"])
+                + float(window["analysis_window_start_second"])
+            )
+        else:
+            seconds_until_analysis_window = int(window["seconds_until_analysis_window"])
+        state.seconds_until_analysis_window = max(1, int(seconds_until_analysis_window))
         state.analysis_window_start_second = int(window["analysis_window_start_second"])
         state.analysis_window_end_second = int(window["analysis_window_end_second"])
+        state.current_candle_seconds = float(window["current_candle_seconds"])
+        state.expiration_seconds = int(window["expiration_seconds"])
+        state.analysis_started_at = None
         state.next_cycle_at = utc_now() + timedelta(seconds=state.seconds_until_analysis_window)
         return state
+
+    def recover_running_analysis(
+        self,
+        user_id: str,
+        window: dict[str, Any],
+    ) -> tuple[str | None, RobotState]:
+        state = self.get(user_id)
+        running = state.status == STATUS_ANALYZING or state.analysis_result == "RUNNING" or state.last_analysis_result == "RUNNING"
+        if not running or state.pending_signal or state.best_candidate:
+            return None, state
+
+        current_second = float(window["current_candle_seconds"])
+        analysis_end = float(window["analysis_window_end_second"])
+        if current_second > analysis_end or not bool(window["analysis_window_open"]):
+            return "OUTSIDE_ANALYSIS_WINDOW", self.wait_analysis_window(
+                user_id,
+                window,
+                clear_pending=True,
+                analysis_result="WAITING_NEXT_ANALYSIS_WINDOW",
+                last_rejection_reason="WAITING_NEXT_ANALYSIS_WINDOW",
+            )
+
+        started_at = state.analysis_started_at or state.last_analysis_at or state.current_cycle_started_at
+        if started_at is None:
+            return None, state
+        if (utc_now() - started_at).total_seconds() <= ANALYSIS_TIMEOUT_SECONDS:
+            return None, state
+        return STATUS_ANALYSIS_TIMEOUT, self.wait_analysis_window(
+            user_id,
+            window,
+            clear_pending=True,
+            analysis_result=STATUS_ANALYSIS_TIMEOUT,
+            rejection_reason=STATUS_ANALYSIS_TIMEOUT,
+            last_rejection_reason=ANALYSIS_TIMEOUT_MESSAGE,
+            force_next=True,
+        )
 
     def set_analysis_candidates(
         self,

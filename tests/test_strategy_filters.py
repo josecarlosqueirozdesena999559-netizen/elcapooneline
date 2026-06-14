@@ -256,11 +256,12 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
 
         data = payload["data"]
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], "SIGNAL_REJECTED")
+        self.assertEqual(data["status"], "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(data["analysis_result"], "NO_CANDIDATE_THIS_CANDLE")
         self.assertEqual(data["last_rejection_reason"], "CANDLES_UNAVAILABLE")
         self.assertIn("CANDLES_UNAVAILABLE", data["blocked_filters"])
         self.assertIsNone(data["pending_signal"])
-        self.assertGreaterEqual(data["seconds_until_next_cycle"], 299)
+        self.assertGreaterEqual(data["seconds_until_analysis_window"], 44)
 
     async def test_missing_payout_still_blocks_candidate(self) -> None:
         user_id = "user-no-payout"
@@ -288,7 +289,8 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
 
         data = payload["data"]
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], "SIGNAL_REJECTED")
+        self.assertEqual(data["status"], "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(data["analysis_result"], "NO_CANDIDATE_THIS_CANDLE")
         self.assertEqual(data["last_rejection_reason"], "PAYOUT_UNAVAILABLE")
         self.assertIn("PAYOUT_UNAVAILABLE", data["blocked_filters"])
         self.assertIsNone(data["pending_signal"])
@@ -328,7 +330,8 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
 
         data = payload["data"]
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], "SIGNAL_REJECTED")
+        self.assertEqual(data["status"], "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(data["analysis_result"], "NO_CANDIDATE_THIS_CANDLE")
         self.assertEqual(data["last_rejection_reason"], "ACTIVE_CLOSED")
         self.assertIn("ACTIVE_CLOSED", data["blocked_filters"])
         self.assertIsNone(data["pending_signal"])

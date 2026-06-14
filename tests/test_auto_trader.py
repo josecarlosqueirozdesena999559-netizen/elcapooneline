@@ -598,21 +598,21 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         data = payload["data"]
         output = "\n".join(logs.output)
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], "SIGNAL_REJECTED")
-        self.assertEqual(data["rejection_reason"], "NO_CANDIDATES")
+        self.assertEqual(data["status"], "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(data["rejection_reason"], "WAITING_NEXT_ANALYSIS_WINDOW")
         self.assertEqual(
             data["last_rejection_reason"],
             "CANDLES_UNAVAILABLE",
         )
-        self.assertEqual(data["last_analysis_result"], "NO_CANDIDATES")
+        self.assertEqual(data["last_analysis_result"], "NO_CANDIDATE_THIS_CANDLE")
+        self.assertEqual(data["analysis_result"], "NO_CANDIDATE_THIS_CANDLE")
         self.assertIsNotNone(data["last_analysis_at"])
         self.assertIsNone(data["pending_signal"])
-        self.assertGreaterEqual(data["seconds_until_next_cycle"], 59)
+        self.assertGreaterEqual(data["seconds_until_analysis_window"], 44)
         self.assertIn("[CYCLE_DUE]", output)
         self.assertIn("[ANALYSIS_STARTED]", output)
         self.assertIn("[ANALYSIS_FINISHED]", output)
-        self.assertIn("[NO_CANDIDATES]", output)
-        self.assertIn("[NEXT_CYCLE_SCHEDULED]", output)
+        self.assertIn("[NO_CANDIDATE_THIS_CANDLE]", output)
         scan.assert_awaited_once()
 
     async def test_due_cycle_with_valid_signal_creates_pending_signal(self) -> None:
@@ -804,28 +804,25 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             running["analysis_message"],
             "Analisando mercado...",
         )
-        self.assertEqual(finished_payload["data"]["status"], "SIGNAL_REJECTED")
+        self.assertEqual(finished_payload["data"]["status"], "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(finished_payload["data"]["analysis_result"], "NO_CANDIDATE_THIS_CANDLE")
         self.assertEqual(
             finished_payload["data"]["last_rejection_reason"],
             "CANDLES_UNAVAILABLE",
         )
         self.assertGreaterEqual(
-            finished_payload["data"]["seconds_until_next_cycle"],
-            299,
-        )
-        self.assertLessEqual(
-            finished_payload["data"]["seconds_until_next_cycle"],
-            300,
+            finished_payload["data"]["seconds_until_analysis_window"],
+            44,
         )
 
-    async def test_running_analysis_over_15_seconds_recovers_with_timeout(self) -> None:
+    async def test_running_analysis_over_10_seconds_recovers_with_timeout(self) -> None:
         user_id = "user-analysis-timeout"
         state = main.auto_trader.start(user_id)
         state.status = STATUS_WAITING_NEXT_CYCLE
         state.next_cycle_at = utc_now() - timedelta(seconds=1)
         state.analysis_result = "RUNNING"
         state.last_analysis_result = "RUNNING"
-        state.analysis_started_at = utc_now() - timedelta(seconds=16)
+        state.analysis_started_at = utc_now() - timedelta(seconds=11)
 
         with (
             patch.object(
@@ -834,7 +831,13 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(
                     return_value=(
                         200,
-                        main.build_success({"connected": True, "active_mode": "PRACTICE"}),
+                        main.build_success(
+                            {
+                                "connected": True,
+                                "active_mode": "PRACTICE",
+                                "server_time": 15.0,
+                            }
+                        ),
                     )
                 ),
             ),
@@ -847,13 +850,13 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         data = json.loads(response.body)["data"]
         output = "\n".join(logs.output)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(data["status"], "SIGNAL_REJECTED")
+        self.assertEqual(data["status"], "WAITING_ANALYSIS_WINDOW")
         self.assertEqual(data["rejection_reason"], "ANALYSIS_TIMEOUT")
-        self.assertEqual(data["last_rejection_reason"], "Análise demorou demais e foi reiniciada.")
-        self.assertGreaterEqual(data["seconds_until_next_cycle"], 299)
+        self.assertEqual(data["analysis_result"], "ANALYSIS_TIMEOUT")
+        self.assertIn("aguardando pr", data["last_rejection_reason"])
+        self.assertGreaterEqual(data["seconds_until_analysis_window"], 49)
         self.assertIn("[ANALYSIS_TIMEOUT]", output)
-        self.assertIn("[ANALYSIS_RECOVERED]", output)
-        self.assertIn("[NEXT_CYCLE_SCHEDULED]", output)
+        self.assertIn("[ANALYSIS_STATE_RECOVERED]", output)
 
     async def test_analysis_exception_schedules_next_cycle(self) -> None:
         user_id = "user-analysis-error"
@@ -903,7 +906,13 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(
                     return_value=(
                         200,
-                        main.build_success({"connected": True, "active_mode": "PRACTICE"}),
+                        main.build_success(
+                            {
+                                "connected": True,
+                                "active_mode": "PRACTICE",
+                                "server_time": 30.0,
+                            }
+                        ),
                     )
                 ),
             ),
@@ -918,7 +927,54 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             and data["seconds_until_next_cycle"] == 0
             and data["analysis_result"] == "RUNNING"
         )
-        self.assertEqual(data["status"], "ANALYZING")
+        self.assertEqual(data["status"], "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(data["analysis_result"], "WAITING_NEXT_ANALYSIS_WINDOW")
+        self.assertIsNone(data["pending_signal"])
+        self.assertIsNone(data["best_candidate"])
+
+    async def test_analyzing_outside_window_recovers_to_waiting_analysis_window(self) -> None:
+        user_id = "user-analyzing-outside-window"
+        state = main.auto_trader.start(user_id)
+        state.status = "ANALYZING"
+        state.analysis_result = "RUNNING"
+        state.last_analysis_result = "RUNNING"
+        state.analysis_started_at = utc_now()
+        state.best_candidate = None
+        state.pending_signal = None
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success(
+                            {
+                                "connected": True,
+                                "active_mode": "PRACTICE",
+                                "server_time": 30.0,
+                            }
+                        ),
+                    )
+                ),
+            ),
+            patch.object(main, "sync_user_store_from_payload"),
+            patch.object(main, "persist_robot"),
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        output = "\n".join(logs.output)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["status"], "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(data["analysis_result"], "WAITING_NEXT_ANALYSIS_WINDOW")
+        self.assertEqual(data["seconds_until_analysis_window"], 35)
+        self.assertIsNone(data["pending_signal"])
+        self.assertIsNone(data["best_candidate"])
+        self.assertIn("[WAITING_ANALYSIS_WINDOW]", output)
+        self.assertIn("[ANALYSIS_STATE_RECOVERED]", output)
 
     async def test_pending_signal_blocks_new_analysis(self) -> None:
         user_id = "user-pending-blocks-analysis"
@@ -1351,7 +1407,9 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             status_code, payload = await main.execute_robot_cycle(user_id)
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["data"]["rejection_reason"], "NO_CANDIDATES")
+        self.assertEqual(payload["data"]["status"], "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(payload["data"]["rejection_reason"], "WAITING_NEXT_ANALYSIS_WINDOW")
+        self.assertEqual(payload["data"]["analysis_result"], "NO_CANDIDATE_THIS_CANDLE")
         self.assertEqual(
             payload["data"]["last_rejection_reason"],
             "ACTIVE_CLOSED",
