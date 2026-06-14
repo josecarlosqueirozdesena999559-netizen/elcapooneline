@@ -203,6 +203,20 @@ class RobotState:
             data["last_analysis_result"] = "RUNNING"
             data["analysis_result"] = "RUNNING"
             data["analysis_message"] = ANALYSIS_MESSAGE
+        display_countdown_label = None
+        display_countdown_seconds = None
+        if data["status"] == STATUS_WAITING_ANALYSIS_WINDOW:
+            display_countdown_label = "Análise em"
+            display_countdown_seconds = max(0, int(data["seconds_until_analysis_window"]))
+            data["seconds_until_next_cycle"] = display_countdown_seconds
+        elif data["status"] == STATUS_WAITING_NEXT_CYCLE:
+            display_countdown_label = "Próxima entrada em"
+            display_countdown_seconds = max(0, int(data["seconds_until_next_cycle"]))
+        elif data["status"] == STATUS_WAITING_ENTRY_WINDOW:
+            display_countdown_label = "Entrada em"
+            display_countdown_seconds = max(0, int(data["seconds_until_entry_window"]))
+        data["display_countdown_label"] = display_countdown_label
+        data["display_countdown_seconds"] = display_countdown_seconds
         if self.last_trade is not None:
             trade = dict(self.last_trade)
             trade["result"] = trade.get("result") or STATUS_PENDING_RESULT

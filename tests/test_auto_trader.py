@@ -122,6 +122,28 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertIsNotNone(payload["current_cycle_started_at"])
         self.assertGreaterEqual(payload["seconds_until_next_cycle"], 299)
         self.assertLessEqual(payload["seconds_until_next_cycle"], 300)
+        self.assertEqual(payload["display_countdown_label"], "Próxima entrada em")
+        self.assertGreaterEqual(payload["display_countdown_seconds"], 299)
+        self.assertLessEqual(payload["display_countdown_seconds"], 300)
+
+    def test_waiting_analysis_window_uses_analysis_countdown_for_display(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-analysis-countdown")
+        window = main.get_entry_window("M1", 30.0)
+
+        trader.wait_analysis_window(
+            "user-analysis-countdown",
+            window,
+            analysis_result="WAITING_NEXT_ANALYSIS_WINDOW",
+            rejection_reason="WAITING_NEXT_ANALYSIS_WINDOW",
+        )
+
+        payload = state.to_dict()
+        self.assertEqual(payload["status"], "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(payload["seconds_until_analysis_window"], 35)
+        self.assertEqual(payload["seconds_until_next_cycle"], 35)
+        self.assertEqual(payload["display_countdown_label"], "Análise em")
+        self.assertEqual(payload["display_countdown_seconds"], 35)
 
     def test_config_keeps_selected_five_minute_cycle(self) -> None:
         trader = AutoTrader()
@@ -218,6 +240,8 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertEqual(payload["status"], "WAITING_ENTRY_WINDOW")
         self.assertIn("seconds_until_next_cycle", payload)
         self.assertEqual(payload["seconds_until_entry_window"], 145)
+        self.assertEqual(payload["display_countdown_label"], "Entrada em")
+        self.assertEqual(payload["display_countdown_seconds"], 145)
         self.assertEqual(payload["entry_window_start_second"], 265)
         self.assertEqual(payload["entry_window_end_second"], 269)
         self.assertEqual(payload["buy_target_second"], 265)
