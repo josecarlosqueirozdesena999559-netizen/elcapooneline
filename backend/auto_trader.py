@@ -136,6 +136,8 @@ class RobotState:
     expiration_seconds: int = 60
     last_rejection_reason: str | None = None
     last_order_error: str | None = None
+    order_attempts: int = 0
+    fallback_candidate_used: bool = False
     blocked_filters: list[str] = field(default_factory=list)
     approved_filters: list[str] = field(default_factory=list)
     quality_score: int = 0
@@ -382,6 +384,8 @@ class AutoTrader:
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.last_order_error = None
+        state.order_attempts = 0
+        state.fallback_candidate_used = False
         state.rejected_at = None
         state.pending_signal = None
         state.last_signal = None
@@ -450,6 +454,8 @@ class AutoTrader:
         state.candidates = []
         state.best_candidate = None
         state.strategy_score = 0
+        state.order_attempts = 0
+        state.fallback_candidate_used = False
         return True, state
 
     def reject_analysis(
@@ -646,6 +652,13 @@ class AutoTrader:
         state.used_strategies = list(pending_signal["used_strategies"])
         return state
 
+    def set_order_attempt(self, user_id: str, candidate: dict[str, Any], attempt: int) -> RobotState:
+        state = self.get(user_id)
+        state.order_attempts = attempt
+        state.fallback_candidate_used = attempt > 1
+        state.last_order_error = None
+        return self.set_pending_signal(user_id, candidate)
+
     def wait_analysis_window(
         self,
         user_id: str,
@@ -834,6 +847,7 @@ class AutoTrader:
         rejected_at = utc_now()
         state.pending_signal = None
         state.operation_in_progress = False
+        state.order_attempts = max(1, state.order_attempts)
         state.status = STATUS_ORDER_REJECTED
         state.rejection_reason = reason
         state.last_rejection_reason = reason

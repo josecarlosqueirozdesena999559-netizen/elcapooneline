@@ -1373,6 +1373,155 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trade["expected_expire_at"], returned_expiration)
         self.assertEqual(trade["expiration_source"], "close_time")
 
+    async def test_order_falls_back_to_next_candidate_when_asset_unavailable(self) -> None:
+        user_id = "user-order-fallback"
+        state = main.auto_trader.start(user_id)
+        state.entry_value = 2
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "confidence": 94,
+                "payout": 90,
+                "strategy_score": 94,
+            },
+        )
+        state.candidates = [
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "direction": "CALL",
+                "confidence": 94,
+                "payout": 90,
+                "strategy_score": 94,
+                "trade_allowed": True,
+            },
+            {
+                "symbol": "GBPUSD-OTC",
+                "signal": "PUT",
+                "direction": "PUT",
+                "confidence": 93,
+                "payout": 91,
+                "strategy_score": 93,
+                "trade_allowed": True,
+            },
+        ]
+        state.candidates_count = len(state.candidates)
+        order_actives: list[str] = []
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {
+                        "connected": True,
+                        "active_mode": "PRACTICE",
+                        "server_time": SERVER_TIME_M1_OPEN,
+                    }
+                )
+            if path == "/orders/buy-demo":
+                order_actives.append(json_body["active"])
+                if json_body["active"] == "EURUSD-OTC":
+                    return 409, main.build_error("Cannot purchase an option (the asset is not available at the moment).")
+                return 200, main.build_success({"order_id": "fallback-1"})
+            raise AssertionError(f"unexpected path: {path}")
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main.trade_result_monitor, "start", return_value=True) as monitor,
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        trade = data["last_trade"]
+        output = "\n".join(logs.output)
+        self.assertEqual(status_code, 200)
+        self.assertEqual(order_actives, ["EURUSD-OTC", "GBPUSD-OTC"])
+        self.assertEqual(data["status"], STATUS_PENDING_RESULT)
+        self.assertEqual(data["order_attempts"], 2)
+        self.assertTrue(data["fallback_candidate_used"])
+        self.assertEqual(data["best_candidate"]["symbol"], "GBPUSD-OTC")
+        self.assertIsNone(data["pending_signal"])
+        self.assertEqual(trade["active"], "GBPUSD-OTC")
+        self.assertEqual(trade["direction"], "PUT")
+        self.assertEqual(trade["order_attempts"], 2)
+        self.assertTrue(trade["fallback_candidate_used"])
+        monitor.assert_called_once_with(user_id, "fallback-1")
+        self.assertIn("[ORDER_SEND_FAILED]", output)
+        self.assertIn("[ORDER_FALLBACK_NEXT_CANDIDATE]", output)
+        self.assertIn("[ORDER_SEND_SUCCESS]", output)
+
+    async def test_order_rejects_after_three_unavailable_candidates(self) -> None:
+        user_id = "user-order-fallback-exhausted"
+        state = main.auto_trader.start(user_id)
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "confidence": 94,
+                "payout": 90,
+                "strategy_score": 94,
+            },
+        )
+        state.candidates = [
+            {
+                "symbol": symbol,
+                "signal": "CALL",
+                "direction": "CALL",
+                "confidence": confidence,
+                "payout": payout,
+                "strategy_score": confidence,
+                "trade_allowed": True,
+            }
+            for symbol, confidence, payout in (
+                ("EURUSD-OTC", 94, 90),
+                ("GBPUSD-OTC", 93, 91),
+                ("USDJPY-OTC", 92, 89),
+                ("EURJPY-OTC", 91, 88),
+            )
+        ]
+        state.candidates_count = len(state.candidates)
+        order_actives: list[str] = []
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {
+                        "connected": True,
+                        "active_mode": "PRACTICE",
+                        "server_time": SERVER_TIME_M1_OPEN,
+                    }
+                )
+            if path == "/orders/buy-demo":
+                order_actives.append(json_body["active"])
+                return 409, main.build_error("active suspended")
+            raise AssertionError(f"unexpected path: {path}")
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main.trade_result_monitor, "start", return_value=True) as monitor,
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        output = "\n".join(logs.output)
+        self.assertEqual(status_code, 409)
+        self.assertEqual(order_actives, ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC"])
+        self.assertEqual(data["status"], STATUS_ORDER_REJECTED)
+        self.assertEqual(data["order_attempts"], 3)
+        self.assertTrue(data["fallback_candidate_used"])
+        self.assertEqual(data["last_order_error"], "Nenhum ativo disponível no momento da compra.")
+        self.assertIsNone(data["pending_signal"])
+        self.assertGreaterEqual(data["seconds_until_next_cycle"], 299)
+        self.assertLessEqual(data["seconds_until_next_cycle"], 300)
+        monitor.assert_not_called()
+        self.assertIn("[ORDER_SEND_FAILED]", output)
+        self.assertIn("[ORDER_FALLBACK_NEXT_CANDIDATE]", output)
+        self.assertIn("[ORDER_REJECTED]", output)
+
     async def test_rejected_order_stays_order_rejected_and_clears_pending_signal(self) -> None:
         user_id = "user-order-rejected"
         main.auto_trader.start(user_id)

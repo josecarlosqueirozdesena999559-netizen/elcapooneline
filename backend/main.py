@@ -41,6 +41,8 @@ ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
 SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
 SESSION_DISCONNECTED = "SESSION_DISCONNECTED"
 LOW_QUALITY_SIGNAL = "Sinal bloqueado por baixa qualidade"
+MAX_ORDER_ATTEMPTS_PER_CYCLE = 3
+NO_AVAILABLE_ASSET_ERROR = "Nenhum ativo disponível no momento da compra."
 CRITICAL_TRADE_BLOCKS = {
     "ACCOUNT_DISCONNECTED",
     "STOP_WIN_HIT",
@@ -51,6 +53,12 @@ CRITICAL_TRADE_BLOCKS = {
     "OPERATION_IN_PROGRESS",
     "CANDLES_UNAVAILABLE",
 }
+ORDER_AVAILABILITY_ERROR_TERMS = (
+    "asset is not available",
+    "active suspended",
+    "cannot purchase",
+    "active not found",
+)
 BINARY_ALLOWED_ASSETS = [
     "EURUSD-OTC",
     "EURGBP-OTC",
@@ -1038,6 +1046,8 @@ def recover_analysis_error_to_window(
 def readable_order_error(error: Any) -> str:
     raw_error = str(error or "ORDER_FAILED").strip() or "ORDER_FAILED"
     normalized = raw_error.lower().replace("_", " ").replace("-", " ")
+    if "asset is not available" in normalized or "cannot purchase" in normalized:
+        return "Ativo indisponivel no momento da compra"
     if "active suspended" in normalized or "ativo suspenso" in normalized:
         return "Ativo suspenso pela BullEx"
     if "payout" in normalized and any(term in normalized for term in ("low", "baixo", "minimum", "minimo")):
@@ -1047,6 +1057,54 @@ def readable_order_error(error: Any) -> str:
     if "account mismatch" in normalized or "mode mismatch" in normalized or "modo da conta" in normalized:
         return "Conta BullEx incompativel com o modo selecionado"
     return raw_error
+
+
+def is_order_availability_error(error: Any) -> bool:
+    normalized = str(error or "").strip().lower().replace("_", " ").replace("-", " ")
+    return any(term in normalized for term in ORDER_AVAILABILITY_ERROR_TERMS)
+
+
+def candidate_pre_order_block_reason(candidate: dict[str, Any]) -> str | None:
+    symbol = normalize_binary_active(str(candidate.get("symbol") or ""))
+    if not symbol or not is_binary_asset_allowed(symbol):
+        return "ACTIVE_CLOSED"
+    if candidate.get("payout") is None:
+        return "PAYOUT_UNAVAILABLE"
+    active_status = str(candidate.get("active_status") or candidate.get("status") or "").upper()
+    blocked_filters = set(str(item) for item in (candidate.get("blocked_filters") or []))
+    if candidate.get("suspended") or "SUSPEND" in active_status or "ACTIVE_SUSPENDED" in blocked_filters:
+        return "ACTIVE_SUSPENDED"
+    if candidate.get("is_open") is False or active_status in {"CLOSED", "INACTIVE"} or "ACTIVE_CLOSED" in blocked_filters:
+        return "ACTIVE_CLOSED"
+    if "PAYOUT_UNAVAILABLE" in blocked_filters:
+        return "PAYOUT_UNAVAILABLE"
+    return None
+
+
+def order_attempt_candidates(state: Any, selected: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = [dict(selected)]
+    ranked_candidates = sorted(
+        [candidate for candidate in state.candidates if isinstance(candidate, dict)],
+        key=lambda item: (
+            int(item.get("strategy_score") or item.get("score") or 0),
+            int(item.get("confidence") or 0),
+            float(item.get("payout") or 0),
+        ),
+        reverse=True,
+    )
+    candidates.extend(ranked_candidates)
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in candidates:
+        symbol = normalize_binary_active(str(candidate.get("symbol") or ""))
+        direction = str(candidate.get("signal") or candidate.get("direction") or "").upper()
+        key = (symbol, direction)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized = {**candidate, "symbol": symbol, "signal": direction, "direction": direction}
+        unique.append(normalized)
+    return unique
 
 
 def build_strategy_narration(candidate: dict[str, Any]) -> tuple[str, str, list[str]]:
@@ -1765,9 +1823,6 @@ async def execute_robot_cycle(
                     )
                     return 200, build_robot_payload(state)
 
-            symbol = str(selected["symbol"])
-            direction = str(selected.get("signal") or selected.get("direction"))
-            payout = selected.get("payout")
             logger.info(
                 "[ENTRY_WINDOW_OPEN] user_id=%s server_time=%s timeframe=%s "
                 "seconds_in_candle=%s window_start=%s window_end=%s buy_target_second=%s",
@@ -1779,184 +1834,257 @@ async def execute_robot_cycle(
                 entry_window["entry_window_end_second"],
                 entry_window["buy_target_second"],
             )
-
-            order_body = {
-                "active": symbol,
-                "action": direction.lower(),
-                "amount": state.entry_value,
-                "expiration": entry_window["expiration_minutes"],
-            }
             order_path = "/bullex/buy-demo"
             if state.account_mode == "REAL":
                 order_path = "/bullex/buy-real"
-                order_body["confirm_real"] = True
 
-            state = auto_trader.start_sending_order(user_id)
-            logger.info(
-                "[SENDING_ORDER] user_id=%s symbol=%s direction=%s",
-                user_id,
-                symbol,
-                direction,
-            )
-            logger.info(
-                "[ORDER_SEND_START] user_id=%s path=%s active=%s direction=%s amount=%s expiration=%s",
-                user_id,
-                order_path,
-                symbol,
-                direction,
-                state.entry_value,
-                entry_window["expiration_minutes"],
-            )
-            try:
-                order_status, order_payload = await submit_bullex_order(
+            skipped_candidates = 0
+            last_order_status = 409
+            last_order_reason = "NO_AVAILABLE_ASSET"
+            last_friendly_error = NO_AVAILABLE_ASSET_ERROR
+            attempted_unavailable = False
+            for candidate in order_attempt_candidates(state, selected):
+                if state.order_attempts >= MAX_ORDER_ATTEMPTS_PER_CYCLE:
+                    break
+                validation_reason = candidate_pre_order_block_reason(candidate)
+                if validation_reason is not None:
+                    skipped_candidates += 1
+                    logger.warning(
+                        "[ORDER_FALLBACK_NEXT_CANDIDATE] user_id=%s skipped_active=%s reason=%s attempts=%s",
+                        user_id,
+                        candidate.get("symbol"),
+                        validation_reason,
+                        state.order_attempts,
+                    )
+                    continue
+
+                next_attempt = state.order_attempts + 1
+                state = auto_trader.set_order_attempt(user_id, candidate, next_attempt)
+                selected = dict(state.pending_signal or candidate)
+                symbol = str(selected["symbol"])
+                direction = str(selected.get("signal") or selected.get("direction"))
+                payout = selected.get("payout")
+                order_body = {
+                    "active": symbol,
+                    "action": direction.lower(),
+                    "amount": state.entry_value,
+                    "expiration": entry_window["expiration_minutes"],
+                }
+                if state.account_mode == "REAL":
+                    order_body["confirm_real"] = True
+
+                state = auto_trader.start_sending_order(user_id)
+                logger.info(
+                    "[SENDING_ORDER] user_id=%s symbol=%s direction=%s",
+                    user_id,
+                    symbol,
+                    direction,
+                )
+                logger.info(
+                    "[ORDER_SEND_START] user_id=%s path=%s active=%s direction=%s amount=%s expiration=%s attempt=%s",
                     user_id,
                     order_path,
-                    order_body,
+                    symbol,
+                    direction,
+                    state.entry_value,
+                    entry_window["expiration_minutes"],
+                    state.order_attempts,
                 )
-            except Exception as exc:
-                reason = str(exc).strip() or type(exc).__name__
-                friendly_error = readable_order_error(reason)
-                state = auto_trader.reject_order(
-                    user_id,
-                    reason,
-                    last_order_error=friendly_error,
-                )
-                logger.exception("[ORDER_SEND_FAILED] user_id=%s error=%s", user_id, reason)
-                logger.error(
-                    "[ORDER_REJECTED] user_id=%s reason=%s last_order_error=%s",
-                    user_id,
-                    reason,
-                    friendly_error,
-                )
-                logger.info(
-                    "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
-                    user_id,
-                    state.next_cycle_at,
-                )
-                return 502, build_robot_payload(state)
-            mark_disconnected_from_payload(user_id, order_payload)
-            if not order_payload.get("ok"):
-                reason = str(order_payload.get("error") or "ORDER_FAILED")
-                friendly_error = readable_order_error(reason)
-                state = auto_trader.reject_order(
-                    user_id,
-                    reason,
-                    last_order_error=friendly_error,
-                )
-                logger.error("[ORDER_SEND_FAILED] user_id=%s error=%s", user_id, reason)
-                logger.error(
-                    "[ORDER_REJECTED] user_id=%s reason=%s last_order_error=%s",
-                    user_id,
-                    reason,
-                    friendly_error,
-                )
-                logger.info(
-                    "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
-                    user_id,
-                    state.next_cycle_at,
-                )
-                return order_status, build_robot_payload(state)
+                try:
+                    order_status, order_payload = await submit_bullex_order(
+                        user_id,
+                        order_path,
+                        order_body,
+                    )
+                except Exception as exc:
+                    reason = str(exc).strip() or type(exc).__name__
+                    friendly_error = readable_order_error(reason)
+                    last_order_status = 502
+                    last_order_reason = reason
+                    last_friendly_error = friendly_error
+                    logger.exception("[ORDER_SEND_FAILED] user_id=%s active=%s error=%s", user_id, symbol, reason)
+                    if is_order_availability_error(reason):
+                        attempted_unavailable = True
+                        logger.info(
+                            "[ORDER_FALLBACK_NEXT_CANDIDATE] user_id=%s failed_active=%s attempts=%s",
+                            user_id,
+                            symbol,
+                            state.order_attempts,
+                        )
+                        continue
+                    state = auto_trader.reject_order(
+                        user_id,
+                        reason,
+                        last_order_error=friendly_error,
+                    )
+                    logger.error(
+                        "[ORDER_REJECTED] user_id=%s reason=%s last_order_error=%s",
+                        user_id,
+                        reason,
+                        friendly_error,
+                    )
+                    logger.info(
+                        "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                        user_id,
+                        state.next_cycle_at,
+                    )
+                    return 502, build_robot_payload(state)
+                mark_disconnected_from_payload(user_id, order_payload)
+                if not order_payload.get("ok"):
+                    reason = str(order_payload.get("error") or "ORDER_FAILED")
+                    friendly_error = readable_order_error(reason)
+                    last_order_status = order_status
+                    last_order_reason = reason
+                    last_friendly_error = friendly_error
+                    logger.error("[ORDER_SEND_FAILED] user_id=%s active=%s error=%s", user_id, symbol, reason)
+                    if is_order_availability_error(reason):
+                        attempted_unavailable = True
+                        logger.info(
+                            "[ORDER_FALLBACK_NEXT_CANDIDATE] user_id=%s failed_active=%s attempts=%s",
+                            user_id,
+                            symbol,
+                            state.order_attempts,
+                        )
+                        continue
+                    state = auto_trader.reject_order(
+                        user_id,
+                        reason,
+                        last_order_error=friendly_error,
+                    )
+                    logger.error(
+                        "[ORDER_REJECTED] user_id=%s reason=%s last_order_error=%s",
+                        user_id,
+                        reason,
+                        friendly_error,
+                    )
+                    logger.info(
+                        "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                        user_id,
+                        state.next_cycle_at,
+                    )
+                    return order_status, build_robot_payload(state)
 
-            order_data = order_payload.get("data") if isinstance(order_payload.get("data"), dict) else {}
-            order_id = order_data.get("order_id")
-            if order_id is None or not str(order_id).strip():
-                state = auto_trader.reject_order(
-                    user_id,
-                    "ORDER_ID_MISSING",
-                    last_order_error="BullEx nao retornou o identificador da ordem",
-                )
-                logger.error("[ORDER_SEND_FAILED] user_id=%s error=ORDER_ID_MISSING", user_id)
-                logger.error(
-                    "[ORDER_REJECTED] user_id=%s reason=ORDER_ID_MISSING last_order_error=%s",
-                    user_id,
-                    state.last_order_error,
-                )
-                logger.info(
-                    "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
-                    user_id,
-                    state.next_cycle_at,
-                )
-                return 502, build_robot_payload(state)
+                order_data = order_payload.get("data") if isinstance(order_payload.get("data"), dict) else {}
+                order_id = order_data.get("order_id")
+                if order_id is None or not str(order_id).strip():
+                    state = auto_trader.reject_order(
+                        user_id,
+                        "ORDER_ID_MISSING",
+                        last_order_error="BullEx nao retornou o identificador da ordem",
+                    )
+                    logger.error("[ORDER_SEND_FAILED] user_id=%s active=%s error=ORDER_ID_MISSING", user_id, symbol)
+                    logger.error(
+                        "[ORDER_REJECTED] user_id=%s reason=ORDER_ID_MISSING last_order_error=%s",
+                        user_id,
+                        state.last_order_error,
+                    )
+                    logger.info(
+                        "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                        user_id,
+                        state.next_cycle_at,
+                    )
+                    return 502, build_robot_payload(state)
 
-            sent_at = datetime.now(timezone.utc)
-            expected_expire_at, expiration_source = calculate_expected_expire_at(
-                state.timeframe,
-                order_data,
-                entry_window,
-                sent_at,
-            )
-            trade = {
-                **order_data,
-                "mode": state.account_mode,
-                "active": symbol,
-                "direction": direction,
-                "amount": state.entry_value,
-                "confidence": selected["confidence"],
-                "payout": payout,
-                "expiration": state.timeframe,
-                "timeframe": state.timeframe,
-                "result": STATUS_PENDING_RESULT,
-                "sent_at": sent_at.isoformat(),
-                "expected_expire_at": expected_expire_at.isoformat(),
-                "expires_at": expected_expire_at.isoformat(),
-                "expiration_source": expiration_source,
-                "server_time_at_send": entry_window.get("server_time"),
-                "server_timestamp_at_send": entry_window.get("server_timestamp"),
-                "cycle_id": state.cycle_id,
-            }
-            trade["timestamp"] = trade["sent_at"]
-            state = auto_trader.record_trade(user_id, trade)
-            state.pending_signal = None
-            state.entry_window_open = False
-            logger.info(
-                "[PENDING_SIGNAL_CLEARED] user_id=%s symbol=%s reason=TRADE_SENT",
-                user_id,
-                symbol,
-            )
-            logger.info(
-                "[EXPIRATION_SET] user_id=%s order_id=%s timeframe=%s expected_expire_at=%s source=%s server_time_at_send=%s",
-                user_id,
-                order_id,
-                state.timeframe,
-                trade["expected_expire_at"],
-                expiration_source,
-                trade["server_time_at_send"],
-            )
-            logger.info(
-                "[ORDER_SEND_SUCCESS] user_id=%s order_id=%s status=%s",
-                user_id,
-                order_id,
-                state.status,
-            )
-            logger.info(
-                "[PENDING_RESULT] user_id=%s order_id=%s",
-                user_id,
-                order_id,
-            )
-            logger.info(
-                "[TRADE_SENT_AT] user_id=%s server_time=%s timeframe=%s "
-                "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
-                user_id,
-                entry_window["server_time"],
-                state.timeframe,
-                entry_window["current_candle_seconds"],
-                entry_window["seconds_until_close"],
-                entry_window["expiration"],
-            )
-            if state.account_mode == "REAL":
-                logger.info(
-                    "[REAL_TRADE_SENT] user_id=%s order_id=%s",
-                    user_id,
-                    trade.get("order_id"),
+                sent_at = datetime.now(timezone.utc)
+                expected_expire_at, expiration_source = calculate_expected_expire_at(
+                    state.timeframe,
+                    order_data,
+                    entry_window,
+                    sent_at,
                 )
-            else:
+                trade = {
+                    **order_data,
+                    "mode": state.account_mode,
+                    "active": symbol,
+                    "direction": direction,
+                    "amount": state.entry_value,
+                    "confidence": selected["confidence"],
+                    "payout": payout,
+                    "expiration": state.timeframe,
+                    "timeframe": state.timeframe,
+                    "result": STATUS_PENDING_RESULT,
+                    "sent_at": sent_at.isoformat(),
+                    "expected_expire_at": expected_expire_at.isoformat(),
+                    "expires_at": expected_expire_at.isoformat(),
+                    "expiration_source": expiration_source,
+                    "server_time_at_send": entry_window.get("server_time"),
+                    "server_timestamp_at_send": entry_window.get("server_timestamp"),
+                    "cycle_id": state.cycle_id,
+                    "order_attempts": state.order_attempts,
+                    "fallback_candidate_used": state.fallback_candidate_used,
+                }
+                trade["timestamp"] = trade["sent_at"]
+                state = auto_trader.record_trade(user_id, trade)
+                state.pending_signal = None
+                state.entry_window_open = False
                 logger.info(
-                    "[ROBOT DEMO ORDER SENT] user_id=%s order_id=%s",
+                    "[PENDING_SIGNAL_CLEARED] user_id=%s symbol=%s reason=TRADE_SENT",
                     user_id,
-                    trade.get("order_id"),
+                    symbol,
                 )
-            trade_result_monitor.start(user_id, order_id)
-            return 200, build_robot_payload(state)
+                logger.info(
+                    "[EXPIRATION_SET] user_id=%s order_id=%s timeframe=%s expected_expire_at=%s source=%s server_time_at_send=%s",
+                    user_id,
+                    order_id,
+                    state.timeframe,
+                    trade["expected_expire_at"],
+                    expiration_source,
+                    trade["server_time_at_send"],
+                )
+                logger.info(
+                    "[ORDER_SEND_SUCCESS] user_id=%s order_id=%s status=%s",
+                    user_id,
+                    order_id,
+                    state.status,
+                )
+                logger.info(
+                    "[PENDING_RESULT] user_id=%s order_id=%s",
+                    user_id,
+                    order_id,
+                )
+                logger.info(
+                    "[TRADE_SENT_AT] user_id=%s server_time=%s timeframe=%s "
+                    "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
+                    user_id,
+                    entry_window["server_time"],
+                    state.timeframe,
+                    entry_window["current_candle_seconds"],
+                    entry_window["seconds_until_close"],
+                    entry_window["expiration"],
+                )
+                if state.account_mode == "REAL":
+                    logger.info(
+                        "[REAL_TRADE_SENT] user_id=%s order_id=%s",
+                        user_id,
+                        trade.get("order_id"),
+                    )
+                else:
+                    logger.info(
+                        "[ROBOT DEMO ORDER SENT] user_id=%s order_id=%s",
+                        user_id,
+                        trade.get("order_id"),
+                    )
+                trade_result_monitor.start(user_id, order_id)
+                return 200, build_robot_payload(state)
+
+            final_error = NO_AVAILABLE_ASSET_ERROR if attempted_unavailable or skipped_candidates else last_friendly_error
+            state = auto_trader.reject_order(
+                user_id,
+                last_order_reason,
+                last_order_error=final_error,
+            )
+            logger.error(
+                "[ORDER_REJECTED] user_id=%s reason=%s last_order_error=%s",
+                user_id,
+                last_order_reason,
+                final_error,
+            )
+            logger.info(
+                "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                user_id,
+                state.next_cycle_at,
+            )
+            return last_order_status, build_robot_payload(state)
         except Exception as exc:
             error = str(exc).strip() or type(exc).__name__
             logger.exception("[ROBOT ERROR] user_id=%s error=%s", user_id, exc)
