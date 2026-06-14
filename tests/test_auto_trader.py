@@ -376,6 +376,98 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         service_call.assert_not_awaited()
         scan.assert_not_awaited()
 
+    async def test_due_cycle_runs_analysis_and_rejects_when_no_signal(self) -> None:
+        user_id = "user-cycle-due-no-signal"
+        state = main.auto_trader.start(user_id)
+        state.cycle_minutes = 1
+        make_cycle_due(user_id)
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {
+                        "connected": True,
+                        "active_mode": "PRACTICE",
+                        "server_time": 20.0,
+                    }
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, main.build_success([])))) as scan,
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        output = "\n".join(logs.output)
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "SIGNAL_REJECTED")
+        self.assertEqual(data["rejection_reason"], "NO_VALID_SIGNAL")
+        self.assertEqual(data["last_rejection_reason"], "NO_SIGNAL")
+        self.assertEqual(data["last_analysis_result"], "NO_VALID_SIGNAL")
+        self.assertIsNotNone(data["last_analysis_at"])
+        self.assertIsNone(data["pending_signal"])
+        self.assertGreaterEqual(data["seconds_until_next_cycle"], 59)
+        self.assertIn("[CYCLE_DUE]", output)
+        self.assertIn("[ANALYSIS_STARTED]", output)
+        self.assertIn("[ANALYSIS_FINISHED]", output)
+        self.assertIn("[NO_VALID_SIGNAL]", output)
+        self.assertIn("[NEXT_CYCLE_SCHEDULED]", output)
+        scan.assert_awaited_once()
+
+    async def test_due_cycle_with_valid_signal_creates_pending_signal(self) -> None:
+        user_id = "user-cycle-due-valid-signal"
+        state = main.auto_trader.start(user_id)
+        state.cycle_minutes = 1
+        make_cycle_due(user_id)
+        status_times = iter((20.0, 20.0))
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {
+                        "connected": True,
+                        "active_mode": "PRACTICE",
+                        "server_time": next(status_times),
+                    }
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        scan_payload = main.build_success(
+            [
+                {
+                    "symbol": "EURUSD-OTC",
+                    "signal": "CALL",
+                    "confidence": 92,
+                    "strength": 80,
+                    "payout": 90,
+                }
+            ]
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))) as scan,
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        output = "\n".join(logs.output)
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(data["last_analysis_result"], "SIGNAL_APPROVED")
+        self.assertIsNotNone(data["last_analysis_at"])
+        self.assertEqual(data["pending_signal"]["symbol"], "EURUSD-OTC")
+        self.assertEqual(data["pending_signal"]["signal"], "CALL")
+        self.assertIn("[CYCLE_DUE]", output)
+        self.assertIn("[ANALYSIS_STARTED]", output)
+        self.assertIn("[ANALYSIS_FINISHED]", output)
+        self.assertIn("[PENDING_SIGNAL_SET]", output)
+        scan.assert_awaited_once()
+
     async def test_order_status_is_sending_while_bullex_order_is_in_flight(self) -> None:
         user_id = "user-sending"
         main.auto_trader.start(user_id)

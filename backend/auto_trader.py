@@ -87,6 +87,8 @@ class RobotState:
     current_cycle_started_at: datetime | None = None
     next_cycle_at: datetime | None = None
     last_entry_at: datetime | None = None
+    last_analysis_at: datetime | None = None
+    last_analysis_result: str | None = None
     rejected_at: datetime | None = None
     operation_in_progress: bool = False
     last_signal: dict[str, Any] | None = None
@@ -106,7 +108,7 @@ class RobotState:
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        for key in ("current_cycle_started_at", "next_cycle_at", "last_entry_at", "rejected_at"):
+        for key in ("current_cycle_started_at", "next_cycle_at", "last_entry_at", "last_analysis_at", "rejected_at"):
             value = data[key]
             data[key] = value.isoformat() if value is not None else None
         now = utc_now()
@@ -182,7 +184,7 @@ class AutoTrader:
         trades: list[dict[str, Any]] | None = None,
     ) -> RobotState:
         state = RobotState()
-        datetime_fields = {"current_cycle_started_at", "next_cycle_at", "last_entry_at", "rejected_at"}
+        datetime_fields = {"current_cycle_started_at", "next_cycle_at", "last_entry_at", "last_analysis_at", "rejected_at"}
         for key, value in payload.items():
             if not hasattr(state, key) or key in {"accuracy", "seconds_until_next_cycle"}:
                 continue
@@ -286,6 +288,8 @@ class AutoTrader:
         state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
         state.status = STATUS_ANALYZING
         state.rejection_reason = None
+        state.last_analysis_at = now
+        state.last_analysis_result = "STARTED"
         return True, state
 
     def reject(self, user_id: str, reason: str) -> RobotState:
@@ -317,13 +321,34 @@ class AutoTrader:
         state.operation_in_progress = False
         state.entry_window_open = False
         state.next_cycle_at = state.rejected_at + timedelta(minutes=state.cycle_minutes)
+        state.last_analysis_at = state.rejected_at
+        state.last_analysis_result = reason
         return state
+
+    def reject_no_valid_signal(
+        self,
+        user_id: str,
+        last_rejection_reason: str,
+        *,
+        blocked_filters: list[str] | None = None,
+        approved_filters: list[str] | None = None,
+        quality_score: int = 0,
+    ) -> RobotState:
+        return self.reject_strategy(
+            user_id,
+            "NO_VALID_SIGNAL",
+            last_rejection_reason=last_rejection_reason,
+            blocked_filters=blocked_filters,
+            approved_filters=approved_filters,
+            quality_score=quality_score,
+        )
 
     def fail(self, user_id: str, reason: str) -> RobotState:
         state = self.get(user_id)
         state.status = STATUS_ERROR
         state.rejection_reason = reason
         state.last_rejection_reason = reason
+        state.last_analysis_result = reason
         return state
 
     def set_pending_signal(self, user_id: str, signal: dict[str, Any]) -> RobotState:
@@ -347,6 +372,8 @@ class AutoTrader:
         state.status = STATUS_WAITING_ENTRY_WINDOW
         state.rejection_reason = STATUS_WAITING_ENTRY_WINDOW
         state.last_rejection_reason = None
+        state.last_analysis_at = utc_now()
+        state.last_analysis_result = "SIGNAL_APPROVED"
         state.blocked_filters = list(pending_signal["blocked_filters"])
         state.approved_filters = list(pending_signal["approved_filters"])
         state.quality_score = int(pending_signal["quality_score"] or 0)

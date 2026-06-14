@@ -889,6 +889,17 @@ async def execute_robot_cycle(
                         state.next_cycle_at,
                     )
                 return 200, build_robot_payload(state)
+            logger.info(
+                "[CYCLE_DUE] user_id=%s cycle_id=%s current_cycle_started_at=%s",
+                user_id,
+                state.cycle_id,
+                state.current_cycle_started_at,
+            )
+            logger.info(
+                "[ANALYSIS_STARTED] user_id=%s cycle_id=%s",
+                user_id,
+                state.cycle_id,
+            )
 
         logger.info("[ROBOT TICK] user_id=%s", user_id)
         try:
@@ -987,9 +998,20 @@ async def execute_robot_cycle(
                     return scan_status, build_robot_payload(state)
 
                 signals = [item for item in scan_payload.get("data", []) if isinstance(item, dict)]
+                logger.info(
+                    "[ANALYSIS_FINISHED] user_id=%s cycle_id=%s candidates=%s",
+                    user_id,
+                    state.cycle_id,
+                    len(signals),
+                )
                 if not signals:
-                    state = auto_trader.reject(user_id, "NO_SIGNAL")
-                    logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=NO_SIGNAL", user_id)
+                    state = auto_trader.reject_no_valid_signal(user_id, "NO_SIGNAL")
+                    logger.info("[NO_VALID_SIGNAL] user_id=%s reason=NO_SIGNAL", user_id)
+                    logger.info(
+                        "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                        user_id,
+                        state.next_cycle_at,
+                    )
                     return 200, build_robot_payload(state)
 
                 selected = max(
@@ -1038,13 +1060,20 @@ async def execute_robot_cycle(
                         rejection = "SIGNAL_BLOCKED_LOW_QUALITY"
 
                 if rejection is not None:
-                    if rejection == "SIGNAL_BLOCKED_LOW_QUALITY":
+                    no_valid_rejections = {
+                        "SIGNAL_WAIT",
+                        "CONFIDENCE_BELOW_MINIMUM",
+                        "PAYOUT_BELOW_MINIMUM",
+                        "PAYOUT_UNAVAILABLE",
+                        "SIGNAL_BLOCKED_LOW_QUALITY",
+                    }
+                    if rejection in no_valid_rejections:
                         last_rejection_reason = str(selected.get("quality_reason") or rejection)
-                        last_rejection_reason = ",".join(selected.get("blocked_filters") or []) or LOW_QUALITY_SIGNAL
-                        state = auto_trader.reject_strategy(
+                        if selected.get("blocked_filters"):
+                            last_rejection_reason = ",".join(selected.get("blocked_filters") or [])
+                        state = auto_trader.reject_no_valid_signal(
                             user_id,
-                            rejection,
-                            last_rejection_reason=last_rejection_reason,
+                            last_rejection_reason,
                             blocked_filters=list(selected.get("blocked_filters") or []),
                             approved_filters=list(selected.get("approved_filters") or []),
                             quality_score=int(selected.get("quality_score") or 0),
@@ -1052,10 +1081,15 @@ async def execute_robot_cycle(
                         logger.info(
                             "[SIGNAL_REJECTED] user_id=%s reason=%s last_rejection_reason=%s quality_score=%s blocked_filters=%s",
                             user_id,
-                            rejection,
+                            state.rejection_reason,
                             state.last_rejection_reason,
                             state.quality_score,
                             state.blocked_filters,
+                        )
+                        logger.info(
+                            "[NO_VALID_SIGNAL] user_id=%s reason=%s",
+                            user_id,
+                            state.last_rejection_reason,
                         )
                         logger.info(
                             "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",

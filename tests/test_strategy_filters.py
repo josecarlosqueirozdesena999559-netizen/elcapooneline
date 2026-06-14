@@ -194,8 +194,9 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
         data = payload["data"]
         self.assertEqual(status_code, 200)
         self.assertEqual(data["status"], "SIGNAL_REJECTED")
-        self.assertEqual(data["rejection_reason"], "SIGNAL_BLOCKED_LOW_QUALITY")
+        self.assertEqual(data["rejection_reason"], "NO_VALID_SIGNAL")
         self.assertEqual(data["last_rejection_reason"], "TREND_CLEAR")
+        self.assertEqual(data["last_analysis_result"], "NO_VALID_SIGNAL")
         self.assertEqual(data["blocked_filters"], ["TREND_CLEAR"])
         self.assertEqual(data["quality_score"], 40)
         self.assertIsNone(data["pending_signal"])
@@ -207,9 +208,8 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_low_quality_rejection_returns_waiting_after_five_seconds(self) -> None:
         user_id = "user-low-quality-state"
         state = main.auto_trader.start(user_id)
-        state = main.auto_trader.reject_strategy(
+        state = main.auto_trader.reject_no_valid_signal(
             user_id,
-            "SIGNAL_BLOCKED_LOW_QUALITY",
             last_rejection_reason="TREND_CLEAR",
             blocked_filters=["TREND_CLEAR"],
             quality_score=40,
