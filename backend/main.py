@@ -19,6 +19,7 @@ from backend.auto_trader import (
     STATUS_ANALYZING,
     STATUS_ORDER_REJECTED,
     STATUS_PENDING_RESULT,
+    STATUS_SENDING_ORDER,
     STATUS_WAITING_ANALYSIS_WINDOW,
     STATUS_WAITING_ENTRY_WINDOW,
     STATUS_WAITING_NEXT_CYCLE,
@@ -1699,6 +1700,9 @@ async def execute_robot_cycle(
             if recovered_reason is not None:
                 return 200, build_robot_payload(state)
             selected = dict(state.pending_signal) if state.pending_signal else None
+            if selected is not None and not state.operation_in_progress:
+                state.status = STATUS_SENDING_ORDER
+                state.rejection_reason = None
             seconds_until_next_cycle = state.to_dict()["seconds_until_next_cycle"]
             if (
                 selected is None
@@ -2721,6 +2725,30 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
         window,
     )
     state = auto_trader.get(user_id)
+    state_payload = state.to_dict()
+    if (
+        state.enabled
+        and connected
+        and not state.operation_in_progress
+        and (
+            state.pending_signal is not None
+            or state.status == STATUS_SENDING_ORDER
+            or (
+                state.status == STATUS_WAITING_NEXT_CYCLE
+                and state.next_cycle_at is not None
+                and int(state_payload["seconds_until_next_cycle"]) <= 0
+            )
+        )
+    ):
+        logger.info(
+            "[CYCLE_ENTRY_DUE] user_id=%s cycle_id=%s source=robot_state",
+            user_id,
+            state.cycle_id,
+        )
+        cycle_status, cycle_payload = await execute_robot_cycle(user_id)
+        return json_response(cycle_status, cycle_payload)
+    if state.enabled:
+        ensure_robot_worker(user_id)
     block_reason = real_block_reason(state, connected=connected, active_mode=active_mode)
     return json_response(
         200,

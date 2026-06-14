@@ -235,6 +235,21 @@ class RobotState:
             display_countdown_seconds = max(0, int(data["seconds_until_entry_window"]))
         data["display_countdown_label"] = display_countdown_label
         data["display_countdown_seconds"] = display_countdown_seconds
+        data["voice_message"] = None
+        data["voice_event_id"] = None
+        voice_signal = self.pending_signal or self.best_candidate
+        if self.status == STATUS_SENDING_ORDER and voice_signal:
+            symbol = str(voice_signal.get("symbol") or "")
+            direction = str(voice_signal.get("direction") or voice_signal.get("signal") or "")
+            score = int(voice_signal.get("strategy_score") or voice_signal.get("score") or 0)
+            data["voice_message"] = f"Entrada liberada. Ativo {symbol}. Direção {direction}. Score {score}."
+            data["voice_event_id"] = f"{self.cycle_id or ''}:{symbol}:{direction}:{score}:sending"
+        elif self.status == STATUS_WAITING_NEXT_CYCLE and self.best_candidate:
+            symbol = str(self.best_candidate.get("symbol") or "")
+            direction = str(self.best_candidate.get("direction") or self.best_candidate.get("signal") or "")
+            score = int(self.best_candidate.get("strategy_score") or self.best_candidate.get("score") or 0)
+            data["voice_message"] = f"Melhor entrada encontrada. Ativo {symbol}. Direção {direction}. Score {score}."
+            data["voice_event_id"] = f"{self.cycle_id or ''}:{symbol}:{direction}:{score}:candidate"
         for deprecated_key in (
             "analysis_window_open",
             "seconds_until_analysis_window",

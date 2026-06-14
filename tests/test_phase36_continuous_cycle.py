@@ -7,6 +7,7 @@ from backend import main
 from backend.auto_trader import (
     STATUS_PENDING_RESULT,
     STATUS_RESULT_RECEIVED,
+    STATUS_SENDING_ORDER,
     STATUS_WAITING_NEXT_CYCLE,
     utc_now,
 )
@@ -138,6 +139,49 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(payload["best_candidate"])
         self.assertIsNone(payload["pending_signal"])
         self.assertGreater(payload["seconds_until_next_cycle"], 0)
+
+    async def test_robot_state_sends_order_when_state_is_stuck_sending(self) -> None:
+        user_id = "phase36-state-recovers-sending"
+        state = main.auto_trader.start(user_id)
+        state.connected = True
+        state.next_cycle_at = utc_now() - timedelta(seconds=1)
+        main.auto_trader.set_pending_signal(user_id, make_signal("GBPUSD-OTC", "PUT", 90))
+        self.assertEqual(main.auto_trader.get(user_id).status, STATUS_SENDING_ORDER)
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {"connected": True, "active_mode": "PRACTICE", "server_time": 300.0}
+                )
+            if path == "/orders/buy-demo":
+                return 200, main.build_success({"order_id": "phase36-state-1"})
+            raise AssertionError(f"unexpected path: {path}")
+
+        with (
+            patch.object(main, "call_bullex_service", new=AsyncMock(side_effect=fake_bullex)),
+            patch.object(main.trade_result_monitor, "start"),
+            patch.object(main, "persist_robot"),
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["status"], STATUS_PENDING_RESULT)
+        self.assertEqual(data["last_trade"]["active"], "GBPUSD-OTC")
+        self.assertTrue(data["operation_in_progress"])
+
+    def test_sending_order_payload_includes_voice_message(self) -> None:
+        user_id = "phase36-voice"
+        state = main.auto_trader.start(user_id)
+        main.auto_trader.set_pending_signal(user_id, make_signal("GBPUSD-OTC", "PUT", 90))
+
+        payload = state.to_dict()
+
+        self.assertEqual(payload["status"], STATUS_SENDING_ORDER)
+        self.assertIn("Entrada liberada", payload["voice_message"])
+        self.assertIn("GBPUSD-OTC", payload["voice_message"])
+        self.assertIn("PUT", payload["voice_message"])
+        self.assertIsNotNone(payload["voice_event_id"])
 
 
 if __name__ == "__main__":
