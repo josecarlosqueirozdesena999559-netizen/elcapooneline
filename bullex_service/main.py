@@ -617,7 +617,8 @@ def connect_session(payload: ConnectRequest, x_user_id: str | None = Header(defa
     connected = False
     active_mode = None
     if not session.requires_2fa:
-        active_mode = session_manager.run(user_id, lambda s: s.client.get_balance_mode())
+        with session_manager._session_context(session):
+            active_mode = session.client.get_balance_mode()
         connected = True
 
     return build_success(

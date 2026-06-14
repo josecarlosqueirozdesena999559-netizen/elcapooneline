@@ -1878,11 +1878,63 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(synced.connection_failure_count, 0)
         self.assertEqual(synced.connection_status_source, "bullex_service")
         self.assertIsNotNone(synced.connection_checked_at)
+        body = json.loads(response.body)["data"]
+        self.assertIn("robot", body)
+        self.assertTrue(body["robot"]["connected"])
+        self.assertEqual(body["robot"]["active_mode"], "PRACTICE")
         persist.assert_called_once_with(user_id)
         worker.assert_called_once_with(user_id)
         output = "\n".join(logs.output)
         self.assertIn("[BULLEX_CONNECTED]", output)
         self.assertIn("[ROBOT_CONNECTION_SYNCED]", output)
+
+    async def test_robot_state_uses_fresh_connection_without_waiting_bullex_poll(self) -> None:
+        user_id = "user-fresh-connection-state"
+        state = main.auto_trader.start(user_id)
+        state = main.auto_trader.sync_connection(
+            user_id,
+            connected=True,
+            active_mode="PRACTICE",
+            source="bullex_service",
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", new=AsyncMock()) as service_call,
+            patch.object(main, "persist_robot"),
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(data["connected"])
+        self.assertEqual(data["active_mode"], "PRACTICE")
+        self.assertEqual(data["connection_status_source"], "bullex_service")
+        service_call.assert_not_awaited()
+
+    async def test_robot_start_syncs_disconnected_state_before_starting(self) -> None:
+        user_id = "user-start-syncs-connection"
+        state = main.auto_trader.get(user_id)
+        state.status = STATUS_ACCOUNT_DISCONNECTED
+        state.connected = False
+        state.connection_failure_count = 2
+        payload = main.build_success({"connected": True, "active_mode": "PRACTICE"})
+
+        with (
+            patch.object(main, "call_bullex_service", new=AsyncMock(return_value=(200, payload))) as service_call,
+            patch.object(main, "sync_user_store_from_payload"),
+            patch.object(main, "persist_robot"),
+            patch.object(main, "ensure_robot_worker") as ensure_worker,
+        ):
+            response = await main.robot_start({"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(data["connected"])
+        self.assertEqual(data["connection_failure_count"], 0)
+        self.assertEqual(data["connection_status_source"], "bullex_service")
+        self.assertEqual(data["status"], STATUS_WAITING_NEXT_CYCLE)
+        service_call.assert_awaited_once_with("GET", "/sessions/status", user_id)
+        ensure_worker.assert_called_once_with(user_id)
 
     async def test_robot_sync_connection_endpoint_returns_connection_fields(self) -> None:
         user_id = "user-sync-connection"
