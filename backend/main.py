@@ -1185,6 +1185,7 @@ async def execute_robot_cycle(
                 "expiration_source": expiration_source,
                 "server_time_at_send": entry_window.get("server_time"),
                 "server_timestamp_at_send": entry_window.get("server_timestamp"),
+                "cycle_id": state.cycle_id,
             }
             trade["timestamp"] = trade["sent_at"]
             auto_trader.clear_pending_signal(user_id)
@@ -1618,6 +1619,13 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     state = auto_trader.start(user_id)
     persist_robot(user_id)
     ensure_robot_worker(user_id)
+    logger.info(
+        "[ROBOT_START_NEW_CYCLE] user_id=%s cycle_id=%s current_cycle_started_at=%s next_cycle_at=%s",
+        user_id,
+        state.cycle_id,
+        state.current_cycle_started_at,
+        state.next_cycle_at,
+    )
     logger.info(
         "[ROBOT_START_DELAYED] user_id=%s next_cycle_at=%s cycle_minutes=%s",
         user_id,

@@ -58,8 +58,29 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertIsNone(state.pending_signal)
         self.assertIsNone(state.last_signal)
         self.assertIsNone(state.rejection_reason)
+        self.assertIsNotNone(state.cycle_id)
+        self.assertIsNotNone(payload["current_cycle_started_at"])
         self.assertGreaterEqual(payload["seconds_until_next_cycle"], 599)
         self.assertLessEqual(payload["seconds_until_next_cycle"], 600)
+
+    def test_start_never_reuses_previous_cycle(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-new-cycle")
+        first_cycle_id = state.cycle_id
+        state.pending_signal = {"symbol": "EURUSD-OTC"}
+        state.last_signal = {"symbol": "EURUSD-OTC"}
+        state.rejection_reason = "OLD_REASON"
+        state.current_cycle_started_at = utc_now() - timedelta(minutes=30)
+        state.next_cycle_at = utc_now() - timedelta(minutes=20)
+
+        restarted = trader.start("user-new-cycle")
+
+        self.assertIsNotNone(restarted.cycle_id)
+        self.assertNotEqual(restarted.cycle_id, first_cycle_id)
+        self.assertIsNone(restarted.pending_signal)
+        self.assertIsNone(restarted.last_signal)
+        self.assertIsNone(restarted.rejection_reason)
+        self.assertGreater(restarted.next_cycle_at, utc_now() + timedelta(minutes=9))
 
     def test_entry_windows_match_each_timeframe(self) -> None:
         cases = {
@@ -341,6 +362,8 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(payload["seconds_until_next_cycle"], 599)
         self.assertLessEqual(payload["seconds_until_next_cycle"], 600)
         self.assertIn("[ROBOT_START_DELAYED]", "\n".join(logs.output))
+        self.assertIn("[ROBOT_START_NEW_CYCLE]", "\n".join(logs.output))
+        self.assertIsNotNone(payload["cycle_id"])
 
         with (
             patch.object(main, "call_bullex_service", new=AsyncMock()) as service_call,

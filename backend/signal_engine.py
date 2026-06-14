@@ -115,6 +115,8 @@ def _build_signal(
         "signal": signal,
         "confidence": max(0, min(100, int(round(confidence)))),
         "reason": reason,
+        "signal_explanation": reason,
+        "narrator_text": reason,
         "timeframe": timeframe,
         "last_price": last_price,
         "trend": trend,
@@ -344,6 +346,12 @@ def _apply_quality_filters(
             "quality_reason": "OK" if trade_allowed else "Sinal bloqueado por baixa qualidade",
         }
     )
+    if trade_allowed:
+        signal["signal_explanation"] = signal.get("reason") or "Sinal aprovado pelos filtros de qualidade."
+    else:
+        filters = ", ".join(blocked) if blocked else "baixa qualidade"
+        signal["signal_explanation"] = f"Sinal bloqueado por baixa qualidade: {filters}."
+    signal["narrator_text"] = signal["signal_explanation"]
     return signal
 
 

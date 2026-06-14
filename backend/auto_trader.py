@@ -1,5 +1,6 @@
 import asyncio
 import math
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -82,6 +83,7 @@ class RobotState:
     wins: int = 0
     losses: int = 0
     profit: float = 0.0
+    cycle_id: str | None = None
     current_cycle_started_at: datetime | None = None
     next_cycle_at: datetime | None = None
     last_entry_at: datetime | None = None
@@ -169,6 +171,10 @@ class AutoTrader:
         cycle_base = base or self._next_cycle_base(state) or utc_now()
         state.next_cycle_at = cycle_base + timedelta(minutes=state.cycle_minutes)
 
+    @staticmethod
+    def _new_cycle_id() -> str:
+        return uuid.uuid4().hex
+
     def restore(
         self,
         user_id: str,
@@ -239,6 +245,7 @@ class AutoTrader:
         state.status = STATUS_WAITING_NEXT_CYCLE
         state.rejection_reason = None
         state.last_rejection_reason = None
+        state.rejected_at = None
         state.pending_signal = None
         state.last_signal = None
         state.operation_in_progress = False
@@ -246,6 +253,7 @@ class AutoTrader:
         state.blocked_filters = []
         state.approved_filters = []
         state.quality_score = 0
+        state.cycle_id = self._new_cycle_id()
         state.current_cycle_started_at = now
         state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
         return state
@@ -274,6 +282,7 @@ class AutoTrader:
             return False, state
 
         state.current_cycle_started_at = now
+        state.cycle_id = self._new_cycle_id()
         state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
         state.status = STATUS_ANALYZING
         state.rejection_reason = None
@@ -330,6 +339,7 @@ class AutoTrader:
             "blocked_filters": list(signal.get("blocked_filters") or []),
             "approved_filters": list(signal.get("approved_filters") or []),
             "strategy_mode": signal.get("strategy_mode", state.strategy_mode),
+            "cycle_id": state.cycle_id,
             "created_at": utc_now().isoformat(),
         }
         state.last_signal = dict(pending_signal)

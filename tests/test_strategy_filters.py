@@ -29,6 +29,8 @@ class StrategyFilterTests(unittest.TestCase):
 
         self.assertFalse(signal["trade_allowed"])
         self.assertIn("SIDEWAYS_FILTER", signal["blocked_filters"])
+        self.assertIn("Sinal bloqueado", signal["signal_explanation"])
+        self.assertEqual(signal["narrator_text"], signal["signal_explanation"])
 
     def test_neutral_rsi_is_blocked(self) -> None:
         signal = {
