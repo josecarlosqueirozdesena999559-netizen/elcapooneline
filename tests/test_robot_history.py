@@ -116,7 +116,8 @@ class RobotHistoryEndpointTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(main.robot_persistence.load_trade_history(user_id, 30), [])
-        await main.finish_monitored_trade(user_id, "finished-1", "WIN", 1.8)
+        with self.assertLogs("backend-gateway", level="INFO") as logs:
+            await main.finish_monitored_trade(user_id, "finished-1", "WIN", 1.8)
         response = await main.robot_history(30, {"user_id": user_id})
         payload = json.loads(response.body)
 
@@ -127,6 +128,12 @@ class RobotHistoryEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["result"], "WIN")
         self.assertEqual(item["profit"], 1.8)
         self.assertIsNotNone(item["finished_at"])
+        self.assertFalse(state.operation_in_progress)
+        self.assertEqual(state.status, "WAITING_NEXT_CYCLE")
+        self.assertGreaterEqual(state.to_dict()["seconds_until_next_cycle"], 599)
+        output = "\n".join(logs.output)
+        self.assertIn("[RESULT_RECEIVED]", output)
+        self.assertIn("[NEXT_CYCLE_SCHEDULED]", output)
 
     async def test_real_finished_trade_is_saved_with_real_account_mode(self) -> None:
         user_id = "user-real-finished"

@@ -65,6 +65,15 @@ class AutoTraderStateTests(unittest.TestCase):
     def test_sending_order_never_falls_back_to_analyzing(self) -> None:
         trader = AutoTrader()
         trader.start("user-order-transition")
+        trader.set_pending_signal(
+            "user-order-transition",
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "confidence": 92,
+                "payout": 90,
+            },
+        )
 
         sending = trader.start_sending_order("user-order-transition")
         sending_status = sending.status
@@ -609,7 +618,9 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(logs.output)
         self.assertEqual(status_code, 200)
         self.assertEqual(data["status"], "WAITING_ENTRY_WINDOW")
-        self.assertEqual(data["last_analysis_result"], "SIGNAL_APPROVED")
+        self.assertEqual(data["last_analysis_result"], "BEST_CANDIDATE_SELECTED")
+        self.assertEqual(data["analysis_result"], "BEST_CANDIDATE_SELECTED")
+        self.assertIsNotNone(data["analysis_started_at"])
         self.assertIsNotNone(data["last_analysis_at"])
         self.assertEqual(data["pending_signal"]["symbol"], "EURUSD-OTC")
         self.assertEqual(data["pending_signal"]["signal"], "CALL")
@@ -664,7 +675,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(running["last_analysis_result"], "RUNNING")
         self.assertEqual(
             running["analysis_message"],
-            "Analisando melhores ativos do mercado...",
+            "Analisando mercado...",
         )
         self.assertEqual(finished_payload["data"]["status"], "SIGNAL_REJECTED")
         self.assertEqual(
@@ -679,6 +690,68 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             finished_payload["data"]["seconds_until_next_cycle"],
             300,
         )
+
+    async def test_pending_signal_blocks_new_analysis(self) -> None:
+        user_id = "user-pending-blocks-analysis"
+        main.auto_trader.start(user_id)
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "confidence": 92,
+                "payout": 90,
+            },
+        )
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {
+                        "connected": True,
+                        "active_mode": "PRACTICE",
+                        "server_time": 20.0,
+                    }
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", new=AsyncMock()) as scan,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["data"]["status"], "WAITING_ENTRY_WINDOW")
+        self.assertIsNotNone(payload["data"]["pending_signal"])
+        scan.assert_not_awaited()
+
+    async def test_pending_result_blocks_new_analysis(self) -> None:
+        user_id = "user-result-blocks-analysis"
+        state = main.auto_trader.start(user_id)
+        main.auto_trader.record_trade(
+            user_id,
+            {
+                "order_id": "pending-result-1",
+                "active": "EURUSD-OTC",
+                "direction": "CALL",
+                "amount": 2,
+                "result": "PENDING_RESULT",
+            },
+        )
+        state.next_cycle_at = utc_now() - timedelta(seconds=1)
+
+        with (
+            patch.object(main, "call_bullex_service", new=AsyncMock()) as bullex,
+            patch.object(main, "scan_local_signals", new=AsyncMock()) as scan,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["data"]["status"], "PENDING_RESULT")
+        self.assertTrue(payload["data"]["operation_in_progress"])
+        bullex.assert_not_awaited()
+        scan.assert_not_awaited()
 
     async def test_configured_five_minute_cycle_is_used_on_start(self) -> None:
         user_id = "user-config-five"
@@ -794,10 +867,21 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         scan_payload = main.build_success(
             [{"symbol": "EURUSD-OTC", "signal": "CALL", "confidence": 92, "strength": 80}]
         )
+        sending_from_statuses = []
+        original_start_sending = main.auto_trader.start_sending_order
+
+        def track_start_sending(call_user_id):
+            sending_from_statuses.append(main.auto_trader.get(call_user_id).status)
+            return original_start_sending(call_user_id)
 
         with (
             patch.object(main, "call_bullex_service", side_effect=fake_bullex),
             patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
+            patch.object(
+                main.auto_trader,
+                "start_sending_order",
+                side_effect=track_start_sending,
+            ),
             patch.object(main.trade_result_monitor, "start", return_value=True),
         ):
             task = asyncio.create_task(main.execute_robot_cycle(user_id))
@@ -811,6 +895,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_code, 200)
         self.assertEqual(payload["data"]["status"], STATUS_PENDING_RESULT)
         self.assertTrue(payload["data"]["operation_in_progress"])
+        self.assertEqual(sending_from_statuses, ["WAITING_ENTRY_WINDOW"])
 
     async def test_successful_order_goes_to_pending_result_with_last_trade_contract(self) -> None:
         user_id = "user-order-success"
@@ -1397,8 +1482,11 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls.count("/orders/buy-demo"), 1)
         output = "\n".join(logs.output)
         self.assertIn("[PENDING_SIGNAL_SET]", output)
+        self.assertIn("[WAITING_ENTRY_WINDOW]", output)
         self.assertIn("[ENTRY_WINDOW_WAIT]", output)
         self.assertIn("[ENTRY_WINDOW_OPEN]", output)
+        self.assertIn("[SENDING_ORDER]", output)
+        self.assertIn("[PENDING_RESULT]", output)
         self.assertIn("[TRADE_SENT_AT]", output)
         self.assertIn("[PENDING_SIGNAL_CLEARED]", output)
 

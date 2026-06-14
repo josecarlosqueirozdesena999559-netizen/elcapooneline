@@ -981,6 +981,11 @@ async def finish_monitored_trade(user_id: str, order_id: str, result: str, profi
                     user_id,
                     order_id,
                 )
+            logger.info(
+                "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                user_id,
+                state.next_cycle_at,
+            )
         persist_robot(user_id)
 
 
@@ -1321,6 +1326,12 @@ async def execute_robot_cycle(
                     selected.get("payout"),
                     selected.get("timeframe"),
                 )
+                logger.info(
+                    "[WAITING_ENTRY_WINDOW] user_id=%s symbol=%s cycle_id=%s",
+                    user_id,
+                    selected.get("symbol"),
+                    state.cycle_id,
+                )
 
                 timing_status, timing_payload, entry_window = await refresh_entry_window(user_id, state)
                 if entry_window is None:
@@ -1408,6 +1419,12 @@ async def execute_robot_cycle(
                 order_body["confirm_real"] = True
 
             state = auto_trader.start_sending_order(user_id)
+            logger.info(
+                "[SENDING_ORDER] user_id=%s symbol=%s direction=%s",
+                user_id,
+                symbol,
+                direction,
+            )
             logger.info(
                 "[ORDER_SEND_START] user_id=%s path=%s active=%s direction=%s amount=%s expiration=%s",
                 user_id,
@@ -1537,6 +1554,11 @@ async def execute_robot_cycle(
                 user_id,
                 order_id,
                 state.status,
+            )
+            logger.info(
+                "[PENDING_RESULT] user_id=%s order_id=%s",
+                user_id,
+                order_id,
             )
             logger.info(
                 "[TRADE_SENT_AT] user_id=%s server_time=%s timeframe=%s "

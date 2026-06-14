@@ -28,7 +28,7 @@ STATUS_ACCOUNT_DISCONNECTED = "ACCOUNT_DISCONNECTED"
 
 TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
 RESULT_WAITING_MESSAGE = "Aguardando resultado..."
-ANALYSIS_MESSAGE = "Analisando melhores ativos do mercado..."
+ANALYSIS_MESSAGE = "Analisando mercado..."
 NO_MINIMUM_SCORE_MESSAGE = "Nenhum ativo atingiu score mínimo."
 
 
@@ -99,6 +99,8 @@ class RobotState:
     last_entry_at: datetime | None = None
     last_analysis_at: datetime | None = None
     last_analysis_result: str | None = None
+    analysis_started_at: datetime | None = None
+    analysis_result: str | None = None
     analysis_message: str | None = None
     rejected_at: datetime | None = None
     operation_in_progress: bool = False
@@ -130,7 +132,14 @@ class RobotState:
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        for key in ("current_cycle_started_at", "next_cycle_at", "last_entry_at", "last_analysis_at", "rejected_at"):
+        for key in (
+            "current_cycle_started_at",
+            "next_cycle_at",
+            "last_entry_at",
+            "last_analysis_at",
+            "analysis_started_at",
+            "rejected_at",
+        ):
             value = data[key]
             data[key] = value.isoformat() if value is not None else None
         now = utc_now()
@@ -154,6 +163,8 @@ class RobotState:
             data["status"] = STATUS_ANALYZING
             data["last_analysis_at"] = now.isoformat()
             data["last_analysis_result"] = "RUNNING"
+            data["analysis_started_at"] = now.isoformat()
+            data["analysis_result"] = "RUNNING"
             data["analysis_message"] = ANALYSIS_MESSAGE
         configured_expiration = TIMEFRAME_SECONDS[self.timeframe]
         data["expiration_seconds"] = configured_expiration
@@ -163,6 +174,7 @@ class RobotState:
         data["show_expiration_countdown"] = False
         if self.status == STATUS_ANALYZING:
             data["last_analysis_result"] = "RUNNING"
+            data["analysis_result"] = "RUNNING"
             data["analysis_message"] = ANALYSIS_MESSAGE
         if self.last_trade is not None:
             trade = dict(self.last_trade)
@@ -251,7 +263,14 @@ class AutoTrader:
         source: StateSource = "memory",
     ) -> RobotState:
         state = RobotState()
-        datetime_fields = {"current_cycle_started_at", "next_cycle_at", "last_entry_at", "last_analysis_at", "rejected_at"}
+        datetime_fields = {
+            "current_cycle_started_at",
+            "next_cycle_at",
+            "last_entry_at",
+            "last_analysis_at",
+            "analysis_started_at",
+            "rejected_at",
+        }
         for key, value in payload.items():
             if not hasattr(state, key) or key in {"accuracy", "seconds_until_next_cycle"}:
                 continue
@@ -321,6 +340,10 @@ class AutoTrader:
         state.rejected_at = None
         state.pending_signal = None
         state.last_signal = None
+        state.last_analysis_at = None
+        state.last_analysis_result = None
+        state.analysis_started_at = None
+        state.analysis_result = None
         state.operation_in_progress = False
         state.entry_window_open = False
         state.blocked_filters = []
@@ -352,7 +375,13 @@ class AutoTrader:
         if not state.enabled:
             state.status = STATUS_STOPPED
             return False, state
-        if state.operation_in_progress:
+        last_trade_result = str((state.last_trade or {}).get("result") or "").upper()
+        result_waiting = (
+            state.status == STATUS_PENDING_RESULT
+            and last_trade_result not in {"WIN", "LOSS", "TIMEOUT"}
+        )
+        if state.operation_in_progress or result_waiting:
+            state.operation_in_progress = True
             state.status = STATUS_PENDING_RESULT
             return False, state
         if state.pending_signal:
@@ -369,6 +398,8 @@ class AutoTrader:
         state.rejection_reason = None
         state.last_analysis_at = now
         state.last_analysis_result = "RUNNING"
+        state.analysis_started_at = now
+        state.analysis_result = "RUNNING"
         state.analysis_message = ANALYSIS_MESSAGE
         state.candidates_count = 0
         state.candidates = []
@@ -415,6 +446,7 @@ class AutoTrader:
         state.next_cycle_at = state.rejected_at + timedelta(minutes=state.cycle_minutes)
         state.last_analysis_at = state.rejected_at
         state.last_analysis_result = reason
+        state.analysis_result = reason
         return state
 
     def reject_no_valid_signal(
@@ -441,6 +473,7 @@ class AutoTrader:
         state.rejection_reason = reason
         state.last_rejection_reason = reason
         state.last_analysis_result = reason
+        state.analysis_result = reason
         return state
 
     def set_pending_signal(self, user_id: str, signal: dict[str, Any]) -> RobotState:
@@ -472,7 +505,8 @@ class AutoTrader:
         state.rejection_reason = STATUS_WAITING_ENTRY_WINDOW
         state.last_rejection_reason = None
         state.last_analysis_at = utc_now()
-        state.last_analysis_result = "SIGNAL_APPROVED"
+        state.last_analysis_result = "BEST_CANDIDATE_SELECTED"
+        state.analysis_result = "BEST_CANDIDATE_SELECTED"
         state.analysis_message = None
         state.blocked_filters = list(pending_signal["blocked_filters"])
         state.approved_filters = list(pending_signal["approved_filters"])
@@ -543,6 +577,8 @@ class AutoTrader:
 
     def start_sending_order(self, user_id: str) -> RobotState:
         state = self.get(user_id)
+        if state.status != STATUS_WAITING_ENTRY_WINDOW or not state.pending_signal:
+            raise RuntimeError("INVALID_ORDER_STATE_TRANSITION")
         state.status = STATUS_SENDING_ORDER
         state.rejection_reason = None
         state.rejected_at = None
@@ -620,14 +656,6 @@ class AutoTrader:
         state.buy_target_second = int(window["buy_target_second"])
         state.expiration_seconds = int(window["expiration_seconds"])
         if (
-            state.entry_window_open
-            and state.enabled
-            and not state.operation_in_progress
-            and state.pending_signal
-        ):
-            state.status = STATUS_SENDING_ORDER
-            state.rejection_reason = None
-        elif (
             not state.entry_window_open
             and state.enabled
             and not state.operation_in_progress
