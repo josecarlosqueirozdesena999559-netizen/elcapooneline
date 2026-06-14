@@ -549,12 +549,18 @@ def extract_server_timestamp(payload: dict[str, Any]) -> float | None:
     return timestamp if timestamp > 0 else None
 
 
-def get_entry_window(timeframe: str, server_timestamp: float | None = None) -> dict[str, Any]:
+def get_entry_window(
+    timeframe: str,
+    server_timestamp: float | None = None,
+    *,
+    server_time_source: str = "bullex",
+) -> dict[str, Any]:
     normalized = str(timeframe).strip().upper()
     if normalized not in TIMEFRAME_SECONDS:
         raise ValueError("INVALID_TIMEFRAME")
     if server_timestamp is None:
-        raise ValueError("SERVER_TIME_UNAVAILABLE")
+        server_timestamp = utc_now().timestamp()
+        server_time_source = "vps_fallback"
 
     expiration_seconds = TIMEFRAME_SECONDS[normalized]
     window_start, window_end = ENTRY_WINDOWS[normalized]
@@ -582,6 +588,7 @@ def get_entry_window(timeframe: str, server_timestamp: float | None = None) -> d
     return {
         "server_timestamp": float(server_timestamp),
         "server_time": datetime.fromtimestamp(server_timestamp, timezone.utc).isoformat(),
+        "server_time_source": server_time_source,
         "timeframe": normalized,
         "analysis_window_open": analysis_window_open,
         "seconds_until_analysis_window": seconds_until_analysis_window,
@@ -653,16 +660,36 @@ async def refresh_entry_window(user_id: str, state: Any) -> tuple[int, dict[str,
     status_code, payload = await call_bullex_service("GET", "/sessions/status", user_id)
     timestamp = extract_server_timestamp(payload)
     if timestamp is None:
-        return status_code if status_code >= 400 else 502, payload, None
-    window = get_entry_window(state.timeframe, timestamp)
+        timestamp = utc_now().timestamp()
+        window = get_entry_window(
+            state.timeframe,
+            timestamp,
+            server_time_source="vps_fallback",
+        )
+        logger.warning(
+            "[SERVER_TIME_FALLBACK] user_id=%s status_code=%s current_candle_seconds=%s",
+            user_id,
+            status_code,
+            window["current_candle_seconds"],
+        )
+    else:
+        previous_source = getattr(state, "server_time_source", None)
+        window = get_entry_window(
+            state.timeframe,
+            timestamp,
+            server_time_source="bullex",
+        )
+        if previous_source == "vps_fallback" and getattr(state, "server_time", None):
+            logger.info("[SERVER_TIME_BULLEX_RESTORED] user_id=%s", user_id)
     auto_trader.update_entry_window(user_id, window)
     logger.info(
         "[ENTRY_WINDOW_CALCULATED] user_id=%s timeframe=%s current_candle_seconds=%s "
-        "analysis_window_start=%s analysis_window_end=%s analysis_open=%s "
+        "server_time_source=%s analysis_window_start=%s analysis_window_end=%s analysis_open=%s "
         "window_start=%s window_end=%s buy_target_second=%s open=%s",
         user_id,
         state.timeframe,
         window["current_candle_seconds"],
+        window["server_time_source"],
         window["analysis_window_start_second"],
         window["analysis_window_end_second"],
         window["analysis_window_open"],
@@ -939,6 +966,39 @@ def recover_running_analysis_if_needed(user_id: str, window: dict[str, Any]) -> 
     logger.info("[ANALYSIS_STATE_RECOVERED] user_id=%s reason=%s", user_id, reason)
     persist_robot(user_id)
     return reason, state
+
+
+def recover_analysis_error_to_window(
+    user_id: str,
+    error: Any,
+    window: dict[str, Any] | None = None,
+) -> Any:
+    state = auto_trader.get(user_id)
+    if window is None:
+        window = get_entry_window(
+            state.timeframe,
+            utc_now().timestamp(),
+            server_time_source="vps_fallback",
+        )
+        logger.warning(
+            "[SERVER_TIME_FALLBACK] user_id=%s reason=ANALYSIS_ERROR current_candle_seconds=%s",
+            user_id,
+            window["current_candle_seconds"],
+        )
+    friendly_error = readable_order_error(error)
+    state = auto_trader.wait_analysis_window(
+        user_id,
+        window,
+        clear_pending=True,
+        analysis_result="ANALYSIS_ERROR",
+        rejection_reason="ANALYSIS_ERROR",
+        last_rejection_reason=friendly_error,
+        force_next=bool(window["analysis_window_open"]),
+    )
+    state.last_order_error = friendly_error
+    logger.error("[ANALYSIS_ERROR] user_id=%s error=%s", user_id, friendly_error)
+    logger.info("[ANALYSIS_ERROR_RECOVERED] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
+    return state
 
 
 def readable_order_error(error: Any) -> str:
@@ -1273,10 +1333,7 @@ async def execute_robot_cycle(
                 )
                 return 200, build_robot_payload(state)
             if entry_window is None:
-                state = auto_trader.reject_analysis_error(user_id, "SERVER_TIME_UNAVAILABLE")
-                logger.error("[ROBOT ERROR] user_id=%s error=SERVER_TIME_UNAVAILABLE", user_id)
-                logger.error("[ANALYSIS_ERROR] user_id=%s error=SERVER_TIME_UNAVAILABLE", user_id)
-                logger.info("[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
+                state = recover_analysis_error_to_window(user_id, "SERVER_TIME_UNAVAILABLE")
                 return status_code, build_robot_payload(state)
             recovered_reason, state = recover_running_analysis_if_needed(user_id, entry_window)
             if recovered_reason is not None:
@@ -1368,13 +1425,7 @@ async def execute_robot_cycle(
                 )
                 if not scan_payload.get("ok"):
                     error = str(scan_payload.get("error") or "SIGNAL_SCAN_FAILED")
-                    state = auto_trader.reject_analysis_error(
-                        user_id,
-                        error,
-                    )
-                    logger.error("[ROBOT ERROR] user_id=%s error=%s", user_id, state.rejection_reason)
-                    logger.error("[ANALYSIS_ERROR] user_id=%s error=%s", user_id, error)
-                    logger.info("[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
+                    state = recover_analysis_error_to_window(user_id, error, entry_window)
                     return scan_status, build_robot_payload(state)
 
                 signals = [item for item in scan_payload.get("data", []) if isinstance(item, dict)]
@@ -1634,10 +1685,7 @@ async def execute_robot_cycle(
                     )
                     return 200, build_robot_payload(state)
                 if entry_window is None:
-                    state = auto_trader.reject_analysis_error(user_id, "SERVER_TIME_UNAVAILABLE")
-                    logger.error("[ROBOT ERROR] user_id=%s error=SERVER_TIME_UNAVAILABLE", user_id)
-                    logger.error("[ANALYSIS_ERROR] user_id=%s error=SERVER_TIME_UNAVAILABLE", user_id)
-                    logger.info("[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
+                    state = recover_analysis_error_to_window(user_id, "SERVER_TIME_UNAVAILABLE")
                     return timing_status, build_robot_payload(state)
                 if not entry_window["entry_window_open"]:
                     if entry_window["missed_entry_window"]:
@@ -1877,10 +1925,12 @@ async def execute_robot_cycle(
             return 200, build_robot_payload(state)
         except Exception as exc:
             error = str(exc).strip() or type(exc).__name__
-            state = auto_trader.reject_analysis_error(user_id, error)
             logger.exception("[ROBOT ERROR] user_id=%s error=%s", user_id, exc)
-            logger.error("[ANALYSIS_ERROR] user_id=%s error=%s", user_id, error)
-            logger.info("[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
+            state = recover_analysis_error_to_window(
+                user_id,
+                error,
+                locals().get("entry_window") if isinstance(locals().get("entry_window"), dict) else None,
+            )
             return 500, build_robot_payload(state)
         finally:
             persist_robot(user_id)
@@ -2106,13 +2156,31 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
             ),
         )
     server_timestamp = extract_server_timestamp(session_payload)
-    if server_timestamp is not None:
-        window = get_entry_window(state.timeframe, server_timestamp)
-        auto_trader.update_entry_window(
-            user_id,
-            window,
+    if server_timestamp is None:
+        window = get_entry_window(
+            state.timeframe,
+            utc_now().timestamp(),
+            server_time_source="vps_fallback",
         )
-        _, state = recover_running_analysis_if_needed(user_id, window)
+        logger.warning(
+            "[SERVER_TIME_FALLBACK] user_id=%s source=robot_state current_candle_seconds=%s",
+            user_id,
+            window["current_candle_seconds"],
+        )
+    else:
+        previous_source = getattr(state, "server_time_source", None)
+        window = get_entry_window(
+            state.timeframe,
+            server_timestamp,
+            server_time_source="bullex",
+        )
+        if previous_source == "vps_fallback" and getattr(state, "server_time", None):
+            logger.info("[SERVER_TIME_BULLEX_RESTORED] user_id=%s", user_id)
+    auto_trader.update_entry_window(
+        user_id,
+        window,
+    )
+    _, state = recover_running_analysis_if_needed(user_id, window)
     block_reason = real_block_reason(state, connected=connected, active_mode=active_mode)
     return json_response(
         200,

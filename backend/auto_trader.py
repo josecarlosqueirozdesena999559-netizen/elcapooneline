@@ -117,6 +117,7 @@ class RobotState:
     status: str = STATUS_STOPPED
     rejection_reason: str | None = None
     server_time: str | None = None
+    server_time_source: str = "vps_fallback"
     connected: bool = False
     active_mode: str | None = None
     connection_checked_at: datetime | None = None
@@ -866,6 +867,7 @@ class AutoTrader:
     def update_entry_window(self, user_id: str, window: dict[str, Any]) -> RobotState:
         state = self.get(user_id)
         state.server_time = window["server_time"]
+        state.server_time_source = str(window.get("server_time_source") or "bullex")
         waiting_next_cycle = (
             state.status == STATUS_WAITING_NEXT_CYCLE
             and not state.pending_signal
