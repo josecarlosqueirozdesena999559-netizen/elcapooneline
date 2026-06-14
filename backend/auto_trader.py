@@ -242,14 +242,25 @@ class RobotState:
             symbol = str(voice_signal.get("symbol") or "")
             direction = str(voice_signal.get("direction") or voice_signal.get("signal") or "")
             score = int(voice_signal.get("strategy_score") or voice_signal.get("score") or 0)
-            data["voice_message"] = f"Entrada liberada. Ativo {symbol}. Direção {direction}. Score {score}."
+            reason = str(voice_signal.get("strategy_reason") or voice_signal.get("reason") or "").strip()
+            reason_text = f" Motivo: {reason}." if reason else ""
+            data["voice_message"] = (
+                f"Entrada liberada agora. Ativo {symbol}. Direção {direction}. Score {score}."
+                f"{reason_text}"
+            )
             data["voice_event_id"] = f"{self.cycle_id or ''}:{symbol}:{direction}:{score}:sending"
-        elif self.status == STATUS_WAITING_NEXT_CYCLE and self.best_candidate:
-            symbol = str(self.best_candidate.get("symbol") or "")
-            direction = str(self.best_candidate.get("direction") or self.best_candidate.get("signal") or "")
-            score = int(self.best_candidate.get("strategy_score") or self.best_candidate.get("score") or 0)
-            data["voice_message"] = f"Melhor entrada encontrada. Ativo {symbol}. Direção {direction}. Score {score}."
-            data["voice_event_id"] = f"{self.cycle_id or ''}:{symbol}:{direction}:{score}:candidate"
+        if self.status == STATUS_WAITING_NEXT_CYCLE and not self.operation_in_progress:
+            data["best_candidate"] = None
+            data["candidates"] = []
+            data["candidates_count"] = 0
+            data["strategy_score"] = 0
+            data["quality_score"] = 0
+            data["strategy_name"] = None
+            data["strategy_reason"] = "Analisando mercado em silêncio. A entrada será revelada quando o contador zerar."
+            data["used_strategies"] = []
+            data["last_signal"] = None
+            data["pending_signal"] = None
+            data["analysis_message"] = "Analisando mercado em silêncio..."
         for deprecated_key in (
             "analysis_window_open",
             "seconds_until_analysis_window",
