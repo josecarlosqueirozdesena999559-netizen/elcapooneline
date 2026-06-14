@@ -192,6 +192,7 @@ class RobotState:
             self.status == STATUS_WAITING_NEXT_CYCLE
             and running_analysis
             and data["seconds_until_next_cycle"] <= 0
+            and self.analysis_window_open
             and not self.pending_signal
             and not self.operation_in_progress
         ):
@@ -201,6 +202,7 @@ class RobotState:
             and self.status == STATUS_WAITING_NEXT_CYCLE
             and self.next_cycle_at is not None
             and now >= self.next_cycle_at
+            and self.analysis_window_open
             and not self.pending_signal
             and not self.operation_in_progress
         ):
@@ -219,12 +221,17 @@ class RobotState:
         data["operation_message"] = None
         data["expiration_display"] = None
         data["show_expiration_countdown"] = False
-        if self.status == STATUS_ANALYZING:
+        if self.status == STATUS_ANALYZING and not self.analysis_window_open:
+            data["status"] = STATUS_WAITING_ANALYSIS_WINDOW
+            data["analysis_result"] = "WAITING_NEXT_ANALYSIS_WINDOW"
+            data["last_analysis_result"] = "WAITING_NEXT_ANALYSIS_WINDOW"
+            data["analysis_message"] = None
+        elif self.status == STATUS_ANALYZING:
             data["last_analysis_result"] = "RUNNING"
             data["analysis_result"] = "RUNNING"
             data["analysis_message"] = ANALYSIS_MESSAGE
         display_countdown_label = None
-        display_countdown_seconds = None
+        display_countdown_seconds = 0
         if data["status"] == STATUS_WAITING_ANALYSIS_WINDOW:
             display_countdown_label = "Análise em"
             display_countdown_seconds = max(0, int(data["seconds_until_analysis_window"]))
@@ -477,13 +484,12 @@ class AutoTrader:
         state.current_cycle_started_at = now
         state.cycle_id = self._new_cycle_id()
         state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
-        state.status = STATUS_ANALYZING
-        state.rejection_reason = None
-        state.last_analysis_at = now
-        state.last_analysis_result = "RUNNING"
-        state.analysis_started_at = now
-        state.analysis_result = "RUNNING"
-        state.analysis_message = ANALYSIS_MESSAGE
+        state.status = STATUS_WAITING_ANALYSIS_WINDOW
+        state.rejection_reason = "WAITING_NEXT_ANALYSIS_WINDOW"
+        state.last_analysis_result = "WAITING_NEXT_ANALYSIS_WINDOW"
+        state.analysis_started_at = None
+        state.analysis_result = "WAITING_NEXT_ANALYSIS_WINDOW"
+        state.analysis_message = None
         state.candidates_count = 0
         state.candidates = []
         state.best_candidate = None
@@ -491,6 +497,26 @@ class AutoTrader:
         state.order_attempts = 0
         state.fallback_candidate_used = False
         return True, state
+
+    def start_analysis(self, user_id: str) -> RobotState:
+        state = self.get(user_id)
+        if (
+            not state.enabled
+            or not state.connected
+            or not state.analysis_window_open
+            or state.operation_in_progress
+            or state.pending_signal is not None
+        ):
+            return state
+        now = utc_now()
+        state.status = STATUS_ANALYZING
+        state.rejection_reason = None
+        state.last_analysis_at = now
+        state.last_analysis_result = "RUNNING"
+        state.analysis_started_at = now
+        state.analysis_result = "RUNNING"
+        state.analysis_message = ANALYSIS_MESSAGE
+        return state
 
     def reject_analysis(
         self,
@@ -952,6 +978,21 @@ class AutoTrader:
         state.entry_window_end_second = int(window["entry_window_end_second"])
         state.buy_target_second = int(window["buy_target_second"])
         state.expiration_seconds = int(window["expiration_seconds"])
+        if (
+            state.status == STATUS_ANALYZING
+            and not state.analysis_window_open
+            and state.pending_signal is None
+        ):
+            state.status = STATUS_WAITING_ANALYSIS_WINDOW
+            state.rejection_reason = "WAITING_NEXT_ANALYSIS_WINDOW"
+            state.last_rejection_reason = "WAITING_NEXT_ANALYSIS_WINDOW"
+            state.analysis_result = "WAITING_NEXT_ANALYSIS_WINDOW"
+            state.last_analysis_result = "WAITING_NEXT_ANALYSIS_WINDOW"
+            state.analysis_message = None
+            state.analysis_started_at = None
+            state.next_cycle_at = utc_now() + timedelta(
+                seconds=max(0, state.seconds_until_analysis_window)
+            )
         if (
             not state.entry_window_open
             and state.enabled

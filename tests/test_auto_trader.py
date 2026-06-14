@@ -101,12 +101,68 @@ class AutoTraderStateTests(unittest.TestCase):
 
         first_run, state = trader.prepare_cycle("user-cycle")
         self.assertTrue(first_run)
-        self.assertEqual(state.status, "ANALYZING")
+        self.assertEqual(state.status, "WAITING_ANALYSIS_WINDOW")
         second_run, waiting_state = trader.prepare_cycle("user-cycle")
 
         self.assertFalse(second_run)
         self.assertEqual(waiting_state.status, STATUS_WAITING_NEXT_CYCLE)
         self.assertGreater(waiting_state.next_cycle_at, utc_now() + timedelta(minutes=4))
+
+    def test_second_2_recovers_analyzing_to_waiting_analysis_window(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-second-2")
+        state.connected = True
+        state.status = "ANALYZING"
+        state.analysis_result = "RUNNING"
+        state.last_analysis_result = "RUNNING"
+
+        trader.update_entry_window("user-second-2", main.get_entry_window("M1", 2.0))
+        payload = state.to_dict()
+
+        self.assertEqual(payload["status"], "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(payload["analysis_result"], "WAITING_NEXT_ANALYSIS_WINDOW")
+        self.assertEqual(payload["display_countdown_label"], "Análise em")
+        self.assertEqual(payload["display_countdown_seconds"], 3)
+
+    def test_second_7_allows_analyzing(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-second-7")
+        state.connected = True
+        state.status = "WAITING_ANALYSIS_WINDOW"
+
+        trader.update_entry_window("user-second-7", main.get_entry_window("M1", 7.0))
+        trader.start_analysis("user-second-7")
+        payload = state.to_dict()
+
+        self.assertEqual(payload["status"], "ANALYZING")
+        self.assertTrue(payload["analysis_window_open"])
+        self.assertEqual(payload["display_countdown_seconds"], 0)
+
+    def test_second_21_without_pending_waits_next_analysis_window(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-second-21")
+        state.connected = True
+        state.status = "ANALYZING"
+        state.analysis_result = "RUNNING"
+        state.last_analysis_result = "RUNNING"
+
+        trader.update_entry_window("user-second-21", main.get_entry_window("M1", 21.0))
+        payload = state.to_dict()
+
+        self.assertEqual(payload["status"], "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(payload["analysis_result"], "WAITING_NEXT_ANALYSIS_WINDOW")
+        self.assertEqual(payload["display_countdown_label"], "Análise em")
+        self.assertEqual(payload["display_countdown_seconds"], 44)
+
+    def test_display_countdown_seconds_is_always_an_integer(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-countdown-integer")
+
+        for status in ("WAITING_ANALYSIS_WINDOW", "ANALYZING", "STOPPED"):
+            state.status = status
+            payload = state.to_dict()
+            self.assertIsInstance(payload["display_countdown_seconds"], int)
+            self.assertGreaterEqual(payload["display_countdown_seconds"], 0)
 
     def test_start_delays_first_cycle_for_full_cycle_minutes(self) -> None:
         trader = AutoTrader()

@@ -16,6 +16,7 @@ from backend.auto_trader import (
     AutoTrader,
     RobotConfigUpdate,
     STATUS_ACCOUNT_DISCONNECTED,
+    STATUS_ANALYZING,
     STATUS_ORDER_REJECTED,
     STATUS_PENDING_RESULT,
     STATUS_WAITING_ANALYSIS_WINDOW,
@@ -1607,6 +1608,10 @@ async def execute_robot_cycle(
                     entry_window["analysis_window_start_second"],
                     entry_window["analysis_window_end_second"],
                 )
+                state = auto_trader.start_analysis(user_id)
+                if state.status != STATUS_ANALYZING:
+                    state = auto_trader.wait_analysis_window(user_id, entry_window)
+                    return 200, build_robot_payload(state)
                 logger.info(
                     "[ANALYSIS_STARTED] user_id=%s cycle_id=%s",
                     user_id,
@@ -2495,10 +2500,25 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
         )
         if previous_source == "vps_fallback" and getattr(state, "server_time", None):
             logger.info("[SERVER_TIME_BULLEX_RESTORED] user_id=%s", user_id)
+    was_analyzing = state.status == STATUS_ANALYZING
     auto_trader.update_entry_window(
         user_id,
         window,
     )
+    state = auto_trader.get(user_id)
+    if was_analyzing and state.status == STATUS_WAITING_ANALYSIS_WINDOW:
+        logger.info(
+            "[WAITING_ANALYSIS_WINDOW] user_id=%s timeframe=%s current_candle_seconds=%s "
+            "seconds_until_analysis_window=%s",
+            user_id,
+            state.timeframe,
+            state.current_candle_seconds,
+            state.seconds_until_analysis_window,
+        )
+        logger.info(
+            "[ANALYSIS_STATE_RECOVERED] user_id=%s reason=OUTSIDE_ANALYSIS_WINDOW",
+            user_id,
+        )
     _, state = recover_running_analysis_if_needed(user_id, window)
     if (
         state.enabled

@@ -125,10 +125,10 @@ class AutoTraderResultTests(unittest.TestCase):
         self.assertEqual(waiting.status, STATUS_WAITING_NEXT_CYCLE)
         waiting.next_cycle_at = utc_now() - timedelta(seconds=1)
 
-        can_run, analyzing = trader.prepare_cycle("user-cycle-delay")
+        can_run, waiting_analysis = trader.prepare_cycle("user-cycle-delay")
 
         self.assertTrue(can_run)
-        self.assertEqual(analyzing.status, STATUS_ANALYZING)
+        self.assertEqual(waiting_analysis.status, "WAITING_ANALYSIS_WINDOW")
 
 
 class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
