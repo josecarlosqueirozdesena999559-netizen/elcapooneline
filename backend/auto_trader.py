@@ -111,6 +111,9 @@ class RobotState:
     entry_window_open: bool = False
     seconds_until_entry_window: int = 0
     current_candle_seconds: float = 0.0
+    entry_window_start_second: int = 25
+    entry_window_end_second: int = 29
+    buy_target_second: int = 25
     expiration_seconds: int = 60
     last_rejection_reason: str | None = None
     last_order_error: str | None = None
@@ -612,8 +615,19 @@ class AutoTrader:
         state.entry_window_open = bool(window["entry_window_open"]) and not waiting_next_cycle
         state.seconds_until_entry_window = int(window["seconds_until_entry_window"])
         state.current_candle_seconds = float(window["current_candle_seconds"])
+        state.entry_window_start_second = int(window["entry_window_start_second"])
+        state.entry_window_end_second = int(window["entry_window_end_second"])
+        state.buy_target_second = int(window["buy_target_second"])
         state.expiration_seconds = int(window["expiration_seconds"])
         if (
+            state.entry_window_open
+            and state.enabled
+            and not state.operation_in_progress
+            and state.pending_signal
+        ):
+            state.status = STATUS_SENDING_ORDER
+            state.rejection_reason = None
+        elif (
             not state.entry_window_open
             and state.enabled
             and not state.operation_in_progress

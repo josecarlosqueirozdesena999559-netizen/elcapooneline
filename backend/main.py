@@ -404,7 +404,12 @@ def extract_account_status(payload: dict[str, Any]) -> tuple[bool, str | None]:
 
 
 TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
-ENTRY_WINDOW_SECONDS = {"M1": 5, "M5": 10, "M15": 20, "M30": 30}
+ENTRY_WINDOWS = {
+    "M1": (25, 29),
+    "M5": (265, 269),
+    "M15": (865, 869),
+    "M30": (1765, 1769),
+}
 EXPIRATION_SAFETY_SECONDS = 1
 ORDER_EXPIRATION_FIELDS = (
     "expected_expire_at",
@@ -439,25 +444,29 @@ def get_entry_window(timeframe: str, server_timestamp: float | None = None) -> d
         raise ValueError("SERVER_TIME_UNAVAILABLE")
 
     expiration_seconds = TIMEFRAME_SECONDS[normalized]
-    window_seconds = ENTRY_WINDOW_SECONDS[normalized]
+    window_start, window_end = ENTRY_WINDOWS[normalized]
     seconds_in_candle = float(server_timestamp) % expiration_seconds
     seconds_until_close = expiration_seconds - seconds_in_candle
-    window_start = expiration_seconds - window_seconds
-    entry_window_open = seconds_in_candle >= window_start and seconds_until_close >= 1.0
+    entry_window_open = window_start <= seconds_in_candle <= window_end
+    missed_entry_window = seconds_in_candle > window_end
     if entry_window_open:
         seconds_until_entry_window = 0
     elif seconds_in_candle < window_start:
         seconds_until_entry_window = math.ceil(window_start - seconds_in_candle)
     else:
-        seconds_until_entry_window = math.ceil(seconds_until_close + window_start)
+        seconds_until_entry_window = 0
 
     return {
         "server_timestamp": float(server_timestamp),
         "server_time": datetime.fromtimestamp(server_timestamp, timezone.utc).isoformat(),
         "timeframe": normalized,
         "entry_window_open": entry_window_open,
+        "missed_entry_window": missed_entry_window,
         "seconds_until_entry_window": seconds_until_entry_window,
         "current_candle_seconds": round(seconds_in_candle, 3),
+        "entry_window_start_second": window_start,
+        "entry_window_end_second": window_end,
+        "buy_target_second": window_start,
         "seconds_until_close": round(seconds_until_close, 3),
         "expiration_seconds": expiration_seconds,
         "expiration": normalized,
@@ -521,6 +530,17 @@ async def refresh_entry_window(user_id: str, state: Any) -> tuple[int, dict[str,
         return status_code if status_code >= 400 else 502, payload, None
     window = get_entry_window(state.timeframe, timestamp)
     auto_trader.update_entry_window(user_id, window)
+    logger.info(
+        "[ENTRY_WINDOW_CALCULATED] user_id=%s timeframe=%s current_candle_seconds=%s "
+        "window_start=%s window_end=%s buy_target_second=%s open=%s",
+        user_id,
+        state.timeframe,
+        window["current_candle_seconds"],
+        window["entry_window_start_second"],
+        window["entry_window_end_second"],
+        window["buy_target_second"],
+        window["entry_window_open"],
+    )
     return status_code, payload, window
 
 
@@ -985,7 +1005,6 @@ async def execute_robot_cycle(
     async with auto_trader.lock(user_id):
         state = auto_trader.get(user_id)
         had_pending_signal = state.pending_signal is not None
-        previous_seconds_until_entry = state.seconds_until_entry_window
         if not had_pending_signal:
             can_run, state = auto_trader.prepare_cycle(user_id)
             if not can_run:
@@ -1063,37 +1082,39 @@ async def execute_robot_cycle(
                 return status_code, build_robot_payload(state)
             selected = dict(state.pending_signal) if state.pending_signal else None
             if selected is not None and not entry_window["entry_window_open"]:
-                missed_window = (
-                    entry_window["seconds_until_entry_window"]
-                    > previous_seconds_until_entry + ENTRY_WINDOW_SECONDS[state.timeframe]
-                )
-                if not missed_window:
+                if not entry_window["missed_entry_window"]:
                     logger.info(
                         "[ENTRY_WINDOW_WAIT] user_id=%s server_time=%s timeframe=%s "
-                        "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
+                        "seconds_in_candle=%s seconds_until_entry_window=%s "
+                        "window_start=%s window_end=%s",
                         user_id,
                         entry_window["server_time"],
                         state.timeframe,
                         entry_window["current_candle_seconds"],
-                        entry_window["seconds_until_close"],
-                        entry_window["expiration"],
+                        entry_window["seconds_until_entry_window"],
+                        entry_window["entry_window_start_second"],
+                        entry_window["entry_window_end_second"],
                     )
                     return 200, build_robot_payload(state)
                 logger.info(
-                    "[PENDING_SIGNAL_CLEARED] user_id=%s symbol=%s reason=ENTRY_WINDOW_MISSED",
+                    "[PENDING_SIGNAL_CLEARED] user_id=%s symbol=%s reason=MISSED_ENTRY_WINDOW",
                     user_id,
                     selected.get("symbol"),
                 )
-                state = auto_trader.reject_no_valid_signal(
+                state = auto_trader.reject_strategy(
                     user_id,
-                    "ENTRY_WINDOW_MISSED",
-                    blocked_filters=["ENTRY_WINDOW_MISSED"],
+                    "MISSED_ENTRY_WINDOW",
+                    blocked_filters=["MISSED_ENTRY_WINDOW"],
                     approved_filters=list(selected.get("approved_filters") or []),
                     quality_score=int(selected.get("quality_score") or 0),
                 )
                 logger.info(
-                    "[NO_VALID_SIGNAL] user_id=%s reason=ENTRY_WINDOW_MISSED",
+                    "[MISSED_ENTRY_WINDOW] user_id=%s timeframe=%s "
+                    "current_candle_seconds=%s window_end=%s",
                     user_id,
+                    state.timeframe,
+                    entry_window["current_candle_seconds"],
+                    entry_window["entry_window_end_second"],
                 )
                 logger.info(
                     "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
@@ -1316,15 +1337,47 @@ async def execute_robot_cycle(
                     state = auto_trader.reject(user_id, reason)
                     return 200, build_robot_payload(state)
                 if not entry_window["entry_window_open"]:
+                    if entry_window["missed_entry_window"]:
+                        logger.info(
+                            "[PENDING_SIGNAL_CLEARED] user_id=%s symbol=%s "
+                            "reason=MISSED_ENTRY_WINDOW",
+                            user_id,
+                            selected.get("symbol"),
+                        )
+                        state = auto_trader.reject_strategy(
+                            user_id,
+                            "MISSED_ENTRY_WINDOW",
+                            blocked_filters=["MISSED_ENTRY_WINDOW"],
+                            approved_filters=list(
+                                selected.get("approved_filters") or []
+                            ),
+                            quality_score=int(selected.get("quality_score") or 0),
+                        )
+                        logger.info(
+                            "[MISSED_ENTRY_WINDOW] user_id=%s timeframe=%s "
+                            "current_candle_seconds=%s window_end=%s",
+                            user_id,
+                            state.timeframe,
+                            entry_window["current_candle_seconds"],
+                            entry_window["entry_window_end_second"],
+                        )
+                        logger.info(
+                            "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                            user_id,
+                            state.next_cycle_at,
+                        )
+                        return 200, build_robot_payload(state)
                     logger.info(
                         "[ENTRY_WINDOW_WAIT] user_id=%s server_time=%s timeframe=%s "
-                        "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
+                        "seconds_in_candle=%s seconds_until_entry_window=%s "
+                        "window_start=%s window_end=%s",
                         user_id,
                         entry_window["server_time"],
                         state.timeframe,
                         entry_window["current_candle_seconds"],
-                        entry_window["seconds_until_close"],
-                        entry_window["expiration"],
+                        entry_window["seconds_until_entry_window"],
+                        entry_window["entry_window_start_second"],
+                        entry_window["entry_window_end_second"],
                     )
                     return 200, build_robot_payload(state)
 
@@ -1333,13 +1386,14 @@ async def execute_robot_cycle(
             payout = selected.get("payout")
             logger.info(
                 "[ENTRY_WINDOW_OPEN] user_id=%s server_time=%s timeframe=%s "
-                "seconds_in_candle=%s seconds_until_close=%s expiration=%s",
+                "seconds_in_candle=%s window_start=%s window_end=%s buy_target_second=%s",
                 user_id,
                 entry_window["server_time"],
                 state.timeframe,
                 entry_window["current_candle_seconds"],
-                entry_window["seconds_until_close"],
-                entry_window["expiration"],
+                entry_window["entry_window_start_second"],
+                entry_window["entry_window_end_second"],
+                entry_window["buy_target_second"],
             )
 
             order_body = {
