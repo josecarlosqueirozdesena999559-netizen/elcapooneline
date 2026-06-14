@@ -452,7 +452,7 @@ def sync_robot_connection_from_payload(
         )
         return state, True, active_mode, resolved_source
 
-    if state.connection_failure_count < 1 and state.connected:
+    if state.connected and state.connection_failure_count < 3:
         state = auto_trader.sync_connection(
             user_id,
             connected=False,
@@ -467,21 +467,6 @@ def sync_robot_connection_from_payload(
         )
         return state, True, state.active_mode, "cached"
 
-    if state.connection_failure_count < 1:
-        state = auto_trader.sync_connection(
-            user_id,
-            connected=False,
-            active_mode=active_mode,
-            source="disconnected",
-            checked_at=checked_at,
-        )
-        logger.warning(
-            "[ROBOT_CONNECTION_CHECK_FAILED] user_id=%s failures=%s source=disconnected",
-            user_id,
-            state.connection_failure_count,
-        )
-        return state, False, active_mode, "disconnected"
-
     state = auto_trader.sync_connection(
         user_id,
         connected=False,
@@ -489,9 +474,6 @@ def sync_robot_connection_from_payload(
         source="disconnected",
         checked_at=checked_at,
     )
-    if state.connection_failure_count >= 2:
-        state = auto_trader.disconnect_account(user_id)
-        state.active_mode = active_mode
     logger.warning(
         "[ROBOT_CONNECTION_CHECK_FAILED] user_id=%s failures=%s source=disconnected",
         user_id,
@@ -500,13 +482,65 @@ def sync_robot_connection_from_payload(
     return state, False, active_mode, "disconnected"
 
 
+async def reconcile_robot_connection_from_payload(
+    user_id: str,
+    payload: dict[str, Any],
+    *,
+    source: str | None = None,
+) -> tuple[Any, bool, str | None, str]:
+    state, connected, active_mode, resolved_source = sync_robot_connection_from_payload(
+        user_id,
+        payload,
+        source=source,
+    )
+    payload_connected, _ = extract_account_status(payload)
+    if payload_connected:
+        sync_user_store_from_payload(user_id, payload)
+        return state, connected, active_mode, resolved_source
+
+    account_status, account_payload = await call_bullex_service("GET", "/account", user_id)
+    account_connected, account_active_mode = extract_account_status(account_payload)
+    if account_connected:
+        sync_user_store_from_payload(user_id, account_payload)
+        state = auto_trader.sync_connection(
+            user_id,
+            connected=True,
+            active_mode=account_active_mode or active_mode,
+            source="bullex_service",
+            align_status=True,
+        )
+        logger.warning(
+            "[CONNECTION_FALSE_NEGATIVE_IGNORED] user_id=%s failures=%s session_status=%s account_status=%s",
+            user_id,
+            state.connection_failure_count,
+            payload.get("error") or payload.get("status"),
+            account_status,
+        )
+        logger.info(
+            "[ROBOT_CONNECTION_SYNCED] user_id=%s connected=true active_mode=%s source=bullex_service",
+            user_id,
+            state.active_mode,
+        )
+        return state, True, state.active_mode, "bullex_service"
+
+    if state.connection_failure_count >= 3:
+        state = auto_trader.disconnect_account(user_id)
+        state.active_mode = account_active_mode or active_mode
+        mark_disconnected_from_payload(user_id, payload)
+        mark_disconnected_from_payload(user_id, account_payload)
+        return state, False, state.active_mode, "disconnected"
+
+    logger.warning(
+        "[CONNECTION_FALSE_NEGATIVE_IGNORED] user_id=%s failures=%s account_connected=false",
+        user_id,
+        state.connection_failure_count,
+    )
+    return state, connected, active_mode, resolved_source
+
+
 async def fetch_and_sync_robot_connection(user_id: str) -> tuple[int, dict[str, Any], Any, bool, str | None, str]:
     status_code, payload = await call_bullex_service("GET", "/sessions/status", user_id)
-    state, connected, active_mode, source = sync_robot_connection_from_payload(user_id, payload)
-    if connected:
-        sync_user_store_from_payload(user_id, payload)
-    elif state.status == STATUS_ACCOUNT_DISCONNECTED:
-        mark_disconnected_from_payload(user_id, payload)
+    state, connected, active_mode, source = await reconcile_robot_connection_from_payload(user_id, payload)
     return status_code, payload, state, connected, active_mode, source
 
 
@@ -1286,7 +1320,7 @@ async def execute_robot_cycle(
                 return 409, build_error(f"ACCOUNT_MODE_NOT_{required_mode}")
 
             status_code, account_payload, entry_window = await refresh_entry_window(user_id, state)
-            state, connected, active_mode, connection_source = sync_robot_connection_from_payload(
+            state, connected, active_mode, connection_source = await reconcile_robot_connection_from_payload(
                 user_id,
                 account_payload,
             )
@@ -1658,7 +1692,7 @@ async def execute_robot_cycle(
                 )
 
                 timing_status, timing_payload, entry_window = await refresh_entry_window(user_id, state)
-                state, connected, active_mode, connection_source = sync_robot_connection_from_payload(
+                state, connected, active_mode, connection_source = await reconcile_robot_connection_from_payload(
                     user_id,
                     timing_payload,
                 )
