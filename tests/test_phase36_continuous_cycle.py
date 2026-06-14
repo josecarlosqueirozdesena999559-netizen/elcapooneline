@@ -31,6 +31,31 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         main.auto_trader = main.AutoTrader()
 
+    async def test_robot_start_clears_old_entry_and_schedules_initial_analysis(self) -> None:
+        user_id = "phase36-start-clean"
+        state = main.auto_trader.get(user_id)
+        state.enabled = True
+        state.status = STATUS_SENDING_ORDER
+        state.pending_signal = make_signal("GBPUSD-OTC", "PUT", 90)
+        state.best_candidate = dict(state.pending_signal)
+
+        with (
+            patch.object(main, "persist_robot"),
+            patch.object(main, "ensure_robot_worker") as worker,
+            patch.object(main, "schedule_robot_tick") as tick,
+        ):
+            response = await main.robot_start({"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["status"], STATUS_WAITING_NEXT_CYCLE)
+        self.assertIsNone(data["pending_signal"])
+        self.assertIsNone(data["best_candidate"])
+        self.assertIsNone(data["voice_message"])
+        self.assertIn("silêncio", data["analysis_message"])
+        worker.assert_called_once_with(user_id)
+        tick.assert_called_once_with(user_id)
+
     async def test_waiting_cycle_updates_best_candidate_without_pending_signal(self) -> None:
         user_id = "phase36-analysis"
         state = main.auto_trader.start(user_id)

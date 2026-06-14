@@ -2520,6 +2520,19 @@ def ensure_robot_worker(user_id: str) -> None:
         robot_tasks[user_id] = asyncio.create_task(robot_worker(user_id))
 
 
+def schedule_robot_tick(user_id: str) -> None:
+    if not auto_trader.get(user_id).enabled:
+        return
+
+    async def run_tick() -> None:
+        try:
+            await execute_robot_cycle(user_id)
+        except Exception:
+            logger.exception("[ROBOT ERROR] user_id=%s error=INITIAL_TICK_FAILED", user_id)
+
+    asyncio.create_task(run_tick())
+
+
 async def stop_robot_worker(user_id: str) -> None:
     task = robot_tasks.pop(user_id, None)
     if task is None or task.done() or task is asyncio.current_task():
@@ -2993,6 +3006,7 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     )
     persist_robot(user_id)
     ensure_robot_worker(user_id)
+    schedule_robot_tick(user_id)
     logger.info(
         "[ROBOT_START_NEW_CYCLE] user_id=%s cycle_id=%s current_cycle_started_at=%s next_cycle_at=%s",
         user_id,
