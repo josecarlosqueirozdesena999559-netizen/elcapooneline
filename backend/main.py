@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import asyncio
+import json
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -209,6 +210,107 @@ def extract_candles(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(data, dict) and isinstance(data.get("candles"), list):
         return [item for item in data["candles"] if isinstance(item, dict)]
     return []
+
+
+def normalize_timeframe_seconds(timeframe: str | None, interval: int | None = None) -> tuple[str, int]:
+    if timeframe is not None:
+        normalized = str(timeframe).strip().upper()
+        if normalized not in TIMEFRAME_SECONDS:
+            raise HTTPException(status_code=422, detail="INVALID_TIMEFRAME")
+        return normalized, TIMEFRAME_SECONDS[normalized]
+    if interval is None:
+        return "M1", TIMEFRAME_SECONDS["M1"]
+    for label, seconds in TIMEFRAME_SECONDS.items():
+        if int(interval) == seconds:
+            return label, seconds
+    raise HTTPException(status_code=422, detail="INVALID_TIMEFRAME")
+
+
+def numeric_candle_time(candle: dict[str, Any]) -> float | None:
+    value = candle.get("time")
+    if value is None:
+        value = candle.get("from") or candle.get("at") or candle.get("id")
+    parsed = parse_datetime(value)
+    if parsed is not None:
+        return parsed.timestamp()
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def number_or_none(value: Any) -> float | int | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(parsed) if parsed.is_integer() else parsed
+
+
+def normalize_live_candle(candle: dict[str, Any], *, interval: int, server_time: float) -> dict[str, Any] | None:
+    candle_time = numeric_candle_time(candle)
+    if candle_time is None:
+        return None
+    high = candle.get("high") if "high" in candle else candle.get("max")
+    low = candle.get("low") if "low" in candle else candle.get("min")
+    normalized = {
+        "time": int(candle_time),
+        "open": number_or_none(candle.get("open")),
+        "high": number_or_none(high),
+        "low": number_or_none(low),
+        "close": number_or_none(candle.get("close")),
+        "volume": number_or_none(candle.get("volume")) or 0,
+        "is_closed": server_time >= candle_time + interval,
+    }
+    if normalized["high"] is None:
+        normalized["high"] = normalized["close"] if normalized["close"] is not None else normalized["open"]
+    if normalized["low"] is None:
+        normalized["low"] = normalized["close"] if normalized["close"] is not None else normalized["open"]
+    return normalized
+
+
+def build_live_candles_payload(
+    symbol: str,
+    timeframe: str,
+    interval: int,
+    limit: int,
+    server_time: float,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    current_candle_time = int(server_time // interval) * interval
+    candles = [
+        normalized
+        for candle in extract_candles(payload)
+        if (normalized := normalize_live_candle(candle, interval=interval, server_time=server_time)) is not None
+    ]
+    candles.sort(key=lambda item: int(item["time"]))
+
+    latest_close = next(
+        (candle.get("close") for candle in reversed(candles) if candle.get("close") is not None),
+        None,
+    )
+    if candles and int(candles[-1]["time"]) < current_candle_time and latest_close is not None:
+        candles.append(
+            {
+                "time": current_candle_time,
+                "open": latest_close,
+                "high": latest_close,
+                "low": latest_close,
+                "close": latest_close,
+                "volume": 0,
+                "is_closed": False,
+            }
+        )
+    if candles:
+        candles[-1]["is_closed"] = False
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "server_time": server_time,
+        "candles": candles[-limit:],
+    }
 
 
 def is_session_disconnected(payload: dict[str, Any]) -> bool:
@@ -3282,21 +3384,85 @@ async def bullex_assets(auth: dict[str, str] = Depends(require_headers)) -> JSON
 
 @app.get("/bullex/candles")
 async def bullex_candles(
-    active: str,
-    interval: int,
-    count: int,
+    active: str | None = None,
+    interval: int | None = None,
+    count: int | None = None,
     endtime: int | None = None,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    limit: int | None = None,
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
-    if not is_binary_asset_allowed(active):
+    resolved_symbol = normalize_binary_active(symbol or active or "")
+    if not is_binary_asset_allowed(resolved_symbol):
         return json_response(400, build_error(ASSET_NOT_ALLOWED))
-    active = normalize_binary_active(active)
-    params = {"active": active, "interval": interval, "count": count}
+    resolved_timeframe, resolved_interval = normalize_timeframe_seconds(timeframe, interval)
+    resolved_limit = max(1, min(int(limit or count or 60), 500))
+
+    status_code, session_payload = await call_bullex_service("GET", "/sessions/status", auth["user_id"])
+    mark_disconnected_from_payload(auth["user_id"], session_payload)
+    if not session_payload.get("ok"):
+        return json_response(status_code, session_payload)
+    server_timestamp = extract_server_timestamp(session_payload) or utc_now().timestamp()
+
+    params = {
+        "active": resolved_symbol,
+        "interval": resolved_interval,
+        "count": resolved_limit,
+        "endtime": int(endtime or server_timestamp),
+    }
     if endtime is not None:
         params["endtime"] = endtime
     status_code, payload = await call_bullex_service("GET", "/candles", auth["user_id"], params=params)
     mark_disconnected_from_payload(auth["user_id"], payload)
-    return json_response(status_code, payload)
+    if not payload.get("ok"):
+        return json_response(status_code, payload)
+    live_payload = build_live_candles_payload(
+        resolved_symbol,
+        resolved_timeframe,
+        resolved_interval,
+        resolved_limit,
+        float(server_timestamp),
+        payload,
+    )
+    return json_response(status_code, build_success(live_payload))
+
+
+@app.get("/debug/candles-live")
+async def debug_candles_live(
+    symbol: str,
+    timeframe: str = "M1",
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    response = await bullex_candles(
+        symbol=symbol,
+        timeframe=timeframe,
+        limit=60,
+        auth=auth,
+    )
+    payload = json.loads(response.body)
+    if not payload.get("ok"):
+        return response
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    candles = data.get("candles") if isinstance(data.get("candles"), list) else []
+    last_candle = candles[-1] if candles else {}
+    server_time = float(data.get("server_time") or utc_now().timestamp())
+    last_candle_time = numeric_candle_time(last_candle) if isinstance(last_candle, dict) else None
+    age_seconds = None if last_candle_time is None else max(0, round(server_time - last_candle_time, 3))
+    _, interval = normalize_timeframe_seconds(timeframe)
+    return json_response(
+        200,
+        build_success(
+            {
+                "symbol": normalize_binary_active(symbol),
+                "last_candle_time": int(last_candle_time) if last_candle_time is not None else None,
+                "last_close": last_candle.get("close") if isinstance(last_candle, dict) else None,
+                "server_time": server_time,
+                "age_seconds": age_seconds,
+                "is_realtime": bool(age_seconds is not None and age_seconds <= interval),
+            }
+        ),
+    )
 
 
 @app.get("/bullex/payouts")
