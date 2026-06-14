@@ -167,6 +167,8 @@ user_store: UserStore = create_user_store()
 auto_trader = AutoTrader()
 robot_persistence: RobotPersistence = create_robot_persistence()
 robot_tasks: dict[str, asyncio.Task[None]] = {}
+robot_worker_last_tick_at: dict[str, datetime] = {}
+CONNECTION_GRACE_SECONDS = 30
 
 
 def normalize_ws_value(value: Any) -> str:
@@ -430,8 +432,42 @@ def connection_source_from_payload(payload: dict[str, Any], *, default: str = "b
     data = payload.get("data")
     if payload.get("ok") and isinstance(data, dict):
         raw_source = str(data.get("connection_status_source") or data.get("source") or "").strip()
-        return raw_source if raw_source in {"memory", "bullex_service", "cached"} else default
+        return raw_source if raw_source in {"memory", "bullex_service", "cached", "cached_grace"} else default
     return "disconnected" if is_session_disconnected(payload) else "cached"
+
+
+def connection_grace_until(state: Any) -> datetime | None:
+    grace_until = parse_datetime(getattr(state, "connection_grace_until", None))
+    if grace_until is not None:
+        return grace_until
+    last_connected_at = parse_datetime(getattr(state, "last_connected_at", None))
+    if last_connected_at is None:
+        return None
+    return last_connected_at + timedelta(seconds=CONNECTION_GRACE_SECONDS)
+
+
+def connection_grace_active(state: Any) -> bool:
+    grace_until = connection_grace_until(state)
+    return grace_until is not None and utc_now() <= grace_until
+
+
+def keep_connection_in_grace(user_id: str, state: Any, active_mode: str | None, checked_at: datetime) -> Any:
+    state = auto_trader.sync_connection(
+        user_id,
+        connected=False,
+        active_mode=state.active_mode or active_mode,
+        source="cached_grace",
+        checked_at=checked_at,
+    )
+    state.connected = True
+    state.connection_grace_until = connection_grace_until(state)
+    logger.warning(
+        "[CONNECTION_GRACE_ACTIVE] user_id=%s failures=%s grace_until=%s",
+        user_id,
+        state.connection_failure_count,
+        state.connection_grace_until,
+    )
+    return state
 
 
 def sync_robot_connection_from_payload(
@@ -460,20 +496,9 @@ def sync_robot_connection_from_payload(
         )
         return state, True, active_mode, resolved_source
 
-    if state.connected and state.connection_failure_count < 3:
-        state = auto_trader.sync_connection(
-            user_id,
-            connected=False,
-            active_mode=state.active_mode or active_mode,
-            source="cached",
-            checked_at=checked_at,
-        )
-        logger.warning(
-            "[ROBOT_CONNECTION_CHECK_FAILED] user_id=%s failures=%s source=cached",
-            user_id,
-            state.connection_failure_count,
-        )
-        return state, True, state.active_mode, "cached"
+    if state.connected and state.connection_failure_count < 3 and connection_grace_active(state):
+        state = keep_connection_in_grace(user_id, state, active_mode, checked_at)
+        return state, True, state.active_mode, "cached_grace"
 
     state = auto_trader.sync_connection(
         user_id,
@@ -531,18 +556,29 @@ async def reconcile_robot_connection_from_payload(
         )
         return state, True, state.active_mode, "bullex_service"
 
-    if state.connection_failure_count >= 3:
+    if state.connection_failure_count >= 3 and not connection_grace_active(state):
         state = auto_trader.disconnect_account(user_id)
         state.active_mode = account_active_mode or active_mode
         mark_disconnected_from_payload(user_id, payload)
         mark_disconnected_from_payload(user_id, account_payload)
+        logger.warning(
+            "[CONNECTION_CONFIRMED_DISCONNECTED] user_id=%s failures=%s account_status=%s",
+            user_id,
+            state.connection_failure_count,
+            account_status,
+        )
         return state, False, state.active_mode, "disconnected"
 
     logger.warning(
-        "[CONNECTION_FALSE_NEGATIVE_IGNORED] user_id=%s failures=%s account_connected=false",
+        "[CONNECTION_GRACE_ACTIVE] user_id=%s failures=%s account_connected=false grace_until=%s",
         user_id,
         state.connection_failure_count,
+        state.connection_grace_until,
     )
+    if not connected and connection_grace_active(state):
+        state.connected = True
+        state.connection_status_source = "cached_grace"
+        return state, True, state.active_mode or active_mode, "cached_grace"
     return state, connected, active_mode, resolved_source
 
 
@@ -989,6 +1025,12 @@ def robot_stop_reason(state: Any) -> str | None:
 
 def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     data = state.to_dict()
+    user_id = extra.pop("user_id", None)
+    if user_id is not None:
+        worker_task = robot_tasks.get(str(user_id))
+        last_tick_at = robot_worker_last_tick_at.get(str(user_id))
+        data["worker_running"] = bool(worker_task is not None and not worker_task.done())
+        data["worker_last_tick_at"] = last_tick_at.isoformat() if last_tick_at is not None else None
     data.update(extra)
     if data.get("operation_in_progress"):
         logger.info(
@@ -2487,8 +2529,14 @@ async def run_analysis_now(user_id: str) -> tuple[int, dict[str, Any]]:
 async def robot_worker(user_id: str) -> None:
     try:
         while auto_trader.get(user_id).enabled:
+            robot_worker_last_tick_at[user_id] = utc_now()
+            logger.info("[ROBOT_WORKER_TICK] user_id=%s", user_id)
             await execute_robot_cycle(user_id)
             state = auto_trader.get(user_id)
+            if state.status == STATUS_ACCOUNT_DISCONNECTED:
+                state.enabled = False
+                persist_robot(user_id)
+                break
             if state.operation_in_progress:
                 delay = 3
             elif state.status == STATUS_WAITING_ENTRY_WINDOW:
@@ -2512,12 +2560,14 @@ async def robot_worker(user_id: str) -> None:
         current = asyncio.current_task()
         if robot_tasks.get(user_id) is current:
             robot_tasks.pop(user_id, None)
+        logger.info("[ROBOT_WORKER_STOPPED] user_id=%s", user_id)
 
 
 def ensure_robot_worker(user_id: str) -> None:
     task = robot_tasks.get(user_id)
     if task is None or task.done():
         robot_tasks[user_id] = asyncio.create_task(robot_worker(user_id))
+        logger.info("[ROBOT_WORKER_STARTED] user_id=%s", user_id)
 
 
 def schedule_robot_tick(user_id: str) -> None:
@@ -2726,6 +2776,7 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
             200,
             build_robot_payload(
                 state,
+                user_id=user_id,
                 connected=False,
                 active_mode=active_mode,
                 connection_checked_at=state.connection_checked_at.isoformat()
@@ -2762,35 +2813,12 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
         window,
     )
     state = auto_trader.get(user_id)
-    state_payload = state.to_dict()
-    if (
-        state.enabled
-        and connected
-        and not state.operation_in_progress
-        and (
-            state.pending_signal is not None
-            or state.status == STATUS_SENDING_ORDER
-            or (
-                state.status == STATUS_WAITING_NEXT_CYCLE
-                and state.next_cycle_at is not None
-                and int(state_payload["seconds_until_next_cycle"]) <= 0
-            )
-        )
-    ):
-        logger.info(
-            "[CYCLE_ENTRY_DUE] user_id=%s cycle_id=%s source=robot_state",
-            user_id,
-            state.cycle_id,
-        )
-        cycle_status, cycle_payload = await execute_robot_cycle(user_id)
-        return json_response(cycle_status, cycle_payload)
-    if state.enabled:
-        ensure_robot_worker(user_id)
     block_reason = real_block_reason(state, connected=connected, active_mode=active_mode)
     return json_response(
         200,
         build_robot_payload(
             state,
+            user_id=user_id,
             connected=connected,
             active_mode=active_mode,
             connection_checked_at=state.connection_checked_at.isoformat()
@@ -3006,7 +3034,6 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     )
     persist_robot(user_id)
     ensure_robot_worker(user_id)
-    schedule_robot_tick(user_id)
     logger.info(
         "[ROBOT_START_NEW_CYCLE] user_id=%s cycle_id=%s current_cycle_started_at=%s next_cycle_at=%s",
         user_id,

@@ -124,6 +124,8 @@ class RobotState:
     connected: bool = False
     active_mode: str | None = None
     connection_checked_at: datetime | None = None
+    last_connected_at: datetime | None = None
+    connection_grace_until: datetime | None = None
     connection_status_source: str = "cached"
     connection_failure_count: int = 0
     analysis_window_open: bool = False
@@ -164,6 +166,8 @@ class RobotState:
             "result_received_at",
             "result_display_until",
             "connection_checked_at",
+            "last_connected_at",
+            "connection_grace_until",
         ):
             value = data[key]
             data[key] = value.isoformat() if value is not None else None
@@ -368,6 +372,8 @@ class AutoTrader:
             "result_received_at",
             "result_display_until",
             "connection_checked_at",
+            "last_connected_at",
+            "connection_grace_until",
         }
         for key, value in payload.items():
             if not hasattr(state, key) or key in {"accuracy", "seconds_until_next_cycle"}:
@@ -874,6 +880,7 @@ class AutoTrader:
         state.connected = False
         state.connection_status_source = "disconnected"
         state.connection_checked_at = utc_now()
+        state.connection_grace_until = None
         state.pending_signal = None
         state.last_signal = None
         state.operation_in_progress = False
@@ -910,6 +917,8 @@ class AutoTrader:
         state.connection_status_source = source
         if connected:
             state.connection_failure_count = 0
+            state.last_connected_at = now
+            state.connection_grace_until = now + timedelta(seconds=30)
             if align_status or state.status == STATUS_ACCOUNT_DISCONNECTED:
                 state.rejection_reason = None
                 state.last_rejection_reason = None
@@ -1026,9 +1035,8 @@ class AutoTrader:
             and not state.operation_in_progress
             and state.pending_signal
         ):
-            state.status = STATUS_WAITING_ENTRY_WINDOW
-            state.rejection_reason = STATUS_WAITING_ENTRY_WINDOW
-            state.next_cycle_at = utc_now() + timedelta(seconds=state.seconds_until_entry_window)
+            state.status = STATUS_SENDING_ORDER
+            state.rejection_reason = None
         elif (
             state.entry_window_open
             and state.status == STATUS_WAITING_ENTRY_WINDOW

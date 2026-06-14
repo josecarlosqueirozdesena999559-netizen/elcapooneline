@@ -42,7 +42,6 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(main, "persist_robot"),
             patch.object(main, "ensure_robot_worker") as worker,
-            patch.object(main, "schedule_robot_tick") as tick,
         ):
             response = await main.robot_start({"user_id": user_id})
 
@@ -54,7 +53,6 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(data["voice_message"])
         self.assertIn("silêncio", data["analysis_message"])
         worker.assert_called_once_with(user_id)
-        tick.assert_called_once_with(user_id)
 
     async def test_waiting_cycle_updates_best_candidate_without_pending_signal(self) -> None:
         user_id = "phase36-analysis"
@@ -202,21 +200,26 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(payload["pending_signal"])
         self.assertGreater(payload["seconds_until_next_cycle"], 0)
 
-    async def test_robot_state_sends_order_when_state_is_stuck_sending(self) -> None:
+    async def test_robot_state_only_reports_stuck_sending_without_sending_order(self) -> None:
         user_id = "phase36-state-recovers-sending"
         state = main.auto_trader.start(user_id)
-        state.connected = True
+        main.auto_trader.sync_connection(
+            user_id,
+            connected=True,
+            active_mode="PRACTICE",
+            source="bullex_service",
+        )
         state.next_cycle_at = utc_now() - timedelta(seconds=1)
         main.auto_trader.set_pending_signal(user_id, make_signal("GBPUSD-OTC", "PUT", 90))
         self.assertEqual(main.auto_trader.get(user_id).status, STATUS_SENDING_ORDER)
+        calls: list[str] = []
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            calls.append(path)
             if path == "/sessions/status":
                 return 200, main.build_success(
                     {"connected": True, "active_mode": "PRACTICE", "server_time": 300.0}
                 )
-            if path == "/orders/buy-demo":
-                return 200, main.build_success({"order_id": "phase36-state-1"})
             raise AssertionError(f"unexpected path: {path}")
 
         with (
@@ -228,9 +231,10 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
 
         data = json.loads(response.body)["data"]
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(data["status"], STATUS_PENDING_RESULT)
-        self.assertEqual(data["last_trade"]["active"], "GBPUSD-OTC")
-        self.assertTrue(data["operation_in_progress"])
+        self.assertEqual(data["status"], STATUS_SENDING_ORDER)
+        self.assertEqual(data["pending_signal"]["symbol"], "GBPUSD-OTC")
+        self.assertFalse(data["operation_in_progress"])
+        self.assertNotIn("/orders/buy-demo", calls)
 
     def test_sending_order_payload_includes_voice_message(self) -> None:
         user_id = "phase36-voice"

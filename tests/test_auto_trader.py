@@ -1812,6 +1812,74 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(payload["pending_signal"])
         self.assertIsNone(payload["last_signal"])
 
+    async def test_robot_state_keeps_cached_grace_after_temporary_account_failures(self) -> None:
+        user_id = "user-state-grace"
+        state = main.auto_trader.start(user_id)
+        state = main.auto_trader.sync_connection(
+            user_id,
+            connected=True,
+            active_mode="PRACTICE",
+            source="bullex_service",
+        )
+        state.connection_checked_at = utc_now() - timedelta(seconds=5)
+
+        async def fake_bullex(method: str, path: str, user_id_arg: str, **kwargs: Any) -> tuple[int, dict[str, Any]]:
+            if path in {"/sessions/status", "/account"}:
+                return 200, main.build_success({"connected": False, "active_mode": "PRACTICE"})
+            raise AssertionError(f"unexpected path {path}")
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "sync_user_store_from_payload"),
+            self.assertLogs("backend-gateway", level="WARNING") as logs,
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        payload = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["connected"])
+        self.assertEqual(payload["connection_failure_count"], 1)
+        self.assertEqual(payload["connection_status_source"], "cached_grace")
+        self.assertIsNotNone(payload["last_connected_at"])
+        self.assertIsNotNone(payload["connection_grace_until"])
+        self.assertNotEqual(payload["status"], STATUS_ACCOUNT_DISCONNECTED)
+        self.assertIn("[CONNECTION_GRACE_ACTIVE]", "\n".join(logs.output))
+
+    async def test_robot_state_confirms_disconnected_only_after_grace_and_three_failures(self) -> None:
+        user_id = "user-state-grace-expired"
+        state = main.auto_trader.start(user_id)
+        state = main.auto_trader.sync_connection(
+            user_id,
+            connected=True,
+            active_mode="PRACTICE",
+            source="bullex_service",
+        )
+        old_connected_at = utc_now() - timedelta(seconds=35)
+        state.connection_checked_at = utc_now() - timedelta(seconds=5)
+        state.last_connected_at = old_connected_at
+        state.connection_grace_until = old_connected_at + timedelta(seconds=30)
+        state.connection_failure_count = 2
+
+        async def fake_bullex(method: str, path: str, user_id_arg: str, **kwargs: Any) -> tuple[int, dict[str, Any]]:
+            if path in {"/sessions/status", "/account"}:
+                return 200, main.build_success({"connected": False, "active_mode": "PRACTICE"})
+            raise AssertionError(f"unexpected path {path}")
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "sync_user_store_from_payload"),
+            self.assertLogs("backend-gateway", level="WARNING") as logs,
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        payload = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(payload["connected"])
+        self.assertEqual(payload["connection_failure_count"], 3)
+        self.assertEqual(payload["status"], STATUS_ACCOUNT_DISCONNECTED)
+        self.assertEqual(payload["connection_status_source"], "disconnected")
+        self.assertIn("[CONNECTION_CONFIRMED_DISCONNECTED]", "\n".join(logs.output))
+
     async def test_robot_state_ignores_session_false_negative_when_account_connected(self) -> None:
         user_id = "user-state-account-connected"
         state = main.auto_trader.start(user_id)
