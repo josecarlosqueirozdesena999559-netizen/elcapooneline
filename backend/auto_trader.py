@@ -28,6 +28,8 @@ STATUS_ACCOUNT_DISCONNECTED = "ACCOUNT_DISCONNECTED"
 
 TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
 RESULT_WAITING_MESSAGE = "Aguardando resultado..."
+ANALYSIS_MESSAGE = "Analisando melhores ativos do mercado..."
+NO_MINIMUM_SCORE_MESSAGE = "Nenhum ativo atingiu score mínimo."
 
 
 def format_mm_ss(seconds: int) -> str:
@@ -97,6 +99,7 @@ class RobotState:
     last_entry_at: datetime | None = None
     last_analysis_at: datetime | None = None
     last_analysis_result: str | None = None
+    analysis_message: str | None = None
     rejected_at: datetime | None = None
     operation_in_progress: bool = False
     last_signal: dict[str, Any] | None = None
@@ -118,6 +121,9 @@ class RobotState:
     candidates_count: int = 0
     candidates: list[dict[str, Any]] = field(default_factory=list)
     best_candidate: dict[str, Any] | None = None
+    strategy_name: str | None = None
+    strategy_reason: str | None = None
+    used_strategies: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -134,12 +140,27 @@ class RobotState:
             if self.next_cycle_at is not None
             else 0
         )
+        if (
+            self.enabled
+            and self.status == STATUS_WAITING_NEXT_CYCLE
+            and self.next_cycle_at is not None
+            and now >= self.next_cycle_at
+            and not self.pending_signal
+            and not self.operation_in_progress
+        ):
+            data["status"] = STATUS_ANALYZING
+            data["last_analysis_at"] = now.isoformat()
+            data["last_analysis_result"] = "RUNNING"
+            data["analysis_message"] = ANALYSIS_MESSAGE
         configured_expiration = TIMEFRAME_SECONDS[self.timeframe]
         data["expiration_seconds"] = configured_expiration
         data["result_waiting"] = False
         data["operation_message"] = None
         data["expiration_display"] = None
         data["show_expiration_countdown"] = False
+        if self.status == STATUS_ANALYZING:
+            data["last_analysis_result"] = "RUNNING"
+            data["analysis_message"] = ANALYSIS_MESSAGE
         if self.last_trade is not None:
             trade = dict(self.last_trade)
             trade["result"] = trade.get("result") or STATUS_PENDING_RESULT
@@ -306,6 +327,10 @@ class AutoTrader:
         state.candidates_count = 0
         state.candidates = []
         state.best_candidate = None
+        state.strategy_name = None
+        state.strategy_reason = None
+        state.used_strategies = []
+        state.analysis_message = None
         state.cycle_id = self._new_cycle_id()
         state.current_cycle_started_at = now
         state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
@@ -340,7 +365,8 @@ class AutoTrader:
         state.status = STATUS_ANALYZING
         state.rejection_reason = None
         state.last_analysis_at = now
-        state.last_analysis_result = "STARTED"
+        state.last_analysis_result = "RUNNING"
+        state.analysis_message = ANALYSIS_MESSAGE
         state.candidates_count = 0
         state.candidates = []
         state.best_candidate = None
@@ -375,6 +401,10 @@ class AutoTrader:
         state.candidates_count = 0
         state.candidates = []
         state.best_candidate = None
+        state.strategy_name = None
+        state.strategy_reason = None
+        state.used_strategies = []
+        state.analysis_message = None
         state.pending_signal = None
         state.last_signal = None
         state.operation_in_progress = False
@@ -420,6 +450,11 @@ class AutoTrader:
             "payout": signal["payout"],
             "strategy_score": int(signal.get("strategy_score") or 0),
             "reason": signal.get("reason") or signal.get("signal_explanation"),
+            "strategy_name": signal.get("strategy_name"),
+            "strategy_reason": signal.get("strategy_reason")
+            or signal.get("reason")
+            or signal.get("signal_explanation"),
+            "used_strategies": list(signal.get("used_strategies") or []),
             "timeframe": state.timeframe,
             "quality_score": signal.get("quality_score", 0),
             "blocked_filters": list(signal.get("blocked_filters") or []),
@@ -435,11 +470,15 @@ class AutoTrader:
         state.last_rejection_reason = None
         state.last_analysis_at = utc_now()
         state.last_analysis_result = "SIGNAL_APPROVED"
+        state.analysis_message = None
         state.blocked_filters = list(pending_signal["blocked_filters"])
         state.approved_filters = list(pending_signal["approved_filters"])
         state.quality_score = int(pending_signal["quality_score"] or 0)
         state.strategy_score = int(pending_signal["strategy_score"] or 0)
         state.best_candidate = dict(pending_signal)
+        state.strategy_name = pending_signal["strategy_name"]
+        state.strategy_reason = pending_signal["strategy_reason"]
+        state.used_strategies = list(pending_signal["used_strategies"])
         return state
 
     def set_analysis_candidates(
@@ -453,6 +492,9 @@ class AutoTrader:
         state.candidates = [dict(candidate) for candidate in candidates]
         state.best_candidate = dict(best_candidate) if best_candidate is not None else None
         state.strategy_score = int((best_candidate or {}).get("strategy_score") or 0)
+        state.strategy_name = (best_candidate or {}).get("strategy_name")
+        state.strategy_reason = (best_candidate or {}).get("strategy_reason")
+        state.used_strategies = list((best_candidate or {}).get("used_strategies") or [])
         return state
 
     def clear_pending_signal(self, user_id: str, *, analyze: bool = False) -> RobotState:
@@ -470,6 +512,10 @@ class AutoTrader:
         state.quality_score = 0
         state.strategy_score = 0
         state.best_candidate = None
+        state.strategy_name = None
+        state.strategy_reason = None
+        state.used_strategies = []
+        state.analysis_message = ANALYSIS_MESSAGE if analyze else None
         return state
 
     def disconnect_account(self, user_id: str) -> RobotState:

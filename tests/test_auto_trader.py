@@ -542,7 +542,10 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_code, 200)
         self.assertEqual(data["status"], "SIGNAL_REJECTED")
         self.assertEqual(data["rejection_reason"], "NO_VALID_SIGNAL")
-        self.assertEqual(data["last_rejection_reason"], "NO_SIGNAL")
+        self.assertEqual(
+            data["last_rejection_reason"],
+            "Nenhum ativo atingiu score mínimo.",
+        )
         self.assertEqual(data["last_analysis_result"], "NO_VALID_SIGNAL")
         self.assertIsNotNone(data["last_analysis_at"])
         self.assertIsNone(data["pending_signal"])
@@ -599,6 +602,9 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(data["last_analysis_at"])
         self.assertEqual(data["pending_signal"]["symbol"], "EURUSD-OTC")
         self.assertEqual(data["pending_signal"]["signal"], "CALL")
+        self.assertTrue(data["pending_signal"]["strategy_name"].startswith("Confluência "))
+        self.assertIsNotNone(data["pending_signal"]["strategy_reason"])
+        self.assertIn("Payout", data["pending_signal"]["used_strategies"])
         self.assertEqual(data["candidates_count"], 1)
         self.assertEqual(data["best_candidate"]["symbol"], "EURUSD-OTC")
         self.assertEqual(data["strategy_score"], data["pending_signal"]["strategy_score"])
@@ -609,6 +615,84 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[BEST_CANDIDATE_SELECTED]", output)
         self.assertIn("[PENDING_SIGNAL_SET]", output)
         scan.assert_awaited_once()
+
+    async def test_analysis_state_is_visible_while_scan_is_running(self) -> None:
+        user_id = "user-analysis-running"
+        main.auto_trader.start(user_id)
+        make_cycle_due(user_id)
+        scan_started = asyncio.Event()
+        release_scan = asyncio.Event()
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {
+                        "connected": True,
+                        "active_mode": "PRACTICE",
+                        "server_time": 20.0,
+                    }
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        async def slow_scan(*args, **kwargs):
+            scan_started.set()
+            await release_scan.wait()
+            return 200, main.build_success([])
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", side_effect=slow_scan),
+        ):
+            task = asyncio.create_task(main.execute_robot_cycle(user_id))
+            await asyncio.wait_for(scan_started.wait(), timeout=1)
+            running = main.auto_trader.get(user_id).to_dict()
+            release_scan.set()
+            _, finished_payload = await task
+
+        self.assertEqual(running["status"], "ANALYZING")
+        self.assertEqual(running["last_analysis_result"], "RUNNING")
+        self.assertEqual(
+            running["analysis_message"],
+            "Analisando melhores ativos do mercado...",
+        )
+        self.assertEqual(finished_payload["data"]["status"], "SIGNAL_REJECTED")
+        self.assertEqual(
+            finished_payload["data"]["last_rejection_reason"],
+            "Nenhum ativo atingiu score mínimo.",
+        )
+        self.assertGreaterEqual(
+            finished_payload["data"]["seconds_until_next_cycle"],
+            299,
+        )
+        self.assertLessEqual(
+            finished_payload["data"]["seconds_until_next_cycle"],
+            300,
+        )
+
+    async def test_configured_five_minute_cycle_is_used_on_start(self) -> None:
+        user_id = "user-config-five"
+        with (
+            patch.object(main, "persist_robot") as persist,
+            patch.object(main, "ensure_robot_worker"),
+            patch.object(main, "stop_robot_worker", new=AsyncMock()),
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            config_response = await main.robot_config(
+                main.RobotConfigUpdate(cycle_minutes=5),
+                {"user_id": user_id},
+            )
+            start_response = await main.robot_start({"user_id": user_id})
+
+        configured = json.loads(config_response.body)["data"]
+        started = json.loads(start_response.body)["data"]
+        self.assertEqual(configured["cycle_minutes"], 5)
+        self.assertEqual(started["cycle_minutes"], 5)
+        self.assertGreaterEqual(started["seconds_until_next_cycle"], 299)
+        self.assertLessEqual(started["seconds_until_next_cycle"], 300)
+        self.assertEqual([call.args[0] for call in persist.call_args_list], [user_id, user_id])
+        output = "\n".join(logs.output)
+        self.assertIn("[CYCLE_CONFIG]", output)
+        self.assertIn("cycle_minutes=5", output)
 
     async def test_highest_strategy_score_candidate_is_selected(self) -> None:
         user_id = "user-ranking"
@@ -919,7 +1003,10 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(status_code, 200)
         self.assertEqual(payload["data"]["rejection_reason"], "NO_VALID_SIGNAL")
-        self.assertEqual(payload["data"]["last_rejection_reason"], main.ASSET_NOT_ALLOWED)
+        self.assertEqual(
+            payload["data"]["last_rejection_reason"],
+            "Nenhum ativo atingiu score mínimo.",
+        )
         self.assertNotIn("/orders/buy-demo", calls)
         self.assertNotIn("/orders/buy-real", calls)
 

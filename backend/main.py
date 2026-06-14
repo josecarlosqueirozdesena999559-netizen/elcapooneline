@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from backend.auto_trader import (
     AutoTrader,
+    NO_MINIMUM_SCORE_MESSAGE,
     RobotConfigUpdate,
     STATUS_ORDER_REJECTED,
     STATUS_PENDING_RESULT,
@@ -766,6 +767,31 @@ def readable_order_error(error: Any) -> str:
     return raw_error
 
 
+def build_strategy_narration(candidate: dict[str, Any]) -> tuple[str, str, list[str]]:
+    approved = set(candidate.get("approved_filters") or [])
+    used: list[str] = []
+    if "EMA_TREND" in approved or {"ema9", "ema21"}.issubset(candidate):
+        used.append("EMA9/EMA21")
+    if "RSI_RANGE" in approved or "rsi" in candidate:
+        used.append("RSI")
+    if "CANDLE_STRENGTH" in approved or "body_ratio" in candidate:
+        used.append("Candle Force")
+    if "LAST_5_CONFIRMATION" in approved or "directional_candles_5" in candidate:
+        used.append("Ultimos Candles")
+    if candidate.get("payout") is not None:
+        used.append("Payout")
+    if not used:
+        used = ["Score de Estrategias", "Payout"]
+
+    strategy_name = "Confluência " + " + ".join(used)
+    strategy_reason = str(
+        candidate.get("reason")
+        or candidate.get("signal_explanation")
+        or "Maior score entre os ativos analisados."
+    ).strip()
+    return strategy_name, strategy_reason, used
+
+
 async def submit_bullex_order(
     user_id: str,
     endpoint: str,
@@ -1101,9 +1127,16 @@ async def execute_robot_cycle(
                     len(signals),
                 )
                 if not signals:
-                    state = auto_trader.reject_no_valid_signal(user_id, "NO_SIGNAL")
+                    state = auto_trader.reject_no_valid_signal(
+                        user_id,
+                        NO_MINIMUM_SCORE_MESSAGE,
+                    )
                     auto_trader.set_analysis_candidates(user_id, [], None)
-                    logger.info("[NO_VALID_SIGNAL] user_id=%s reason=NO_SIGNAL", user_id)
+                    logger.info(
+                        "[NO_VALID_SIGNAL] user_id=%s reason=%s",
+                        user_id,
+                        state.last_rejection_reason,
+                    )
                     logger.info(
                         "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
                         user_id,
@@ -1145,6 +1178,17 @@ async def execute_robot_cycle(
                         )
                         ranked["quality_reason"] = ASSET_NOT_ALLOWED
                     candidate = {
+                        **{
+                            key: ranked[key]
+                            for key in (
+                                "ema9",
+                                "ema21",
+                                "rsi",
+                                "body_ratio",
+                                "directional_candles_5",
+                            )
+                            if key in ranked
+                        },
                         "symbol": symbol,
                         "direction": ranked.get("direction") or ranked.get("signal") or "WAIT",
                         "signal": ranked.get("direction") or ranked.get("signal") or "WAIT",
@@ -1158,6 +1202,16 @@ async def execute_robot_cycle(
                         "trade_allowed": bool(allowed and ranked.get("trade_allowed")),
                         "strategy_mode": ranked.get("strategy_mode") or state.strategy_mode,
                     }
+                    strategy_name, strategy_reason, used_strategies = (
+                        build_strategy_narration(candidate)
+                    )
+                    candidate.update(
+                        {
+                            "strategy_name": strategy_name,
+                            "strategy_reason": strategy_reason,
+                            "used_strategies": used_strategies,
+                        }
+                    )
                     candidates.append(candidate)
 
                 approved_candidates = [
@@ -1193,39 +1247,7 @@ async def execute_robot_cycle(
                         ),
                         default=None,
                     )
-                    last_rejection_reason = "NO_SIGNAL"
-                    if highest_rejected:
-                        hard_reasons = [
-                            reason
-                            for reason in highest_rejected["blocked_filters"]
-                            if reason
-                            in {
-                                "MIN_PAYOUT",
-                                "MIN_CONFIDENCE",
-                                "SIGNAL_WAIT",
-                                "INSUFFICIENT_CANDLES",
-                                ASSET_NOT_ALLOWED,
-                            }
-                        ]
-                        reason_priority = [
-                            ASSET_NOT_ALLOWED,
-                            "INSUFFICIENT_CANDLES",
-                            "SIGNAL_WAIT",
-                            "MIN_PAYOUT",
-                            "MIN_CONFIDENCE",
-                        ]
-                        primary_reason = next(
-                            (
-                                reason
-                                for reason in reason_priority
-                                if reason in hard_reasons
-                            ),
-                            None,
-                        )
-                        last_rejection_reason = (
-                            primary_reason
-                            or str(highest_rejected.get("reason") or "NO_VALID_SIGNAL")
-                        )
+                    last_rejection_reason = NO_MINIMUM_SCORE_MESSAGE
                     state = auto_trader.reject_no_valid_signal(
                         user_id,
                         last_rejection_reason,
@@ -1254,13 +1276,16 @@ async def execute_robot_cycle(
                     return 200, build_robot_payload(state)
 
                 logger.info(
-                    "[BEST_CANDIDATE_SELECTED] user_id=%s symbol=%s direction=%s strategy_score=%s confidence=%s payout=%s",
+                    "[BEST_CANDIDATE_SELECTED] user_id=%s symbol=%s direction=%s strategy_score=%s confidence=%s payout=%s strategy_name=%s strategy_reason=%s used_strategies=%s",
                     user_id,
                     selected["symbol"],
                     selected["direction"],
                     selected["strategy_score"],
                     selected["confidence"],
                     selected["payout"],
+                    selected["strategy_name"],
+                    selected["strategy_reason"],
+                    selected["used_strategies"],
                 )
 
                 state = auto_trader.set_pending_signal(user_id, selected)
@@ -1867,6 +1892,11 @@ async def robot_config(
     user_id = auth["user_id"]
     get_user_robot_state(user_id)
     state = auto_trader.update_config(user_id, body)
+    logger.info(
+        "[CYCLE_CONFIG] user_id=%s cycle_minutes=%s source=robot_config",
+        user_id,
+        state.cycle_minutes,
+    )
     persist_robot(user_id)
     if state.enabled:
         ensure_robot_worker(user_id)
@@ -1895,6 +1925,11 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
             return json_response(403, build_error(block_reason))
 
     state = auto_trader.start(user_id)
+    logger.info(
+        "[CYCLE_CONFIG] user_id=%s cycle_minutes=%s source=robot_start",
+        user_id,
+        state.cycle_minutes,
+    )
     persist_robot(user_id)
     ensure_robot_worker(user_id)
     logger.info(

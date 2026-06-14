@@ -210,7 +210,10 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_code, 200)
         self.assertEqual(data["status"], "SIGNAL_REJECTED")
         self.assertEqual(data["rejection_reason"], "NO_VALID_SIGNAL")
-        self.assertEqual(data["last_rejection_reason"], "MIN_CONFIDENCE")
+        self.assertEqual(
+            data["last_rejection_reason"],
+            "Nenhum ativo atingiu score mínimo.",
+        )
         self.assertEqual(data["last_analysis_result"], "NO_VALID_SIGNAL")
         self.assertIn("TREND_CLEAR", data["blocked_filters"])
         self.assertIn("MIN_CONFIDENCE", data["blocked_filters"])
