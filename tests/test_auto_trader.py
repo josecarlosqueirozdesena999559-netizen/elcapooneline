@@ -10,6 +10,7 @@ from backend.auto_trader import (
     STATUS_ACCOUNT_DISCONNECTED,
     STATUS_ORDER_REJECTED,
     STATUS_PENDING_RESULT,
+    STATUS_RESULT_RECEIVED,
     STATUS_SENDING_ORDER,
     STATUS_STOPPED,
     STATUS_WAITING_NEXT_CYCLE,
@@ -274,7 +275,7 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertEqual(payload["last_trade"]["result"], "PENDING_RESULT")
         self.assertGreaterEqual(payload["expiration_seconds"], 257)
         self.assertLessEqual(payload["expiration_seconds"], 258)
-        self.assertFalse(payload["result_waiting"])
+        self.assertTrue(payload["result_waiting"])
         self.assertTrue(payload["show_expiration_countdown"])
         self.assertTrue(payload["operation_message"].startswith("Expira em "))
         self.assertNotEqual(payload["operation_message"], "Expira em 00:00")
@@ -466,7 +467,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_robot_state_after_result_returns_next_cycle_contract(self) -> None:
+    async def test_robot_state_after_result_keeps_result_visible_for_five_seconds(self) -> None:
         user_id = "user-result-state"
         state = main.auto_trader.start(user_id)
         state.cycle_minutes = 10
@@ -504,13 +505,21 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             response = await main.robot_state({"user_id": user_id})
 
         payload = json.loads(response.body)["data"]
-        self.assertEqual(payload["status"], "WAITING_NEXT_CYCLE")
+        self.assertEqual(payload["status"], STATUS_RESULT_RECEIVED)
         self.assertEqual(payload["last_trade"]["result"], "WIN")
         self.assertIsNotNone(payload["last_trade"]["finished_at"])
+        self.assertIsNotNone(payload["result_received_at"])
+        self.assertIsNotNone(payload["result_display_until"])
+        self.assertFalse(payload["result_waiting"])
         self.assertFalse(payload["operation_in_progress"])
         self.assertFalse(payload["entry_window_open"])
-        self.assertGreaterEqual(payload["seconds_until_next_cycle"], 599)
-        self.assertLessEqual(payload["seconds_until_next_cycle"], 600)
+        self.assertEqual(payload["seconds_until_next_cycle"], 0)
+
+        state.result_display_until = utc_now() - timedelta(seconds=1)
+        waiting_payload = state.to_dict()
+        self.assertEqual(waiting_payload["status"], STATUS_WAITING_NEXT_CYCLE)
+        self.assertGreaterEqual(waiting_payload["seconds_until_next_cycle"], 599)
+        self.assertLessEqual(waiting_payload["seconds_until_next_cycle"], 600)
 
     async def test_demo_sends_at_most_one_order_per_cycle(self) -> None:
         user_id = "user-demo"
@@ -1447,7 +1456,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trade["direction"], "PUT")
         self.assertEqual(trade["order_attempts"], 2)
         self.assertTrue(trade["fallback_candidate_used"])
-        monitor.assert_called_once_with(user_id, "fallback-1")
+        monitor.assert_called_once_with(user_id, "fallback-1", trade["expires_at"])
         self.assertIn("[ORDER_SEND_FAILED]", output)
         self.assertIn("[ORDER_FALLBACK_NEXT_CANDIDATE]", output)
         self.assertIn("[ORDER_SEND_SUCCESS]", output)
@@ -2084,7 +2093,11 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_payload["data"]["status"], "PENDING_RESULT")
         self.assertEqual(len(orders), 1)
         self.assertTrue(orders[0][2]["confirm_real"])
-        monitor.assert_called_once_with(user_id, "real-1")
+        monitor.assert_called_once_with(
+            user_id,
+            "real-1",
+            second_payload["data"]["last_trade"]["expires_at"],
+        )
 
     async def test_pending_signal_waits_then_sends_without_reanalysis(self) -> None:
         user_id = "user-window-wait"

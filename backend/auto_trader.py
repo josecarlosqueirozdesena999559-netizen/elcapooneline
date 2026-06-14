@@ -20,6 +20,7 @@ STATUS_SIGNAL_REJECTED = "SIGNAL_REJECTED"
 STATUS_ENTRY_SENT = "ENTRY_SENT"
 STATUS_SENDING_ORDER = "SENDING_ORDER"
 STATUS_PENDING_RESULT = "PENDING_RESULT"
+STATUS_RESULT_RECEIVED = "RESULT_RECEIVED"
 STATUS_ORDER_REJECTED = "ORDER_REJECTED"
 STATUS_ERROR = "ERROR"
 STATUS_REAL_TRADING_LOCKED = "REAL_TRADING_LOCKED"
@@ -110,6 +111,8 @@ class RobotState:
     analysis_result: str | None = None
     analysis_message: str | None = None
     rejected_at: datetime | None = None
+    result_received_at: datetime | None = None
+    result_display_until: datetime | None = None
     operation_in_progress: bool = False
     last_signal: dict[str, Any] | None = None
     pending_signal: dict[str, Any] | None = None
@@ -158,11 +161,23 @@ class RobotState:
             "last_analysis_at",
             "analysis_started_at",
             "rejected_at",
+            "result_received_at",
+            "result_display_until",
             "connection_checked_at",
         ):
             value = data[key]
             data[key] = value.isoformat() if value is not None else None
         now = utc_now()
+        if (
+            self.status == STATUS_RESULT_RECEIVED
+            and self.result_display_until is not None
+            and now >= self.result_display_until
+        ):
+            self.status = STATUS_WAITING_NEXT_CYCLE if self.enabled else STATUS_STOPPED
+            self.next_cycle_at = now + timedelta(minutes=self.cycle_minutes) if self.enabled else None
+            self.rejection_reason = None
+            data["status"] = self.status
+            data["next_cycle_at"] = self.next_cycle_at.isoformat() if self.next_cycle_at is not None else None
         if self.status in {STATUS_SIGNAL_REJECTED, STATUS_ORDER_REJECTED} and self.rejected_at is not None:
             if (now - self.rejected_at).total_seconds() >= 5:
                 data["status"] = STATUS_WAITING_NEXT_CYCLE if self.enabled else STATUS_STOPPED
@@ -197,7 +212,10 @@ class RobotState:
             data["analysis_message"] = ANALYSIS_MESSAGE
         configured_expiration = TIMEFRAME_SECONDS[self.timeframe]
         data["expiration_seconds"] = configured_expiration
-        data["result_waiting"] = False
+        data["result_waiting"] = bool(
+            self.operation_in_progress
+            and str((self.last_trade or {}).get("result") or "").upper() not in {"WIN", "LOSS", "TIMEOUT"}
+        )
         data["operation_message"] = None
         data["expiration_display"] = None
         data["show_expiration_countdown"] = False
@@ -238,12 +256,12 @@ class RobotState:
                     )
                     data["expiration_seconds"] = expiration_seconds
                     result = str(trade.get("result") or "").strip().upper()
-                    data["result_waiting"] = expiration_seconds <= 0 and result not in {"WIN", "LOSS"}
+                    data["result_waiting"] = result not in {"WIN", "LOSS", "TIMEOUT"}
                     if data["result_waiting"]:
                         data["status"] = STATUS_PENDING_RESULT
                 result = str(trade.get("result") or "").strip().upper()
                 if result not in {"WIN", "LOSS"}:
-                    if int(data["expiration_seconds"]) <= 0 or data["result_waiting"]:
+                    if int(data["expiration_seconds"]) <= 0:
                         data["status"] = STATUS_PENDING_RESULT
                         data["result_waiting"] = True
                         data["operation_message"] = RESULT_WAITING_MESSAGE
@@ -316,6 +334,8 @@ class AutoTrader:
             "last_analysis_at",
             "analysis_started_at",
             "rejected_at",
+            "result_received_at",
+            "result_display_until",
             "connection_checked_at",
         }
         for key, value in payload.items():
@@ -325,7 +345,14 @@ class AutoTrader:
                 value = datetime.fromisoformat(value.replace("Z", "+00:00"))
             setattr(state, key, value)
 
-        if state.enabled and state.pending_signal:
+        result_visible = (
+            state.status == STATUS_RESULT_RECEIVED
+            and state.result_display_until is not None
+            and utc_now() < state.result_display_until
+        )
+        if result_visible:
+            state.operation_in_progress = False
+        elif state.enabled and state.pending_signal:
             state.status = STATUS_WAITING_ENTRY_WINDOW
             state.rejection_reason = STATUS_WAITING_ENTRY_WINDOW
         elif state.enabled and not state.operation_in_progress:
@@ -384,6 +411,8 @@ class AutoTrader:
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.last_order_error = None
+        state.result_received_at = None
+        state.result_display_until = None
         state.order_attempts = 0
         state.fallback_candidate_used = False
         state.rejected_at = None
@@ -424,6 +453,11 @@ class AutoTrader:
         if not state.enabled:
             state.status = STATUS_STOPPED
             return False, state
+        if state.status == STATUS_RESULT_RECEIVED and state.result_display_until is not None:
+            if now < state.result_display_until:
+                return False, state
+            state.status = STATUS_WAITING_NEXT_CYCLE
+            state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
         last_trade_result = str((state.last_trade or {}).get("result") or "").upper()
         result_waiting = (
             state.status == STATUS_PENDING_RESULT
@@ -685,7 +719,7 @@ class AutoTrader:
         state.last_analysis_result = analysis_result
         state.analysis_message = None
         state.operation_in_progress = False
-        state.analysis_window_open = bool(window["analysis_window_open"])
+        state.analysis_window_open = bool(window["analysis_window_open"]) and not force_next
         if force_next:
             seconds_until_analysis_window = math.ceil(
                 float(window["expiration_seconds"])
@@ -879,6 +913,8 @@ class AutoTrader:
         trade.setdefault("expires_at", trade["expected_expire_at"])
         state.last_trade = trade
         state.last_entry_at = sent_at
+        state.result_received_at = None
+        state.result_display_until = None
         state.operation_in_progress = True
         state.status = STATUS_PENDING_RESULT
         state.rejection_reason = None
@@ -905,7 +941,11 @@ class AutoTrader:
         state.seconds_until_analysis_window = int(window["seconds_until_analysis_window"])
         state.analysis_window_start_second = int(window["analysis_window_start_second"])
         state.analysis_window_end_second = int(window["analysis_window_end_second"])
-        state.entry_window_open = bool(window["entry_window_open"]) and not waiting_next_cycle
+        state.entry_window_open = (
+            bool(window["entry_window_open"])
+            and not waiting_next_cycle
+            and state.status != STATUS_RESULT_RECEIVED
+        )
         state.seconds_until_entry_window = int(window["seconds_until_entry_window"])
         state.current_candle_seconds = float(window["current_candle_seconds"])
         state.entry_window_start_second = int(window["entry_window_start_second"])
@@ -967,12 +1007,14 @@ class AutoTrader:
         completed.add(normalized_order_id)
         state.last_trade = trade
         state.operation_in_progress = False
-        state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
+        state.status = STATUS_RESULT_RECEIVED
         state.rejection_reason = None
         state.last_rejection_reason = None
+        state.result_received_at = finished_at
+        state.result_display_until = finished_at + timedelta(seconds=5)
         state.entry_window_open = False
         state.seconds_until_entry_window = 0
-        self._schedule_next_cycle(state, finished_at)
+        state.next_cycle_at = None
         state.profit = round(state.profit, 2)
         history = self._histories.setdefault(user_id, [])
         history.append(dict(trade))

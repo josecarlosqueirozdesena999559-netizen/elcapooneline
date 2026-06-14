@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from backend.auto_trader import AutoTrader, STATUS_WAITING_NEXT_CYCLE
+from backend.auto_trader import AutoTrader, STATUS_RESULT_RECEIVED
 from backend.robot_persistence import SQLiteRobotPersistence
 from bullex_service import main as bullex_main
 from bullex_service.session_store import SessionStore
@@ -371,7 +371,7 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             restored = restored_trader.restore(user_id, payload, persistence.load_trades(user_id))
 
             self.assertTrue(restored.enabled)
-            self.assertEqual(restored.status, STATUS_WAITING_NEXT_CYCLE)
+            self.assertEqual(restored.status, STATUS_RESULT_RECEIVED)
             self.assertEqual(restored.entry_value, 5)
             self.assertEqual(restored.wins, 1)
             self.assertEqual(restored.profit, 4.4)

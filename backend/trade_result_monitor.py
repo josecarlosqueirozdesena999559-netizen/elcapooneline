@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from time import monotonic
 from typing import Any
 
@@ -44,11 +45,11 @@ class TradeResultMonitor:
     fetch_result: FetchResult
     finish_trade: FinishTrade
     timeout_trade: TimeoutTrade
-    poll_seconds: float = 3.0
+    poll_seconds: float = 1.0
     timeout_seconds: float = 2100.0
     _tasks: dict[tuple[str, str], asyncio.Task[None]] = field(default_factory=dict)
 
-    def start(self, user_id: str, order_id: Any) -> bool:
+    def start(self, user_id: str, order_id: Any, expires_at: Any = None) -> bool:
         normalized_order_id = str(order_id or "").strip()
         if not normalized_order_id:
             return False
@@ -58,7 +59,7 @@ class TradeResultMonitor:
         if task is not None and not task.done():
             return False
 
-        self._tasks[key] = asyncio.create_task(self._monitor(user_id, normalized_order_id))
+        self._tasks[key] = asyncio.create_task(self._monitor(user_id, normalized_order_id, expires_at))
         logger.info("[RESULT_MONITOR_START] user_id=%s order_id=%s", user_id, normalized_order_id)
         return True
 
@@ -71,11 +72,30 @@ class TradeResultMonitor:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _monitor(self, user_id: str, order_id: str) -> None:
+    async def _monitor(self, user_id: str, order_id: str, expires_at: Any = None) -> None:
         key = (user_id, order_id)
-        started_at = monotonic()
         logger.info("[ROBOT TRADE MONITOR START] user_id=%s order_id=%s", user_id, order_id)
         try:
+            if expires_at is not None:
+                try:
+                    expiration = (
+                        expires_at
+                        if isinstance(expires_at, datetime)
+                        else datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                    )
+                    if expiration.tzinfo is None:
+                        expiration = expiration.replace(tzinfo=timezone.utc)
+                    delay = max(0.0, (expiration - datetime.now(timezone.utc)).total_seconds())
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "[RESULT_MONITOR_EXPIRATION_INVALID] user_id=%s order_id=%s expires_at=%s",
+                        user_id,
+                        order_id,
+                        expires_at,
+                    )
+            started_at = monotonic()
             while monotonic() - started_at < self.timeout_seconds:
                 try:
                     _, payload = await self.fetch_result(user_id, order_id)

@@ -1,12 +1,13 @@
 import asyncio
 import unittest
 from datetime import timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from backend.auto_trader import (
     AutoTrader,
     STATUS_ANALYZING,
     STATUS_PENDING_RESULT,
+    STATUS_RESULT_RECEIVED,
     STATUS_WAITING_NEXT_CYCLE,
     parse_datetime,
     utc_now,
@@ -40,7 +41,7 @@ class AutoTraderResultTests(unittest.TestCase):
         self.assertTrue(first)
         self.assertFalse(second)
         self.assertFalse(state.operation_in_progress)
-        self.assertEqual(state.status, STATUS_WAITING_NEXT_CYCLE)
+        self.assertEqual(state.status, STATUS_RESULT_RECEIVED)
         self.assertEqual(duplicate_state.wins, 1)
         self.assertEqual(history["wins"], 1)
         self.assertEqual(history["losses"], 0)
@@ -50,16 +51,23 @@ class AutoTraderResultTests(unittest.TestCase):
         self.assertEqual(history["trades"][0]["result"], "WIN")
         finished_at = state.last_trade["finished_at"]
         self.assertIsNotNone(finished_at)
-        self.assertEqual(
-            state.next_cycle_at,
-            parse_datetime(finished_at) + timedelta(minutes=state.cycle_minutes),
-        )
+        self.assertIsNone(state.next_cycle_at)
+        self.assertEqual(state.result_received_at, parse_datetime(finished_at))
+        self.assertEqual(state.result_display_until, parse_datetime(finished_at) + timedelta(seconds=5))
         payload = state.to_dict()
-        self.assertEqual(payload["status"], STATUS_WAITING_NEXT_CYCLE)
+        self.assertEqual(payload["status"], STATUS_RESULT_RECEIVED)
+        self.assertIsNotNone(payload["result_received_at"])
+        self.assertIsNotNone(payload["result_display_until"])
+        self.assertFalse(payload["result_waiting"])
         self.assertFalse(payload["operation_in_progress"])
         self.assertFalse(payload["entry_window_open"])
-        self.assertGreaterEqual(payload["seconds_until_next_cycle"], 299)
-        self.assertLessEqual(payload["seconds_until_next_cycle"], 300)
+        self.assertEqual(payload["seconds_until_next_cycle"], 0)
+
+        state.result_display_until = utc_now() - timedelta(seconds=1)
+        waiting_payload = state.to_dict()
+        self.assertEqual(waiting_payload["status"], STATUS_WAITING_NEXT_CYCLE)
+        self.assertGreaterEqual(waiting_payload["seconds_until_next_cycle"], 299)
+        self.assertLessEqual(waiting_payload["seconds_until_next_cycle"], 300)
 
     def test_loss_subtracts_entry_amount(self) -> None:
         trader = AutoTrader()
@@ -110,6 +118,10 @@ class AutoTraderResultTests(unittest.TestCase):
         can_run, waiting = trader.prepare_cycle("user-cycle-delay")
 
         self.assertFalse(can_run)
+        self.assertEqual(waiting.status, STATUS_RESULT_RECEIVED)
+        waiting.result_display_until = utc_now() - timedelta(seconds=1)
+        can_run, waiting = trader.prepare_cycle("user-cycle-delay")
+        self.assertFalse(can_run)
         self.assertEqual(waiting.status, STATUS_WAITING_NEXT_CYCLE)
         waiting.next_cycle_at = utc_now() - timedelta(seconds=1)
 
@@ -120,6 +132,10 @@ class AutoTraderResultTests(unittest.TestCase):
 
 
 class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
+    def test_default_poll_interval_is_one_second(self) -> None:
+        monitor = TradeResultMonitor(AsyncMock(), AsyncMock(), AsyncMock())
+        self.assertEqual(monitor.poll_seconds, 1.0)
+
     def test_normalizes_bullex_results(self) -> None:
         self.assertEqual(
             normalize_trade_result({"ok": True, "data": {"result": "win", "profit": 1.76}}),
@@ -151,6 +167,24 @@ class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fetch.await_count, 2)
         finish.assert_awaited_once_with("user-monitor", "104", "WIN", 1.76)
         timeout.assert_not_awaited()
+
+    async def test_monitor_waits_until_expiration_before_fetching(self) -> None:
+        fetch = AsyncMock(
+            return_value=(200, {"ok": True, "data": {"result": "win", "profit": 1.5}, "error": None})
+        )
+        finish = AsyncMock()
+        timeout = AsyncMock()
+        monitor = TradeResultMonitor(fetch, finish, timeout, poll_seconds=1, timeout_seconds=1)
+        expires_at = utc_now() + timedelta(seconds=10)
+
+        with patch("backend.trade_result_monitor.asyncio.sleep", new=AsyncMock()) as sleep:
+            monitor.start("user-monitor-delay", "106", expires_at.isoformat())
+            await asyncio.gather(*list(monitor._tasks.values()))
+
+        self.assertEqual(sleep.await_count, 1)
+        self.assertGreater(sleep.await_args.args[0], 9)
+        fetch.assert_awaited_once_with("user-monitor-delay", "106")
+        finish.assert_awaited_once_with("user-monitor-delay", "106", "WIN", 1.5)
 
     async def test_monitor_times_out_and_releases_trade(self) -> None:
         fetch = AsyncMock(return_value=(200, {"ok": True, "data": {"result": "PENDING_RESULT"}, "error": None}))

@@ -48,8 +48,6 @@ CRITICAL_TRADE_BLOCKS = {
     "STOP_WIN_HIT",
     "STOP_LOSS_HIT",
     "ACTIVE_CLOSED",
-    "ACTIVE_SUSPENDED",
-    "PAYOUT_UNAVAILABLE",
     "OPERATION_IN_PROGRESS",
     "CANDLES_UNAVAILABLE",
 }
@@ -841,6 +839,13 @@ def apply_strategy_guard(
 
     confidence = int(selected.get("confidence") or 0)
     direction = str(selected.get("signal") or selected.get("direction") or "WAIT").upper()
+    if direction not in {"CALL", "PUT"} and not any(
+        reason in blocked_filters for reason in ("CANDLES_UNAVAILABLE", "INSUFFICIENT_CANDLES")
+    ):
+        trend = str(selected.get("trend") or "").upper()
+        ema9 = float(selected.get("ema9") or 0)
+        ema21 = float(selected.get("ema21") or 0)
+        direction = "PUT" if trend in {"DOWN", "BEARISH"} or (ema9 and ema21 and ema9 < ema21) else "CALL"
     if payout is None:
         set_filter("PAYOUT_UNAVAILABLE", False)
     else:
@@ -1291,6 +1296,106 @@ async def scan_local_signals(
     return 200, build_success(limited_signals)
 
 
+def simple_candle_direction(candles: list[dict[str, Any]]) -> str:
+    prices: list[float] = []
+    for candle in candles:
+        value = candle.get("close", candle.get("close_price", candle.get("c")))
+        try:
+            prices.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    if len(prices) < 2:
+        return "CALL"
+    return "CALL" if prices[-1] >= prices[0] else "PUT"
+
+
+async def select_fallback_candidate(
+    user_id: str,
+    state: Any,
+    *,
+    endtime: int | None = None,
+) -> dict[str, Any] | None:
+    for symbol in BINARY_ALLOWED_ASSETS:
+        try:
+            payout_status, payout_payload = await call_bullex_service(
+                "GET",
+                "/payouts",
+                user_id,
+                params={"active": symbol},
+            )
+            mark_disconnected_from_payload(user_id, payout_payload)
+            payout = (
+                extract_payout(payout_payload, symbol)
+                if payout_status < 400 and payout_payload.get("ok")
+                else None
+            )
+            if payout is None:
+                continue
+
+            candle_params: dict[str, Any] = {
+                "active": symbol,
+                "interval": TIMEFRAME_SECONDS[state.timeframe],
+                "count": 5,
+            }
+            if endtime is not None:
+                candle_params["endtime"] = endtime
+            candle_status, candle_payload = await call_bullex_service(
+                "GET",
+                "/candles",
+                user_id,
+                params=candle_params,
+            )
+            mark_disconnected_from_payload(user_id, candle_payload)
+            candles = extract_candles(candle_payload) if candle_status < 400 else []
+            if not candles:
+                continue
+        except Exception as exc:
+            logger.debug(
+                "[FALLBACK_CANDIDATE_SKIPPED] user_id=%s symbol=%s error=%s",
+                user_id,
+                symbol,
+                exc,
+            )
+            continue
+
+        direction = simple_candle_direction(candles)
+        candidate = {
+            "symbol": symbol,
+            "direction": direction,
+            "signal": direction,
+            "strategy_score": 1,
+            "score": 1,
+            "quality_score": 1,
+            "confidence": 1,
+            "payout": payout,
+            "reason": "Fallback operacional pelo movimento simples das ultimas velas.",
+            "approved_filters": ["FALLBACK_OPEN_ASSET"],
+            "blocked_filters": [],
+            "trade_allowed": True,
+            "strategy_mode": state.strategy_mode,
+            "target_entry_second": state.buy_target_second,
+            "entry_window_start_second": state.entry_window_start_second,
+            "entry_window_end_second": state.entry_window_end_second,
+        }
+        strategy_name, strategy_reason, used_strategies = build_strategy_narration(candidate)
+        candidate.update(
+            {
+                "strategy_name": strategy_name,
+                "strategy_reason": strategy_reason,
+                "used_strategies": used_strategies,
+            }
+        )
+        logger.info(
+            "[FALLBACK_CANDIDATE_SELECTED] user_id=%s symbol=%s direction=%s payout=%s",
+            user_id,
+            symbol,
+            direction,
+            payout,
+        )
+        return candidate
+    return None
+
+
 async def fetch_trade_result(user_id: str, order_id: str) -> tuple[int, dict[str, Any]]:
     status_code, payload = await call_bullex_service("GET", f"/orders/{order_id}/result", user_id)
     mark_disconnected_from_payload(user_id, payload)
@@ -1317,9 +1422,9 @@ async def finish_monitored_trade(user_id: str, order_id: str, result: str, profi
                     order_id,
                 )
             logger.info(
-                "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                "[RESULT_DISPLAY_UNTIL] user_id=%s result_display_until=%s",
                 user_id,
-                state.next_cycle_at,
+                state.result_display_until,
             )
         persist_robot(user_id)
 
@@ -1515,12 +1620,17 @@ async def execute_robot_cycle(
                     endtime=int(entry_window["server_timestamp"]),
                     strategy_mode=state.strategy_mode,
                 )
+                scan_error = None
                 if not scan_payload.get("ok"):
-                    error = str(scan_payload.get("error") or "SIGNAL_SCAN_FAILED")
-                    state = recover_analysis_error_to_window(user_id, error, entry_window)
-                    return scan_status, build_robot_payload(state)
-
-                signals = [item for item in scan_payload.get("data", []) if isinstance(item, dict)]
+                    scan_error = str(scan_payload.get("error") or "SIGNAL_SCAN_FAILED")
+                    logger.warning(
+                        "[ANALYSIS_ERROR_RECOVERED] user_id=%s error=%s action=FALLBACK_CANDIDATE",
+                        user_id,
+                        scan_error,
+                    )
+                    signals = []
+                else:
+                    signals = [item for item in scan_payload.get("data", []) if isinstance(item, dict)]
                 logger.info(
                     "[ANALYSIS_FINISHED] user_id=%s cycle_id=%s candidates=%s",
                     user_id,
@@ -1528,21 +1638,31 @@ async def execute_robot_cycle(
                     len(signals),
                 )
                 if not signals:
-                    state = auto_trader.wait_analysis_window(
+                    fallback = await select_fallback_candidate(
                         user_id,
-                        entry_window,
-                        clear_pending=True,
-                        analysis_result="NO_CANDIDATE_THIS_CANDLE",
-                        last_rejection_reason="CANDLES_UNAVAILABLE",
-                        force_next=True,
+                        state,
+                        endtime=int(entry_window["server_timestamp"]),
                     )
-                    auto_trader.set_analysis_candidates(user_id, [], None)
-                    logger.info(
-                        "[NO_CANDIDATE_THIS_CANDLE] user_id=%s reason=%s",
-                        user_id,
-                        state.last_rejection_reason,
-                    )
-                    return 200, build_robot_payload(state)
+                    if fallback is not None:
+                        signals = [fallback]
+                    else:
+                        state = auto_trader.wait_analysis_window(
+                            user_id,
+                            entry_window,
+                            clear_pending=True,
+                            analysis_result="NO_CANDIDATE_THIS_CANDLE",
+                            last_rejection_reason="CANDLES_UNAVAILABLE",
+                            force_next=True,
+                        )
+                        if scan_error is not None:
+                            state.last_order_error = readable_order_error(scan_error)
+                        auto_trader.set_analysis_candidates(user_id, [], None)
+                        logger.info(
+                            "[NO_CANDIDATE_THIS_CANDLE] user_id=%s reason=%s",
+                            user_id,
+                            state.last_rejection_reason,
+                        )
+                        return 200, build_robot_payload(state)
 
                 candidates: list[dict[str, Any]] = []
                 for raw_signal in signals:
@@ -1587,10 +1707,10 @@ async def execute_robot_cycle(
                         ranked["trade_allowed"] = False
                         ranked["blocked_filters"] = list(
                             dict.fromkeys(
-                                [*ranked.get("blocked_filters", []), "ACTIVE_SUSPENDED"]
+                                [*ranked.get("blocked_filters", []), "ACTIVE_CLOSED"]
                             )
                         )
-                        ranked["quality_reason"] = "ACTIVE_SUSPENDED"
+                        ranked["quality_reason"] = "ACTIVE_CLOSED"
                     elif raw_signal.get("is_open") is False or active_status in {
                         "CLOSED",
                         "INACTIVE",
@@ -1645,7 +1765,11 @@ async def execute_robot_cycle(
                     candidates.append(candidate)
 
                 approved_candidates = [
-                    candidate for candidate in candidates if candidate["trade_allowed"]
+                    candidate
+                    for candidate in candidates
+                    if candidate["trade_allowed"]
+                    and candidate.get("payout") is not None
+                    and candidate.get("direction") in {"CALL", "PUT"}
                 ]
                 selected = (
                     max(
@@ -1669,6 +1793,17 @@ async def execute_robot_cycle(
                 )
 
                 if selected is None:
+                    fallback = await select_fallback_candidate(
+                        user_id,
+                        state,
+                        endtime=int(entry_window["server_timestamp"]),
+                    )
+                    if fallback is not None:
+                        candidates.append(fallback)
+                        selected = fallback
+                        auto_trader.set_analysis_candidates(user_id, candidates, selected)
+
+                if selected is None:
                     highest_rejected = max(
                         candidates,
                         key=lambda item: (
@@ -1681,10 +1816,8 @@ async def execute_robot_cycle(
                     critical_reasons = [
                         reason
                         for reason in (
-                            "ACTIVE_SUSPENDED",
                             "ACTIVE_CLOSED",
                             "CANDLES_UNAVAILABLE",
-                            "PAYOUT_UNAVAILABLE",
                             "ACCOUNT_DISCONNECTED",
                             "STOP_WIN_HIT",
                             "STOP_LOSS_HIT",
@@ -1692,6 +1825,8 @@ async def execute_robot_cycle(
                         )
                         if reason in blocked_reasons
                     ]
+                    if "PAYOUT_UNAVAILABLE" in blocked_reasons:
+                        critical_reasons.append("ACTIVE_CLOSED")
                     last_rejection_reason = (
                         critical_reasons[0]
                         if critical_reasons
@@ -2064,7 +2199,7 @@ async def execute_robot_cycle(
                         user_id,
                         trade.get("order_id"),
                     )
-                trade_result_monitor.start(user_id, order_id)
+                trade_result_monitor.start(user_id, order_id, trade.get("expires_at"))
                 return 200, build_robot_payload(state)
 
             final_error = NO_AVAILABLE_ASSET_ERROR if attempted_unavailable or skipped_candidates else last_friendly_error
@@ -2096,6 +2231,24 @@ async def execute_robot_cycle(
             return 500, build_robot_payload(state)
         finally:
             persist_robot(user_id)
+
+
+async def run_analysis_now(user_id: str) -> tuple[int, dict[str, Any]]:
+    state = auto_trader.get(user_id)
+    if (
+        not state.enabled
+        or not state.connected
+        or state.operation_in_progress
+        or state.pending_signal is not None
+    ):
+        return 200, build_robot_payload(state)
+    logger.info(
+        "[ANALYSIS_FORCED_START] user_id=%s current_candle_seconds=%s",
+        user_id,
+        state.current_candle_seconds,
+    )
+    state.next_cycle_at = utc_now()
+    return await execute_robot_cycle(user_id)
 
 
 async def robot_worker(user_id: str) -> None:
@@ -2183,7 +2336,11 @@ async def restore_robot_states() -> None:
             if state.operation_in_progress and state.last_trade:
                 order_id = state.last_trade.get("order_id")
                 if order_id:
-                    trade_result_monitor.start(user_id, order_id)
+                    trade_result_monitor.start(
+                        user_id,
+                        order_id,
+                        state.last_trade.get("expires_at"),
+                    )
             if state.enabled:
                 ensure_robot_worker(user_id)
             robot_persistence.save_restore_status(
@@ -2343,6 +2500,22 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
         window,
     )
     _, state = recover_running_analysis_if_needed(user_id, window)
+    if (
+        state.enabled
+        and connected
+        and state.status == STATUS_WAITING_ANALYSIS_WINDOW
+        and state.analysis_window_open
+        and state.pending_signal is None
+        and not state.operation_in_progress
+    ):
+        logger.info(
+            "[ANALYSIS_WINDOW_OPEN] user_id=%s timeframe=%s current_candle_seconds=%s source=robot_state",
+            user_id,
+            state.timeframe,
+            state.current_candle_seconds,
+        )
+        await run_analysis_now(user_id)
+        state = auto_trader.get(user_id)
     block_reason = real_block_reason(state, connected=connected, active_mode=active_mode)
     return json_response(
         200,

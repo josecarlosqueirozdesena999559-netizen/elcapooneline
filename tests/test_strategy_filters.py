@@ -221,6 +221,74 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[BEST_CANDIDATE_SELECTED]", output)
         self.assertIn("[PENDING_SIGNAL_SET]", output)
 
+    async def test_open_analysis_window_forces_analysis_from_robot_state(self) -> None:
+        user_id = "user-force-open-window"
+        state = main.auto_trader.start(user_id)
+        state.status = "WAITING_ANALYSIS_WINDOW"
+        state.next_cycle_at = utc_now() + timedelta(seconds=40)
+
+        session_payload = main.build_success(
+            {"connected": True, "active_mode": "PRACTICE", "server_time": 10.0}
+        )
+        forced_result = (200, main.build_robot_payload(state))
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(return_value=(200, session_payload)),
+            ),
+            patch.object(
+                main,
+                "run_analysis_now",
+                new=AsyncMock(return_value=forced_result),
+            ) as forced_analysis,
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        self.assertEqual(response.status_code, 200)
+        forced_analysis.assert_awaited_once_with(user_id)
+
+    async def test_scan_error_uses_open_asset_fallback_and_creates_pending_signal(self) -> None:
+        user_id = "user-fallback-signal"
+        state = main.auto_trader.start(user_id)
+        state.next_cycle_at = utc_now() - timedelta(seconds=1)
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {"connected": True, "active_mode": "PRACTICE", "server_time": 10.0}
+                )
+            if path == "/payouts":
+                symbol = (params or {}).get("active")
+                data = [{"symbol": symbol, "payout": 90}] if symbol == "EURUSD-OTC" else []
+                return 200, main.build_success(data)
+            if path == "/candles":
+                return 200, main.build_success(
+                    [{"close": 1.0}, {"close": 1.1}, {"close": 1.2}]
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(
+                main,
+                "scan_local_signals",
+                new=AsyncMock(return_value=(500, main.build_error("SCAN_FAILED"))),
+            ),
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(data["pending_signal"]["symbol"], "EURUSD-OTC")
+        self.assertEqual(data["pending_signal"]["direction"], "CALL")
+        self.assertIsNotNone(data["best_candidate"])
+        output = "\n".join(logs.output)
+        self.assertIn("[FALLBACK_CANDIDATE_SELECTED]", output)
+        self.assertIn("[WAITING_ENTRY_WINDOW]", output)
+
     async def test_missing_candles_still_blocks_candidate(self) -> None:
         user_id = "user-no-candles"
         state = main.auto_trader.start(user_id)
@@ -291,7 +359,7 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_code, 200)
         self.assertEqual(data["status"], "WAITING_ANALYSIS_WINDOW")
         self.assertEqual(data["analysis_result"], "NO_CANDIDATE_THIS_CANDLE")
-        self.assertEqual(data["last_rejection_reason"], "PAYOUT_UNAVAILABLE")
+        self.assertEqual(data["last_rejection_reason"], "ACTIVE_CLOSED")
         self.assertIn("PAYOUT_UNAVAILABLE", data["blocked_filters"])
         self.assertIsNone(data["pending_signal"])
 
