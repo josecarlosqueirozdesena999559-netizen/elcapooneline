@@ -114,6 +114,10 @@ class RobotState:
     blocked_filters: list[str] = field(default_factory=list)
     approved_filters: list[str] = field(default_factory=list)
     quality_score: int = 0
+    strategy_score: int = 0
+    candidates_count: int = 0
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    best_candidate: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -298,6 +302,10 @@ class AutoTrader:
         state.blocked_filters = []
         state.approved_filters = []
         state.quality_score = 0
+        state.strategy_score = 0
+        state.candidates_count = 0
+        state.candidates = []
+        state.best_candidate = None
         state.cycle_id = self._new_cycle_id()
         state.current_cycle_started_at = now
         state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
@@ -333,6 +341,10 @@ class AutoTrader:
         state.rejection_reason = None
         state.last_analysis_at = now
         state.last_analysis_result = "STARTED"
+        state.candidates_count = 0
+        state.candidates = []
+        state.best_candidate = None
+        state.strategy_score = 0
         return True, state
 
     def reject(self, user_id: str, reason: str) -> RobotState:
@@ -359,6 +371,10 @@ class AutoTrader:
         state.blocked_filters = list(blocked_filters or [])
         state.approved_filters = list(approved_filters or [])
         state.quality_score = int(quality_score or 0)
+        state.strategy_score = 0
+        state.candidates_count = 0
+        state.candidates = []
+        state.best_candidate = None
         state.pending_signal = None
         state.last_signal = None
         state.operation_in_progress = False
@@ -398,10 +414,12 @@ class AutoTrader:
         state = self.get(user_id)
         pending_signal = {
             "symbol": signal["symbol"],
-            "direction": signal["signal"],
-            "signal": signal["signal"],
+            "direction": signal.get("direction") or signal["signal"],
+            "signal": signal.get("signal") or signal["direction"],
             "confidence": signal["confidence"],
             "payout": signal["payout"],
+            "strategy_score": int(signal.get("strategy_score") or 0),
+            "reason": signal.get("reason") or signal.get("signal_explanation"),
             "timeframe": state.timeframe,
             "quality_score": signal.get("quality_score", 0),
             "blocked_filters": list(signal.get("blocked_filters") or []),
@@ -420,6 +438,21 @@ class AutoTrader:
         state.blocked_filters = list(pending_signal["blocked_filters"])
         state.approved_filters = list(pending_signal["approved_filters"])
         state.quality_score = int(pending_signal["quality_score"] or 0)
+        state.strategy_score = int(pending_signal["strategy_score"] or 0)
+        state.best_candidate = dict(pending_signal)
+        return state
+
+    def set_analysis_candidates(
+        self,
+        user_id: str,
+        candidates: list[dict[str, Any]],
+        best_candidate: dict[str, Any] | None,
+    ) -> RobotState:
+        state = self.get(user_id)
+        state.candidates_count = len(candidates)
+        state.candidates = [dict(candidate) for candidate in candidates]
+        state.best_candidate = dict(best_candidate) if best_candidate is not None else None
+        state.strategy_score = int((best_candidate or {}).get("strategy_score") or 0)
         return state
 
     def clear_pending_signal(self, user_id: str, *, analyze: bool = False) -> RobotState:
@@ -435,6 +468,8 @@ class AutoTrader:
         state.blocked_filters = []
         state.approved_filters = []
         state.quality_score = 0
+        state.strategy_score = 0
+        state.best_candidate = None
         return state
 
     def disconnect_account(self, user_id: str) -> RobotState:
@@ -451,6 +486,10 @@ class AutoTrader:
         state.blocked_filters = []
         state.approved_filters = []
         state.quality_score = 0
+        state.strategy_score = 0
+        state.candidates_count = 0
+        state.candidates = []
+        state.best_candidate = None
         return state
 
     def start_sending_order(self, user_id: str) -> RobotState:

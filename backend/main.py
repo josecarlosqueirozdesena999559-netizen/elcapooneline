@@ -604,71 +604,112 @@ def apply_strategy_guard(
         "strategy_mode": signal.get("strategy_mode") or state.strategy_mode,
         "payout": payout,
     }
-    blocked_filters = list(selected.get("blocked_filters") or [])
-    approved_filters = list(selected.get("approved_filters") or [])
+    blocked_filters = list(dict.fromkeys(selected.get("blocked_filters") or []))
+    approved_filters = list(dict.fromkeys(selected.get("approved_filters") or []))
 
-    if state.strategy_mode == "conservative":
-        if payout is None or float(payout) < 85:
-            if "MIN_PAYOUT" not in blocked_filters:
-                blocked_filters.append("MIN_PAYOUT")
-        elif "MIN_PAYOUT" not in approved_filters:
-            approved_filters.append("MIN_PAYOUT")
-        if int(selected.get("confidence") or 0) < 90 and "MIN_CONFIDENCE" not in blocked_filters:
-            blocked_filters.append("MIN_CONFIDENCE")
-        if int(selected.get("strength") or 0) < 20 and "TREND_CLEAR" not in blocked_filters:
-            blocked_filters.append("TREND_CLEAR")
-        if selected.get("trend") == "SIDEWAYS" and "SIDEWAYS_FILTER" not in blocked_filters:
-            blocked_filters.append("SIDEWAYS_FILTER")
+    def set_filter(name: str, passed: bool) -> None:
+        if passed:
+            if name in blocked_filters:
+                blocked_filters.remove(name)
+            if name not in approved_filters:
+                approved_filters.append(name)
+        else:
+            if name in approved_filters:
+                approved_filters.remove(name)
+            if name not in blocked_filters:
+                blocked_filters.append(name)
 
-    direction = selected.get("signal")
+    confidence = int(selected.get("confidence") or 0)
+    direction = str(selected.get("signal") or selected.get("direction") or "WAIT").upper()
+    set_filter("MIN_PAYOUT", payout is not None and float(payout) >= state.min_payout)
+    set_filter("MIN_CONFIDENCE", confidence >= state.min_confidence)
+    if direction in {"CALL", "PUT"}:
+        if "SIGNAL_WAIT" in blocked_filters:
+            blocked_filters.remove("SIGNAL_WAIT")
+        if "SIGNAL_WAIT" in approved_filters:
+            approved_filters.remove("SIGNAL_WAIT")
+        if "DIRECTION_VALID" not in approved_filters:
+            approved_filters.append("DIRECTION_VALID")
+    else:
+        if "SIGNAL_WAIT" not in blocked_filters:
+            blocked_filters.append("SIGNAL_WAIT")
+    set_filter(
+        "TREND_CLEAR",
+        selected.get("trend") != "SIDEWAYS" and int(selected.get("strength") or 0) >= 20,
+    )
+    set_filter("SIDEWAYS_FILTER", selected.get("trend") != "SIDEWAYS")
+
     if {"ema9", "ema21"}.issubset(selected):
         ema9 = float(selected.get("ema9") or 0)
         ema21 = float(selected.get("ema21") or 0)
         ema_ok = (direction == "CALL" and ema9 > ema21) or (direction == "PUT" and ema9 < ema21)
-        if not ema_ok and "EMA_TREND" not in blocked_filters:
-            blocked_filters.append("EMA_TREND")
+        set_filter("EMA_TREND", ema_ok)
     if "rsi" in selected:
         rsi = float(selected.get("rsi") or 50)
         rsi_ok = (direction == "CALL" and 55 <= rsi <= 75) or (direction == "PUT" and 25 <= rsi <= 45)
-        if not rsi_ok and "RSI_RANGE" not in blocked_filters:
-            blocked_filters.append("RSI_RANGE")
+        set_filter("RSI_RANGE", rsi_ok)
     if "body_ratio" in selected and float(selected.get("body_ratio") or 0) < 0.55:
-        if "CANDLE_STRENGTH" not in blocked_filters:
-            blocked_filters.append("CANDLE_STRENGTH")
+        set_filter("CANDLE_STRENGTH", False)
     if direction == "CALL" and "upper_wick_ratio" in selected and float(selected.get("upper_wick_ratio") or 0) > 0.45:
-        if "WICK_REJECTION" not in blocked_filters:
-            blocked_filters.append("WICK_REJECTION")
+        set_filter("WICK_REJECTION", False)
     if direction == "PUT" and "lower_wick_ratio" in selected and float(selected.get("lower_wick_ratio") or 0) > 0.45:
-        if "WICK_REJECTION" not in blocked_filters:
-            blocked_filters.append("WICK_REJECTION")
+        set_filter("WICK_REJECTION", False)
     if "atr_pct" in selected and float(selected.get("atr_pct") or 0) < 0.0001:
-        if "VOLATILITY" not in blocked_filters:
-            blocked_filters.append("VOLATILITY")
+        set_filter("VOLATILITY", False)
     if "directional_candles_5" in selected and int(selected.get("directional_candles_5") or 0) < 3:
-        if "LAST_5_CONFIRMATION" not in blocked_filters:
-            blocked_filters.append("LAST_5_CONFIRMATION")
+        set_filter("LAST_5_CONFIRMATION", False)
     if selected.get("alternating_last_3") and "NO_ALTERNATING_LAST_3" not in blocked_filters:
-        blocked_filters.append("NO_ALTERNATING_LAST_3")
+        set_filter("NO_ALTERNATING_LAST_3", False)
 
     symbol = normalize_binary_active(str(selected.get("symbol") or ""))
     cooldown = asset_cooldown_reason(user_id, symbol)
     if cooldown is not None:
-        blocked_filters.append(cooldown)
+        if cooldown not in blocked_filters:
+            blocked_filters.append(cooldown)
         logger.warning("[ASSET_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
 
-    trade_allowed = bool(selected.get("trade_allowed", True)) and not blocked_filters
+    penalties = {
+        "TREND_CLEAR": 10,
+        "SIDEWAYS_FILTER": 10,
+        "EMA_TREND": 8,
+        "RSI_RANGE": 8,
+        "WICK_REJECTION": 8,
+        "CANDLE_STRENGTH": 8,
+        "DOJI_FILTER": 5,
+        "VOLATILITY": 5,
+        "LAST_5_CONFIRMATION": 5,
+        "NO_ALTERNATING_LAST_3": 5,
+        "ASSET_COOLDOWN": 10,
+    }
+    strategy_score = max(
+        0,
+        confidence - sum(penalties.get(name, 0) for name in set(blocked_filters)),
+    )
+    hard_blocks = [
+        name
+        for name in blocked_filters
+        if name in {"MIN_PAYOUT", "MIN_CONFIDENCE", "SIGNAL_WAIT", "INSUFFICIENT_CANDLES"}
+    ]
+    trade_allowed = not hard_blocks
+    reason = str(selected.get("reason") or selected.get("signal_explanation") or "").strip()
+    if blocked_filters:
+        reason = f"{reason} Penalizacoes/bloqueios: {', '.join(blocked_filters)}.".strip()
     selected["blocked_filters"] = blocked_filters
     selected["approved_filters"] = approved_filters
     selected["trade_allowed"] = trade_allowed
-    selected["quality_score"] = int(selected.get("quality_score") or (100 if trade_allowed else 0))
-    selected["quality_reason"] = "OK" if trade_allowed else LOW_QUALITY_SIGNAL
+    selected["direction"] = direction
+    selected["signal"] = direction
+    selected["strategy_score"] = strategy_score
+    selected["quality_score"] = strategy_score
+    selected["reason"] = reason
+    selected["quality_reason"] = "OK" if trade_allowed else ",".join(hard_blocks)
     if trade_allowed:
         logger.info(
-            "[STRATEGY_FILTER_PASS] user_id=%s symbol=%s mode=%s quality_score=%s",
+            "[STRATEGY_FILTER_PASS] user_id=%s symbol=%s mode=%s strategy_score=%s",
             user_id,
             symbol,
             state.strategy_mode,
-            selected["quality_score"],
+            strategy_score,
         )
         return True, selected, None
 
@@ -679,7 +720,7 @@ def apply_strategy_guard(
         state.strategy_mode,
         blocked_filters,
     )
-    return False, selected, LOW_QUALITY_SIGNAL
+    return False, selected, hard_blocks[0] if hard_blocks else LOW_QUALITY_SIGNAL
 
 
 def robot_stop_reason(state: Any) -> str | None:
@@ -1017,7 +1058,22 @@ async def execute_robot_cycle(
                     user_id,
                     selected.get("symbol"),
                 )
-                state = auto_trader.clear_pending_signal(user_id, analyze=True)
+                state = auto_trader.reject_no_valid_signal(
+                    user_id,
+                    "ENTRY_WINDOW_MISSED",
+                    blocked_filters=["ENTRY_WINDOW_MISSED"],
+                    approved_filters=list(selected.get("approved_filters") or []),
+                    quality_score=int(selected.get("quality_score") or 0),
+                )
+                logger.info(
+                    "[NO_VALID_SIGNAL] user_id=%s reason=ENTRY_WINDOW_MISSED",
+                    user_id,
+                )
+                logger.info(
+                    "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                    user_id,
+                    state.next_cycle_at,
+                )
                 return 200, build_robot_payload(state)
 
             if selected is None:
@@ -1046,6 +1102,7 @@ async def execute_robot_cycle(
                 )
                 if not signals:
                     state = auto_trader.reject_no_valid_signal(user_id, "NO_SIGNAL")
+                    auto_trader.set_analysis_candidates(user_id, [], None)
                     logger.info("[NO_VALID_SIGNAL] user_id=%s reason=NO_SIGNAL", user_id)
                     logger.info(
                         "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
@@ -1054,92 +1111,157 @@ async def execute_robot_cycle(
                     )
                     return 200, build_robot_payload(state)
 
-                selected = max(
-                    signals,
-                    key=lambda item: (
-                        int(item.get("confidence") or 0),
-                        int(item.get("strength") or 0),
-                    ),
-                )
-                symbol = normalize_binary_active(str(selected.get("symbol") or ""))
-                payout = selected.get("payout")
-                payout_status = 200
-                payout_payload = build_success([])
-                if payout is None:
-                    payout_status, payout_payload = await call_bullex_service(
-                        "GET",
-                        "/payouts",
-                        user_id,
-                        params={"active": symbol},
-                    )
-                    mark_disconnected_from_payload(user_id, payout_payload)
-                    payout = extract_payout(payout_payload, symbol) if payout_payload.get("ok") else None
-                selected = {**selected, "symbol": symbol, "payout": payout}
+                candidates: list[dict[str, Any]] = []
+                for raw_signal in signals:
+                    symbol = normalize_binary_active(str(raw_signal.get("symbol") or ""))
+                    payout = raw_signal.get("payout")
+                    if payout is None and is_binary_asset_allowed(symbol):
+                        payout_status, payout_payload = await call_bullex_service(
+                            "GET",
+                            "/payouts",
+                            user_id,
+                            params={"active": symbol},
+                        )
+                        mark_disconnected_from_payload(user_id, payout_payload)
+                        payout = (
+                            extract_payout(payout_payload, symbol)
+                            if payout_status < 400 and payout_payload.get("ok")
+                            else None
+                        )
 
-                rejection = robot_stop_reason(state)
-                if rejection is None and not is_binary_asset_allowed(symbol):
-                    rejection = ASSET_NOT_ALLOWED
-                if rejection is None and selected.get("signal") not in {"CALL", "PUT"}:
-                    rejection = "SIGNAL_WAIT"
-                if rejection is None and int(selected.get("confidence") or 0) < state.min_confidence:
-                    rejection = "CONFIDENCE_BELOW_MINIMUM"
-                if rejection is None and (payout is None or payout < state.min_payout):
-                    rejection = "PAYOUT_BELOW_MINIMUM"
-                if payout_status >= 400 and rejection is None:
-                    rejection = str(payout_payload.get("error") or "PAYOUT_UNAVAILABLE")
-                if rejection is None and not state.enabled:
-                    rejection = "ROBOT_STOPPED"
-                if rejection is None:
-                    allowed, selected, strategy_rejection = apply_strategy_guard(
+                    allowed, ranked, _ = apply_strategy_guard(
                         user_id,
                         state,
-                        selected,
+                        {**raw_signal, "symbol": symbol},
                         payout=payout,
                     )
-                    if not allowed:
-                        rejection = "SIGNAL_BLOCKED_LOW_QUALITY"
-
-                if rejection is not None:
-                    no_valid_rejections = {
-                        "SIGNAL_WAIT",
-                        "CONFIDENCE_BELOW_MINIMUM",
-                        "PAYOUT_BELOW_MINIMUM",
-                        "PAYOUT_UNAVAILABLE",
-                        "SIGNAL_BLOCKED_LOW_QUALITY",
+                    if not is_binary_asset_allowed(symbol):
+                        allowed = False
+                        ranked["trade_allowed"] = False
+                        ranked["blocked_filters"] = list(
+                            dict.fromkeys(
+                                [*ranked.get("blocked_filters", []), ASSET_NOT_ALLOWED]
+                            )
+                        )
+                        ranked["quality_reason"] = ASSET_NOT_ALLOWED
+                    candidate = {
+                        "symbol": symbol,
+                        "direction": ranked.get("direction") or ranked.get("signal") or "WAIT",
+                        "signal": ranked.get("direction") or ranked.get("signal") or "WAIT",
+                        "strategy_score": int(ranked.get("strategy_score") or 0),
+                        "quality_score": int(ranked.get("quality_score") or 0),
+                        "confidence": int(ranked.get("confidence") or 0),
+                        "payout": payout,
+                        "reason": ranked.get("reason") or ranked.get("signal_explanation"),
+                        "approved_filters": list(ranked.get("approved_filters") or []),
+                        "blocked_filters": list(ranked.get("blocked_filters") or []),
+                        "trade_allowed": bool(allowed and ranked.get("trade_allowed")),
+                        "strategy_mode": ranked.get("strategy_mode") or state.strategy_mode,
                     }
-                    if rejection in no_valid_rejections:
-                        last_rejection_reason = str(selected.get("quality_reason") or rejection)
-                        if selected.get("blocked_filters"):
-                            last_rejection_reason = ",".join(selected.get("blocked_filters") or [])
-                        state = auto_trader.reject_no_valid_signal(
-                            user_id,
-                            last_rejection_reason,
-                            blocked_filters=list(selected.get("blocked_filters") or []),
-                            approved_filters=list(selected.get("approved_filters") or []),
-                            quality_score=int(selected.get("quality_score") or 0),
+                    candidates.append(candidate)
+
+                approved_candidates = [
+                    candidate for candidate in candidates if candidate["trade_allowed"]
+                ]
+                selected = (
+                    max(
+                        approved_candidates,
+                        key=lambda item: (
+                            int(item["strategy_score"]),
+                            int(item["confidence"]),
+                            float(item.get("payout") or 0),
+                        ),
+                    )
+                    if approved_candidates
+                    else None
+                )
+                auto_trader.set_analysis_candidates(user_id, candidates, selected)
+                logger.info(
+                    "[ANALYSIS_CANDIDATES] user_id=%s cycle_id=%s count=%s candidates=%s",
+                    user_id,
+                    state.cycle_id,
+                    len(candidates),
+                    candidates,
+                )
+
+                if selected is None:
+                    highest_rejected = max(
+                        candidates,
+                        key=lambda item: (
+                            int(item["strategy_score"]),
+                            int(item["confidence"]),
+                        ),
+                        default=None,
+                    )
+                    last_rejection_reason = "NO_SIGNAL"
+                    if highest_rejected:
+                        hard_reasons = [
+                            reason
+                            for reason in highest_rejected["blocked_filters"]
+                            if reason
+                            in {
+                                "MIN_PAYOUT",
+                                "MIN_CONFIDENCE",
+                                "SIGNAL_WAIT",
+                                "INSUFFICIENT_CANDLES",
+                                ASSET_NOT_ALLOWED,
+                            }
+                        ]
+                        reason_priority = [
+                            ASSET_NOT_ALLOWED,
+                            "INSUFFICIENT_CANDLES",
+                            "SIGNAL_WAIT",
+                            "MIN_PAYOUT",
+                            "MIN_CONFIDENCE",
+                        ]
+                        primary_reason = next(
+                            (
+                                reason
+                                for reason in reason_priority
+                                if reason in hard_reasons
+                            ),
+                            None,
                         )
-                        logger.info(
-                            "[SIGNAL_REJECTED] user_id=%s reason=%s last_rejection_reason=%s quality_score=%s blocked_filters=%s",
-                            user_id,
-                            state.rejection_reason,
-                            state.last_rejection_reason,
-                            state.quality_score,
-                            state.blocked_filters,
+                        last_rejection_reason = (
+                            primary_reason
+                            or str(highest_rejected.get("reason") or "NO_VALID_SIGNAL")
                         )
-                        logger.info(
-                            "[NO_VALID_SIGNAL] user_id=%s reason=%s",
-                            user_id,
-                            state.last_rejection_reason,
-                        )
-                        logger.info(
-                            "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
-                            user_id,
-                            state.next_cycle_at,
-                        )
-                    else:
-                        state = auto_trader.reject(user_id, rejection)
-                    logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=%s", user_id, rejection)
+                    state = auto_trader.reject_no_valid_signal(
+                        user_id,
+                        last_rejection_reason,
+                        blocked_filters=list(
+                            (highest_rejected or {}).get("blocked_filters") or []
+                        ),
+                        approved_filters=list(
+                            (highest_rejected or {}).get("approved_filters") or []
+                        ),
+                        quality_score=int(
+                            (highest_rejected or {}).get("quality_score") or 0
+                        ),
+                    )
+                    auto_trader.set_analysis_candidates(user_id, candidates, None)
+                    logger.info(
+                        "[NO_VALID_SIGNAL] user_id=%s reason=%s candidates=%s",
+                        user_id,
+                        last_rejection_reason,
+                        len(candidates),
+                    )
+                    logger.info(
+                        "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                        user_id,
+                        state.next_cycle_at,
+                    )
                     return 200, build_robot_payload(state)
+
+                logger.info(
+                    "[BEST_CANDIDATE_SELECTED] user_id=%s symbol=%s direction=%s strategy_score=%s confidence=%s payout=%s",
+                    user_id,
+                    selected["symbol"],
+                    selected["direction"],
+                    selected["strategy_score"],
+                    selected["confidence"],
+                    selected["payout"],
+                )
 
                 state = auto_trader.set_pending_signal(user_id, selected)
                 selected = dict(state.pending_signal or {})

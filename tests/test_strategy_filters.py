@@ -22,17 +22,29 @@ class StrategyFilterTests(unittest.TestCase):
     def setUp(self) -> None:
         main.auto_trader = AutoTrader()
 
-    def test_sideways_signal_is_blocked(self) -> None:
-        candles = [candle(1.0, 1.0, 0.9999, 1.0001) for _ in range(40)]
+    def test_trend_clear_reduces_score_without_blocking(self) -> None:
+        signal = {
+            "symbol": "EURUSD-OTC",
+            "signal": "CALL",
+            "confidence": 95,
+            "trend": "SIDEWAYS",
+            "strength": 5,
+        }
 
-        signal = analyze_signal("EURUSD-OTC", candles, payout=90)
+        allowed, selected, _ = main.apply_strategy_guard(
+            "user-trend",
+            main.auto_trader.start("user-trend"),
+            signal,
+            payout=90,
+        )
 
-        self.assertFalse(signal["trade_allowed"])
-        self.assertIn("SIDEWAYS_FILTER", signal["blocked_filters"])
-        self.assertIn("Sinal bloqueado", signal["signal_explanation"])
-        self.assertEqual(signal["narrator_text"], signal["signal_explanation"])
+        self.assertTrue(allowed)
+        self.assertTrue(selected["trade_allowed"])
+        self.assertIn("TREND_CLEAR", selected["blocked_filters"])
+        self.assertIn("SIDEWAYS_FILTER", selected["blocked_filters"])
+        self.assertLess(selected["strategy_score"], selected["confidence"])
 
-    def test_neutral_rsi_is_blocked(self) -> None:
+    def test_neutral_rsi_reduces_score_without_blocking(self) -> None:
         signal = {
             "symbol": "EURUSD-OTC",
             "signal": "CALL",
@@ -57,10 +69,11 @@ class StrategyFilterTests(unittest.TestCase):
             payout=90,
         )
 
-        self.assertFalse(allowed)
+        self.assertTrue(allowed)
         self.assertIn("RSI_RANGE", selected["blocked_filters"])
+        self.assertLess(selected["strategy_score"], selected["confidence"])
 
-    def test_wick_against_direction_is_blocked(self) -> None:
+    def test_wick_against_direction_reduces_score_without_blocking(self) -> None:
         signal = {
             "symbol": "EURUSD-OTC",
             "signal": "CALL",
@@ -85,10 +98,11 @@ class StrategyFilterTests(unittest.TestCase):
             payout=90,
         )
 
-        self.assertFalse(allowed)
+        self.assertTrue(allowed)
         self.assertIn("WICK_REJECTION", selected["blocked_filters"])
+        self.assertLess(selected["strategy_score"], selected["confidence"])
 
-    def test_two_consecutive_losses_block_asset_for_thirty_minutes(self) -> None:
+    def test_two_consecutive_losses_reduce_asset_score(self) -> None:
         user_id = "user-cooldown"
         trader = main.auto_trader
         state = trader.start(user_id)
@@ -120,8 +134,9 @@ class StrategyFilterTests(unittest.TestCase):
             payout=90,
         )
 
-        self.assertFalse(allowed)
+        self.assertTrue(allowed)
         self.assertIn("ASSET_COOLDOWN", selected["blocked_filters"])
+        self.assertLess(selected["strategy_score"], selected["confidence"])
 
     def test_daily_stop_loss_stops_robot(self) -> None:
         user_id = "user-daily-loss"
@@ -155,7 +170,7 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         main.auto_trader = AutoTrader()
 
-    async def test_low_quality_block_schedules_next_cycle_and_clears_signal(self) -> None:
+    async def test_no_approved_candidate_schedules_next_cycle_and_clears_signal(self) -> None:
         user_id = "user-low-quality"
         state = main.auto_trader.start(user_id)
         state.next_cycle_at = utc_now() - timedelta(seconds=1)
@@ -172,12 +187,12 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "symbol": "EURUSD-OTC",
                     "signal": "CALL",
-                    "confidence": 92,
+                    "confidence": 80,
                     "strength": 10,
                     "payout": 90,
                     "trade_allowed": False,
-                    "blocked_filters": ["TREND_CLEAR"],
-                    "approved_filters": ["MIN_CONFIDENCE"],
+                    "blocked_filters": ["TREND_CLEAR", "MIN_CONFIDENCE"],
+                    "approved_filters": [],
                     "quality_score": 40,
                     "quality_reason": "TREND_CLEAR",
                 }
@@ -195,14 +210,15 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_code, 200)
         self.assertEqual(data["status"], "SIGNAL_REJECTED")
         self.assertEqual(data["rejection_reason"], "NO_VALID_SIGNAL")
-        self.assertEqual(data["last_rejection_reason"], "TREND_CLEAR")
+        self.assertEqual(data["last_rejection_reason"], "MIN_CONFIDENCE")
         self.assertEqual(data["last_analysis_result"], "NO_VALID_SIGNAL")
-        self.assertEqual(data["blocked_filters"], ["TREND_CLEAR"])
-        self.assertEqual(data["quality_score"], 40)
+        self.assertIn("TREND_CLEAR", data["blocked_filters"])
+        self.assertIn("MIN_CONFIDENCE", data["blocked_filters"])
         self.assertIsNone(data["pending_signal"])
         self.assertGreaterEqual(data["seconds_until_next_cycle"], 299)
         output = "\n".join(logs.output)
-        self.assertIn("[SIGNAL_REJECTED]", output)
+        self.assertIn("[ANALYSIS_CANDIDATES]", output)
+        self.assertIn("[NO_VALID_SIGNAL]", output)
         self.assertIn("[NEXT_CYCLE_SCHEDULED]", output)
 
     async def test_low_quality_rejection_returns_waiting_after_five_seconds(self) -> None:

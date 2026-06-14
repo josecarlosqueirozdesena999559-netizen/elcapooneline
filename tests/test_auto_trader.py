@@ -62,6 +62,19 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertEqual(trader.get("user-b").entry_value, 2)
         self.assertEqual(trader.get("user-b").stop_loss, 12)
 
+    def test_sending_order_never_falls_back_to_analyzing(self) -> None:
+        trader = AutoTrader()
+        trader.start("user-order-transition")
+
+        sending = trader.start_sending_order("user-order-transition")
+        sending_status = sending.status
+        rejected = trader.reject_order("user-order-transition", "active suspended")
+
+        self.assertEqual(sending_status, STATUS_SENDING_ORDER)
+        self.assertEqual(rejected.status, STATUS_ORDER_REJECTED)
+        self.assertNotEqual(rejected.status, "ANALYZING")
+        self.assertFalse(rejected.operation_in_progress)
+
     def test_disabled_robot_never_opens_cycle(self) -> None:
         trader = AutoTrader()
 
@@ -586,11 +599,78 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(data["last_analysis_at"])
         self.assertEqual(data["pending_signal"]["symbol"], "EURUSD-OTC")
         self.assertEqual(data["pending_signal"]["signal"], "CALL")
+        self.assertEqual(data["candidates_count"], 1)
+        self.assertEqual(data["best_candidate"]["symbol"], "EURUSD-OTC")
+        self.assertEqual(data["strategy_score"], data["pending_signal"]["strategy_score"])
         self.assertIn("[CYCLE_DUE]", output)
         self.assertIn("[ANALYSIS_STARTED]", output)
         self.assertIn("[ANALYSIS_FINISHED]", output)
+        self.assertIn("[ANALYSIS_CANDIDATES]", output)
+        self.assertIn("[BEST_CANDIDATE_SELECTED]", output)
         self.assertIn("[PENDING_SIGNAL_SET]", output)
         scan.assert_awaited_once()
+
+    async def test_highest_strategy_score_candidate_is_selected(self) -> None:
+        user_id = "user-ranking"
+        state = main.auto_trader.start(user_id)
+        make_cycle_due(user_id)
+        status_times = iter((20.0, 20.0))
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {
+                        "connected": True,
+                        "active_mode": "PRACTICE",
+                        "server_time": next(status_times),
+                    }
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        scan_payload = main.build_success(
+            [
+                {
+                    "symbol": "EURUSD-OTC",
+                    "signal": "CALL",
+                    "confidence": 94,
+                    "strength": 5,
+                    "trend": "SIDEWAYS",
+                    "payout": 90,
+                    "reason": "Candidato penalizado por tendencia lateral.",
+                },
+                {
+                    "symbol": "GBPUSD-OTC",
+                    "signal": "PUT",
+                    "confidence": 93,
+                    "strength": 30,
+                    "trend": "DOWN",
+                    "payout": 91,
+                    "reason": "Maior confluencia entre estrategias.",
+                },
+            ]
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(
+                main,
+                "scan_local_signals",
+                new=AsyncMock(return_value=(200, scan_payload)),
+            ),
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(data["candidates_count"], 2)
+        self.assertEqual(len(data["candidates"]), 2)
+        self.assertEqual(data["best_candidate"]["symbol"], "GBPUSD-OTC")
+        self.assertEqual(data["pending_signal"]["symbol"], "GBPUSD-OTC")
+        self.assertGreater(
+            data["best_candidate"]["strategy_score"],
+            0,
+        )
 
     async def test_order_status_is_sending_while_bullex_order_is_in_flight(self) -> None:
         user_id = "user-sending"
@@ -838,7 +918,8 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             status_code, payload = await main.execute_robot_cycle(user_id)
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["data"]["rejection_reason"], main.ASSET_NOT_ALLOWED)
+        self.assertEqual(payload["data"]["rejection_reason"], "NO_VALID_SIGNAL")
+        self.assertEqual(payload["data"]["last_rejection_reason"], main.ASSET_NOT_ALLOWED)
         self.assertNotIn("/orders/buy-demo", calls)
         self.assertNotIn("/orders/buy-real", calls)
 
@@ -1223,7 +1304,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[TRADE_SENT_AT]", output)
         self.assertIn("[PENDING_SIGNAL_CLEARED]", output)
 
-    async def test_missed_entry_window_clears_pending_signal_and_reanalyzes(self) -> None:
+    async def test_missed_entry_window_finishes_with_clear_rejection(self) -> None:
         user_id = "user-window-missed"
         state = main.auto_trader.start(user_id)
         main.auto_trader.set_pending_signal(
@@ -1252,10 +1333,11 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             status_code, payload = await main.execute_robot_cycle(user_id)
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["data"]["status"], "ANALYZING")
+        self.assertEqual(payload["data"]["status"], "SIGNAL_REJECTED")
+        self.assertEqual(payload["data"]["rejection_reason"], "NO_VALID_SIGNAL")
+        self.assertEqual(payload["data"]["last_rejection_reason"], "ENTRY_WINDOW_MISSED")
         self.assertIsNone(payload["data"]["pending_signal"])
-        self.assertIsNone(payload["data"]["last_signal"])
-        self.assertEqual(payload["data"]["seconds_until_next_cycle"], 0)
+        self.assertGreaterEqual(payload["data"]["seconds_until_next_cycle"], 299)
         scan.assert_not_awaited()
         self.assertIn("[PENDING_SIGNAL_CLEARED]", "\n".join(logs.output))
 

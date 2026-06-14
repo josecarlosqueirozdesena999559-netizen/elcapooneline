@@ -37,6 +37,7 @@ def analyze_signal(
             strength=0,
             timeframe=timeframe,
         )
+        signal["insufficient_candles"] = True
         return _apply_quality_filters(signal, normalized, strategy_mode, payout)
 
     closes = [candle["close"] for candle in normalized]
@@ -61,29 +62,8 @@ def analyze_signal(
         confidence = put_score
         reasons = put_reasons
 
-    wait_reasons = []
-    if rsi14 > 75 or rsi14 < 25:
-        wait_reasons.append(f"RSI extremo ({rsi14:.1f}).")
-    if trend == "SIDEWAYS":
-        wait_reasons.append("Tendencia lateral.")
-    if confidence < 70:
-        wait_reasons.append(f"Confianca abaixo de 70 ({confidence}).")
     if extreme_candle:
-        wait_reasons.append("Ultimo candle exagerado.")
-
-    if wait_reasons:
-        signal = _build_signal(
-            symbol=symbol,
-            signal="WAIT",
-            confidence=confidence,
-            reason=" ".join(wait_reasons),
-            last_price=last_price,
-            trend=trend,
-            strength=trend_strength,
-            timeframe=timeframe,
-        )
-        _attach_indicators(signal, normalized, ema9[-1], ema21[-1], rsi14, avg_range, atr_pct)
-        return _apply_quality_filters(signal, normalized, strategy_mode, payout)
+        reasons.append("Ultimo candle exagerado reduz o score.")
 
     signal = _build_signal(
         symbol=symbol,
@@ -299,6 +279,19 @@ def _apply_quality_filters(
     approved: list[str] = []
     direction = str(signal.get("signal") or "WAIT")
 
+    penalties = {
+        "TREND_CLEAR": 10,
+        "SIDEWAYS_FILTER": 10,
+        "EMA_TREND": 8,
+        "RSI_RANGE": 8,
+        "WICK_REJECTION": 8,
+        "CANDLE_STRENGTH": 8,
+        "DOJI_FILTER": 5,
+        "VOLATILITY": 5,
+        "LAST_5_CONFIRMATION": 5,
+        "NO_ALTERNATING_LAST_3": 5,
+    }
+
     def check(name: str, passed: bool) -> None:
         if passed:
             approved.append(name)
@@ -307,6 +300,8 @@ def _apply_quality_filters(
 
     if direction not in {"CALL", "PUT"}:
         blocked.append("SIGNAL_WAIT")
+    if signal.get("insufficient_candles"):
+        blocked.append("INSUFFICIENT_CANDLES")
     check("MIN_CONFIDENCE", int(signal.get("confidence") or 0) >= profile["confidence"])
     check("MIN_PAYOUT", payout is not None and float(payout) >= profile["payout"])
     check("TREND_CLEAR", signal.get("trend") != "SIDEWAYS" and int(signal.get("strength") or 0) >= profile["strength"])
@@ -331,26 +326,36 @@ def _apply_quality_filters(
     check("LAST_5_CONFIRMATION", int(signal.get("directional_candles_5") or 0) >= 3)
     check("NO_ALTERNATING_LAST_3", not bool(signal.get("alternating_last_3")))
 
-    total = len(approved) + len(blocked)
-    filter_score = round((len(approved) / total) * 100) if total else 0
-    quality_score = min(int(signal.get("confidence") or 0), filter_score)
-    trade_allowed = not blocked
+    confidence = int(signal.get("confidence") or 0)
+    strategy_score = max(0, confidence - sum(penalties.get(name, 0) for name in blocked))
+    hard_blocks = [
+        name
+        for name in blocked
+        if name in {"SIGNAL_WAIT", "MIN_CONFIDENCE", "MIN_PAYOUT", "INSUFFICIENT_CANDLES"}
+    ]
+    quality_score = strategy_score
+    trade_allowed = not hard_blocks
     signal.update(
         {
             "strategy_mode": mode,
             "payout": payout,
+            "direction": direction,
+            "strategy_score": strategy_score,
             "quality_score": quality_score,
             "blocked_filters": blocked,
             "approved_filters": approved,
             "trade_allowed": trade_allowed,
-            "quality_reason": "OK" if trade_allowed else "Sinal bloqueado por baixa qualidade",
+            "quality_reason": "OK" if trade_allowed else ",".join(hard_blocks),
         }
     )
     if trade_allowed:
-        signal["signal_explanation"] = signal.get("reason") or "Sinal aprovado pelos filtros de qualidade."
+        penalties_text = ", ".join(blocked)
+        signal["signal_explanation"] = signal.get("reason") or "Sinal aprovado."
+        if penalties_text:
+            signal["signal_explanation"] += f" Penalizacoes no score: {penalties_text}."
     else:
-        filters = ", ".join(blocked) if blocked else "baixa qualidade"
-        signal["signal_explanation"] = f"Sinal bloqueado por baixa qualidade: {filters}."
+        filters = ", ".join(hard_blocks) if hard_blocks else "sem direcao valida"
+        signal["signal_explanation"] = f"Sinal sem entrada: {filters}."
     signal["narrator_text"] = signal["signal_explanation"]
     return signal
 
