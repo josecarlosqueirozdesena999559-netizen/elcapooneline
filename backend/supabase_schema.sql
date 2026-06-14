@@ -59,6 +59,11 @@ create table if not exists public.robot_states (
   losses integer not null default 0,
   profit numeric not null default 0,
   accuracy numeric not null default 0,
+  connected boolean not null default false,
+  active_mode text,
+  connection_checked_at timestamptz,
+  connection_status_source text not null default 'cached',
+  connection_failure_count integer not null default 0,
   state_json jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default timezone('utc'::text, now()),
   updated_at timestamptz not null default timezone('utc'::text, now())
@@ -80,6 +85,11 @@ alter table public.robot_states
   add column if not exists losses integer not null default 0,
   add column if not exists profit numeric not null default 0,
   add column if not exists accuracy numeric not null default 0,
+  add column if not exists connected boolean not null default false,
+  add column if not exists active_mode text,
+  add column if not exists connection_checked_at timestamptz,
+  add column if not exists connection_status_source text not null default 'cached',
+  add column if not exists connection_failure_count integer not null default 0,
   add column if not exists state_json jsonb not null default '{}'::jsonb,
   add column if not exists created_at timestamptz not null default timezone('utc'::text, now()),
   add column if not exists updated_at timestamptz not null default timezone('utc'::text, now());

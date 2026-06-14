@@ -1152,8 +1152,12 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(main, "scan_local_signals", new=AsyncMock()) as scan,
         ):
+            first_status, first_payload = await main.execute_robot_cycle(user_id)
             status_code, payload = await main.execute_robot_cycle(user_id)
 
+        self.assertEqual(first_status, 200)
+        self.assertNotEqual(first_payload["data"]["status"], STATUS_ACCOUNT_DISCONNECTED)
+        self.assertEqual(first_payload["data"]["connection_failure_count"], 1)
         self.assertEqual(status_code, 200)
         self.assertEqual(payload["data"]["status"], STATUS_ACCOUNT_DISCONNECTED)
         self.assertEqual(payload["data"]["rejection_reason"], "ACCOUNT_DISCONNECTED")
@@ -1163,9 +1167,11 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["data"]["entry_window_open"])
         self.assertEqual(payload["data"]["blocked_filters"], [])
         self.assertEqual(payload["data"]["quality_score"], 0)
+        self.assertEqual(payload["data"]["connection_failure_count"], 2)
+        self.assertEqual(payload["data"]["connection_status_source"], "disconnected")
         scan.assert_not_awaited()
 
-    async def test_robot_state_disconnected_clears_pending_signal(self) -> None:
+    async def test_robot_state_disconnects_after_two_failed_checks(self) -> None:
         user_id = "user-state-disconnected"
         state = main.auto_trader.start(user_id)
         main.auto_trader.set_pending_signal(
@@ -1193,16 +1199,92 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(main, "sync_user_store_from_payload"),
         ):
+            first_response = await main.robot_state({"user_id": user_id})
             response = await main.robot_state({"user_id": user_id})
 
+        first_payload = json.loads(first_response.body)["data"]
         payload = json.loads(response.body)["data"]
+        self.assertEqual(first_response.status_code, 200)
+        self.assertFalse(first_payload["connected"])
+        self.assertEqual(first_payload["connection_failure_count"], 1)
+        self.assertEqual(first_payload["connection_status_source"], "disconnected")
+        self.assertNotEqual(first_payload["status"], STATUS_ACCOUNT_DISCONNECTED)
+        self.assertIsNotNone(first_payload["pending_signal"])
         self.assertEqual(response.status_code, 200)
         self.assertFalse(payload["connected"])
         self.assertEqual(payload["status"], STATUS_ACCOUNT_DISCONNECTED)
         self.assertEqual(payload["rejection_reason"], "ACCOUNT_DISCONNECTED")
+        self.assertEqual(payload["connection_failure_count"], 2)
+        self.assertEqual(payload["connection_status_source"], "disconnected")
         self.assertEqual(payload["seconds_until_next_cycle"], 0)
         self.assertIsNone(payload["pending_signal"])
         self.assertIsNone(payload["last_signal"])
+
+    async def test_bullex_connect_syncs_robot_connection_immediately(self) -> None:
+        user_id = "user-connect-sync"
+        state = main.auto_trader.start(user_id)
+        state.status = STATUS_ACCOUNT_DISCONNECTED
+        state.rejection_reason = "ACCOUNT_DISCONNECTED"
+        state.last_rejection_reason = "ACCOUNT_DISCONNECTED"
+        state.connection_failure_count = 2
+
+        payload = main.build_success(
+            {"connected": True, "requires_2fa": False, "active_mode": "PRACTICE"}
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", new=AsyncMock(return_value=(200, payload))),
+            patch.object(main, "sync_user_store_from_payload"),
+            patch.object(main, "persist_robot") as persist,
+            patch.object(main, "ensure_robot_worker") as worker,
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            response = await main.bullex_connect(
+                {"email": "user@example.com", "password": "secret"},
+                {"user_id": user_id},
+            )
+
+        synced = main.auto_trader.get(user_id)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(synced.connected)
+        self.assertEqual(synced.active_mode, "PRACTICE")
+        self.assertIsNone(synced.rejection_reason)
+        self.assertIsNone(synced.last_rejection_reason)
+        self.assertEqual(synced.status, STATUS_WAITING_NEXT_CYCLE)
+        self.assertEqual(synced.connection_failure_count, 0)
+        self.assertEqual(synced.connection_status_source, "bullex_service")
+        self.assertIsNotNone(synced.connection_checked_at)
+        persist.assert_called_once_with(user_id)
+        worker.assert_called_once_with(user_id)
+        output = "\n".join(logs.output)
+        self.assertIn("[BULLEX_CONNECTED]", output)
+        self.assertIn("[ROBOT_CONNECTION_SYNCED]", output)
+
+    async def test_robot_sync_connection_endpoint_returns_connection_fields(self) -> None:
+        user_id = "user-sync-connection"
+        main.auto_trader.start(user_id)
+        payload = main.build_success(
+            {
+                "connected": True,
+                "active_mode": "REAL",
+                "server_time": SERVER_TIME_M1_OPEN,
+            }
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", new=AsyncMock(return_value=(200, payload))),
+            patch.object(main, "sync_user_store_from_payload"),
+            patch.object(main, "persist_robot"),
+        ):
+            response = await main.robot_sync_connection({"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(data["connected"])
+        self.assertEqual(data["active_mode"], "REAL")
+        self.assertIsNotNone(data["connection_checked_at"])
+        self.assertEqual(data["connection_status_source"], "bullex_service")
+        self.assertEqual(data["connection_failure_count"], 0)
 
     async def test_real_is_locked_by_default(self) -> None:
         user_id = "user-real-locked"

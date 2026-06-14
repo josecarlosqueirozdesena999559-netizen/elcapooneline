@@ -110,6 +110,11 @@ class RobotState:
     status: str = STATUS_STOPPED
     rejection_reason: str | None = None
     server_time: str | None = None
+    connected: bool = False
+    active_mode: str | None = None
+    connection_checked_at: datetime | None = None
+    connection_status_source: str = "cached"
+    connection_failure_count: int = 0
     entry_window_open: bool = False
     seconds_until_entry_window: int = 0
     current_candle_seconds: float = 0.0
@@ -139,6 +144,7 @@ class RobotState:
             "last_analysis_at",
             "analysis_started_at",
             "rejected_at",
+            "connection_checked_at",
         ):
             value = data[key]
             data[key] = value.isoformat() if value is not None else None
@@ -273,6 +279,7 @@ class AutoTrader:
             "last_analysis_at",
             "analysis_started_at",
             "rejected_at",
+            "connection_checked_at",
         }
         for key, value in payload.items():
             if not hasattr(state, key) or key in {"accuracy", "seconds_until_next_cycle"}:
@@ -564,6 +571,9 @@ class AutoTrader:
 
     def disconnect_account(self, user_id: str) -> RobotState:
         state = self.get(user_id)
+        state.connected = False
+        state.connection_status_source = "disconnected"
+        state.connection_checked_at = utc_now()
         state.pending_signal = None
         state.last_signal = None
         state.operation_in_progress = False
@@ -580,6 +590,33 @@ class AutoTrader:
         state.candidates_count = 0
         state.candidates = []
         state.best_candidate = None
+        return state
+
+    def sync_connection(
+        self,
+        user_id: str,
+        *,
+        connected: bool,
+        active_mode: str | None = None,
+        source: str = "cached",
+        checked_at: datetime | None = None,
+        align_status: bool = False,
+    ) -> RobotState:
+        state = self.get(user_id)
+        now = checked_at or utc_now()
+        state.connected = connected
+        state.active_mode = active_mode
+        state.connection_checked_at = now
+        state.connection_status_source = source
+        if connected:
+            state.connection_failure_count = 0
+            if align_status or state.status == STATUS_ACCOUNT_DISCONNECTED:
+                state.rejection_reason = None
+                state.last_rejection_reason = None
+            if align_status and not state.operation_in_progress:
+                state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
+        else:
+            state.connection_failure_count += 1
         return state
 
     def start_sending_order(self, user_id: str) -> RobotState:
