@@ -22,6 +22,7 @@ STATUS_ORDER_REJECTED = "ORDER_REJECTED"
 STATUS_ERROR = "ERROR"
 STATUS_REAL_TRADING_LOCKED = "REAL_TRADING_LOCKED"
 STATUS_WAITING_ENTRY_WINDOW = "WAITING_ENTRY_WINDOW"
+STATUS_ACCOUNT_DISCONNECTED = "ACCOUNT_DISCONNECTED"
 
 TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
 
@@ -228,10 +229,20 @@ class AutoTrader:
 
     def start(self, user_id: str) -> RobotState:
         state = self.get(user_id)
+        now = utc_now()
         state.enabled = True
         state.status = STATUS_WAITING_NEXT_CYCLE
         state.rejection_reason = None
-        state.next_cycle_at = utc_now()
+        state.last_rejection_reason = None
+        state.pending_signal = None
+        state.last_signal = None
+        state.operation_in_progress = False
+        state.entry_window_open = False
+        state.blocked_filters = []
+        state.approved_filters = []
+        state.quality_score = 0
+        state.current_cycle_started_at = now
+        state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
         return state
 
     def stop(self, user_id: str) -> RobotState:
@@ -327,6 +338,22 @@ class AutoTrader:
         if analyze:
             state.next_cycle_at = utc_now()
         state.rejection_reason = None
+        state.blocked_filters = []
+        state.approved_filters = []
+        state.quality_score = 0
+        return state
+
+    def disconnect_account(self, user_id: str) -> RobotState:
+        state = self.get(user_id)
+        state.pending_signal = None
+        state.last_signal = None
+        state.operation_in_progress = False
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        state.next_cycle_at = None
+        state.status = STATUS_ACCOUNT_DISCONNECTED
+        state.rejection_reason = STATUS_ACCOUNT_DISCONNECTED
+        state.last_rejection_reason = STATUS_ACCOUNT_DISCONNECTED
         state.blocked_filters = []
         state.approved_filters = []
         state.quality_score = 0

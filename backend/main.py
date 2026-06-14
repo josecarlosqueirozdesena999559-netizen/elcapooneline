@@ -928,8 +928,8 @@ async def execute_robot_cycle(
 
             expected_bullex_mode = "PRACTICE" if state.account_mode == "DEMO" else "REAL"
             if not connected:
-                state = auto_trader.reject(user_id, "ACCOUNT_DISCONNECTED")
-                logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=ACCOUNT_DISCONNECTED", user_id)
+                state = auto_trader.disconnect_account(user_id)
+                logger.warning("[ROBOT_BLOCKED_ACCOUNT_DISCONNECTED] user_id=%s", user_id)
                 return 200, build_robot_payload(state)
             if active_mode != expected_bullex_mode:
                 state = auto_trader.reject(user_id, f"ACCOUNT_MODE_MUST_BE_{expected_bullex_mode}")
@@ -1416,6 +1416,19 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     sync_user_store_from_payload(auth["user_id"], session_payload)
     connected, active_mode = extract_account_status(session_payload)
     state = auto_trader.get(auth["user_id"])
+    if not connected:
+        state = auto_trader.disconnect_account(auth["user_id"])
+        logger.warning("[ROBOT_BLOCKED_ACCOUNT_DISCONNECTED] user_id=%s", auth["user_id"])
+        return json_response(
+            200,
+            build_robot_payload(
+                state,
+                connected=False,
+                active_mode=active_mode,
+                real_ready=False,
+                real_block_reason="BULLEX_NOT_CONNECTED",
+            ),
+        )
     server_timestamp = extract_server_timestamp(session_payload)
     if server_timestamp is not None:
         auto_trader.update_entry_window(
@@ -1586,6 +1599,12 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     state = auto_trader.start(user_id)
     persist_robot(user_id)
     ensure_robot_worker(user_id)
+    logger.info(
+        "[ROBOT_START_DELAYED] user_id=%s next_cycle_at=%s cycle_minutes=%s",
+        user_id,
+        state.next_cycle_at,
+        state.cycle_minutes,
+    )
     logger.info("[ROBOT START] user_id=%s", user_id)
     return json_response(200, build_robot_payload(state))
 

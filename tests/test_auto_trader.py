@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from backend.auto_trader import (
     AutoTrader,
+    STATUS_ACCOUNT_DISCONNECTED,
     STATUS_ORDER_REJECTED,
     STATUS_PENDING_RESULT,
     STATUS_SENDING_ORDER,
@@ -17,6 +18,10 @@ from backend import main
 
 
 SERVER_TIME_M1_OPEN = 56.0
+
+
+def make_cycle_due(user_id: str) -> None:
+    main.auto_trader.get(user_id).next_cycle_at = utc_now() - timedelta(seconds=1)
 
 
 class AutoTraderStateTests(unittest.TestCase):
@@ -31,15 +36,30 @@ class AutoTraderStateTests(unittest.TestCase):
     def test_cycle_is_reserved_for_ten_minutes(self) -> None:
         trader = AutoTrader()
         trader.start("user-cycle")
+        trader.get("user-cycle").next_cycle_at = utc_now() - timedelta(seconds=1)
 
         first_run, state = trader.prepare_cycle("user-cycle")
+        self.assertTrue(first_run)
+        self.assertEqual(state.status, "ANALYZING")
         second_run, waiting_state = trader.prepare_cycle("user-cycle")
 
-        self.assertTrue(first_run)
-        self.assertEqual(state.status, STATUS_WAITING_NEXT_CYCLE)
         self.assertFalse(second_run)
         self.assertEqual(waiting_state.status, STATUS_WAITING_NEXT_CYCLE)
         self.assertGreater(waiting_state.next_cycle_at, utc_now() + timedelta(minutes=9))
+
+    def test_start_delays_first_cycle_for_full_cycle_minutes(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-delayed-start")
+
+        payload = state.to_dict()
+
+        self.assertTrue(state.enabled)
+        self.assertEqual(state.status, STATUS_WAITING_NEXT_CYCLE)
+        self.assertIsNone(state.pending_signal)
+        self.assertIsNone(state.last_signal)
+        self.assertIsNone(state.rejection_reason)
+        self.assertGreaterEqual(payload["seconds_until_next_cycle"], 599)
+        self.assertLessEqual(payload["seconds_until_next_cycle"], 600)
 
     def test_entry_windows_match_each_timeframe(self) -> None:
         cases = {
@@ -260,6 +280,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_demo_sends_at_most_one_order_per_cycle(self) -> None:
         user_id = "user-demo"
         main.auto_trader.start(user_id)
+        make_cycle_due(user_id)
         calls = []
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
@@ -304,9 +325,38 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_payload["data"]["status"], "PENDING_RESULT")
         self.assertEqual(len(orders), 1)
 
+    async def test_start_does_not_operate_immediately(self) -> None:
+        user_id = "user-start-waits"
+
+        with (
+            patch.object(main, "persist_robot"),
+            patch.object(main, "ensure_robot_worker"),
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            response = await main.robot_start({"user_id": user_id})
+
+        payload = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], STATUS_WAITING_NEXT_CYCLE)
+        self.assertGreaterEqual(payload["seconds_until_next_cycle"], 599)
+        self.assertLessEqual(payload["seconds_until_next_cycle"], 600)
+        self.assertIn("[ROBOT_START_DELAYED]", "\n".join(logs.output))
+
+        with (
+            patch.object(main, "call_bullex_service", new=AsyncMock()) as service_call,
+            patch.object(main, "scan_local_signals", new=AsyncMock()) as scan,
+        ):
+            status_code, tick_payload = await main.execute_robot_cycle(user_id)
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(tick_payload["data"]["status"], STATUS_WAITING_NEXT_CYCLE)
+        service_call.assert_not_awaited()
+        scan.assert_not_awaited()
+
     async def test_order_status_is_sending_while_bullex_order_is_in_flight(self) -> None:
         user_id = "user-sending"
         main.auto_trader.start(user_id)
+        make_cycle_due(user_id)
         order_started = asyncio.Event()
         release_order = asyncio.Event()
 
@@ -352,6 +402,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         user_id = "user-order-success"
         state = main.auto_trader.start(user_id)
         state.entry_value = 3
+        make_cycle_due(user_id)
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
             if path == "/sessions/status":
@@ -406,6 +457,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_bullex_returned_expiration_is_used_as_primary_source(self) -> None:
         user_id = "user-order-expiration-source"
         main.auto_trader.start(user_id)
+        make_cycle_due(user_id)
         returned_expiration = datetime.fromtimestamp(123, timezone.utc).isoformat()
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
@@ -447,6 +499,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejected_order_stays_order_rejected_and_clears_pending_signal(self) -> None:
         user_id = "user-order-rejected"
         main.auto_trader.start(user_id)
+        make_cycle_due(user_id)
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
             if path == "/sessions/status":
@@ -487,6 +540,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_whitelisted_asset_never_operates(self) -> None:
         user_id = "user-apple"
         main.auto_trader.start(user_id)
+        make_cycle_due(user_id)
         calls = []
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
@@ -520,7 +574,19 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disconnected_account_does_not_scan_or_order(self) -> None:
         user_id = "user-disconnected"
-        main.auto_trader.start(user_id)
+        state = main.auto_trader.start(user_id)
+        make_cycle_due(user_id)
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "confidence": 92,
+                "payout": 90,
+            },
+        )
+        state.blocked_filters = ["OLD_FILTER"]
+        state.quality_score = 88
 
         with (
             patch.object(
@@ -538,13 +604,60 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             status_code, payload = await main.execute_robot_cycle(user_id)
 
         self.assertEqual(status_code, 200)
+        self.assertEqual(payload["data"]["status"], STATUS_ACCOUNT_DISCONNECTED)
         self.assertEqual(payload["data"]["rejection_reason"], "ACCOUNT_DISCONNECTED")
+        self.assertIsNone(payload["data"]["pending_signal"])
+        self.assertIsNone(payload["data"]["last_signal"])
+        self.assertFalse(payload["data"]["operation_in_progress"])
+        self.assertFalse(payload["data"]["entry_window_open"])
+        self.assertEqual(payload["data"]["blocked_filters"], [])
+        self.assertEqual(payload["data"]["quality_score"], 0)
         scan.assert_not_awaited()
+
+    async def test_robot_state_disconnected_clears_pending_signal(self) -> None:
+        user_id = "user-state-disconnected"
+        state = main.auto_trader.start(user_id)
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "PUT",
+                "confidence": 92,
+                "payout": 90,
+            },
+        )
+        state.entry_window_open = True
+        state.quality_score = 91
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success({"connected": False, "active_mode": "PRACTICE"}),
+                    )
+                ),
+            ),
+            patch.object(main, "sync_user_store_from_payload"),
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        payload = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(payload["connected"])
+        self.assertEqual(payload["status"], STATUS_ACCOUNT_DISCONNECTED)
+        self.assertEqual(payload["rejection_reason"], "ACCOUNT_DISCONNECTED")
+        self.assertEqual(payload["seconds_until_next_cycle"], 0)
+        self.assertIsNone(payload["pending_signal"])
+        self.assertIsNone(payload["last_signal"])
 
     async def test_real_is_locked_by_default(self) -> None:
         user_id = "user-real-locked"
         state = main.auto_trader.start(user_id)
         state.account_mode = "REAL"
+        make_cycle_due(user_id)
 
         with patch.object(
             main,
@@ -730,6 +843,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         state.allow_real = True
         state.confirm_real = True
         state.entry_value = min(2, main.config.robot_real_max_entry)
+        make_cycle_due(user_id)
         calls = []
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
@@ -777,6 +891,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_pending_signal_waits_then_sends_without_reanalysis(self) -> None:
         user_id = "user-window-wait"
         main.auto_trader.start(user_id)
+        make_cycle_due(user_id)
         calls = []
         status_times = iter((20.0, 20.0, 56.0))
 
@@ -878,6 +993,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         user_id = "user-m5"
         state = main.auto_trader.start(user_id)
         state.timeframe = "M5"
+        make_cycle_due(user_id)
         calls = []
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
@@ -916,6 +1032,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_window_closing_during_analysis_blocks_late_order(self) -> None:
         user_id = "user-window-closing"
         main.auto_trader.start(user_id)
+        make_cycle_due(user_id)
         status_times = iter((56.0, 59.5))
         calls = []
 
