@@ -26,6 +26,13 @@ STATUS_WAITING_ENTRY_WINDOW = "WAITING_ENTRY_WINDOW"
 STATUS_ACCOUNT_DISCONNECTED = "ACCOUNT_DISCONNECTED"
 
 TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
+RESULT_WAITING_MESSAGE = "Aguardando resultado..."
+
+
+def format_mm_ss(seconds: int) -> str:
+    safe_seconds = max(0, int(seconds))
+    minutes, remaining_seconds = divmod(safe_seconds, 60)
+    return f"{minutes:02d}:{remaining_seconds:02d}"
 
 
 def utc_now() -> datetime:
@@ -124,6 +131,9 @@ class RobotState:
         configured_expiration = TIMEFRAME_SECONDS[self.timeframe]
         data["expiration_seconds"] = configured_expiration
         data["result_waiting"] = False
+        data["operation_message"] = None
+        data["expiration_display"] = None
+        data["show_expiration_countdown"] = False
         if self.last_trade is not None:
             trade = dict(self.last_trade)
             trade["result"] = trade.get("result") or STATUS_PENDING_RESULT
@@ -146,6 +156,19 @@ class RobotState:
                     data["result_waiting"] = expiration_seconds <= 0 and result not in {"WIN", "LOSS"}
                     if data["result_waiting"]:
                         data["status"] = STATUS_PENDING_RESULT
+                result = str(trade.get("result") or "").strip().upper()
+                if result not in {"WIN", "LOSS"}:
+                    if int(data["expiration_seconds"]) <= 0 or data["result_waiting"]:
+                        data["status"] = STATUS_PENDING_RESULT
+                        data["result_waiting"] = True
+                        data["operation_message"] = RESULT_WAITING_MESSAGE
+                        data["expiration_display"] = RESULT_WAITING_MESSAGE
+                        data["show_expiration_countdown"] = False
+                    else:
+                        countdown = format_mm_ss(int(data["expiration_seconds"]))
+                        data["operation_message"] = f"Expira em {countdown}"
+                        data["expiration_display"] = countdown
+                        data["show_expiration_countdown"] = True
         total = self.wins + self.losses
         data["accuracy"] = round((self.wins / total) * 100, 2) if total else 0.0
         return data

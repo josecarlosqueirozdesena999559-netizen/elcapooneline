@@ -155,6 +155,9 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertGreaterEqual(payload["expiration_seconds"], 257)
         self.assertLessEqual(payload["expiration_seconds"], 258)
         self.assertFalse(payload["result_waiting"])
+        self.assertTrue(payload["show_expiration_countdown"])
+        self.assertTrue(payload["operation_message"].startswith("Expira em "))
+        self.assertNotEqual(payload["operation_message"], "Expira em 00:00")
 
     def test_expired_open_operation_waits_for_final_result(self) -> None:
         trader = AutoTrader()
@@ -176,6 +179,10 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertEqual(payload["expiration_seconds"], 0)
         self.assertTrue(payload["result_waiting"])
         self.assertTrue(payload["operation_in_progress"])
+        self.assertEqual(payload["operation_message"], "Aguardando resultado...")
+        self.assertEqual(payload["expiration_display"], "Aguardando resultado...")
+        self.assertFalse(payload["show_expiration_countdown"])
+        self.assertNotEqual(payload["operation_message"], "Expira em 00:00")
         self.assertFalse(can_run)
         self.assertEqual(waiting_state.status, STATUS_PENDING_RESULT)
 
