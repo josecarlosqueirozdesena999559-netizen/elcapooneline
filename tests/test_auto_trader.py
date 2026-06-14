@@ -25,6 +25,43 @@ def make_cycle_due(user_id: str) -> None:
 
 
 class AutoTraderStateTests(unittest.TestCase):
+    def test_new_users_receive_independent_default_states(self) -> None:
+        trader = AutoTrader()
+
+        user_a = trader.update_config(
+            "user-a",
+            main.RobotConfigUpdate(entry_value=15),
+        )
+        user_b = trader.get("user-b")
+
+        self.assertIsNot(user_a, user_b)
+        self.assertEqual(user_a.entry_value, 15)
+        self.assertEqual(user_b.entry_value, 2)
+        self.assertEqual(user_b.cycle_minutes, 5)
+        self.assertEqual(user_b.min_confidence, 90)
+        self.assertEqual(user_b.min_payout, 85)
+        self.assertEqual(user_b.stop_win, 50)
+        self.assertEqual(user_b.stop_loss, 30)
+        self.assertEqual(user_b.strategy_mode, "conservative")
+        self.assertEqual(user_b.account_mode, "DEMO")
+        self.assertFalse(user_b.enabled)
+        self.assertEqual(trader.source("user-a"), "memory")
+        self.assertEqual(trader.source("user-b"), "default")
+
+    def test_updating_user_b_does_not_change_user_a(self) -> None:
+        trader = AutoTrader()
+        trader.update_config(
+            "user-a",
+            main.RobotConfigUpdate(entry_value=15, stop_loss=40),
+        )
+
+        trader.update_config("user-b", main.RobotConfigUpdate(stop_loss=12))
+
+        self.assertEqual(trader.get("user-a").entry_value, 15)
+        self.assertEqual(trader.get("user-a").stop_loss, 40)
+        self.assertEqual(trader.get("user-b").entry_value, 2)
+        self.assertEqual(trader.get("user-b").stop_loss, 12)
+
     def test_disabled_robot_never_opens_cycle(self) -> None:
         trader = AutoTrader()
 
@@ -33,7 +70,7 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertFalse(can_run)
         self.assertEqual(state.status, STATUS_STOPPED)
 
-    def test_cycle_is_reserved_for_ten_minutes(self) -> None:
+    def test_cycle_is_reserved_for_five_minutes(self) -> None:
         trader = AutoTrader()
         trader.start("user-cycle")
         trader.get("user-cycle").next_cycle_at = utc_now() - timedelta(seconds=1)
@@ -45,7 +82,7 @@ class AutoTraderStateTests(unittest.TestCase):
 
         self.assertFalse(second_run)
         self.assertEqual(waiting_state.status, STATUS_WAITING_NEXT_CYCLE)
-        self.assertGreater(waiting_state.next_cycle_at, utc_now() + timedelta(minutes=9))
+        self.assertGreater(waiting_state.next_cycle_at, utc_now() + timedelta(minutes=4))
 
     def test_start_delays_first_cycle_for_full_cycle_minutes(self) -> None:
         trader = AutoTrader()
@@ -60,8 +97,18 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertIsNone(state.rejection_reason)
         self.assertIsNotNone(state.cycle_id)
         self.assertIsNotNone(payload["current_cycle_started_at"])
-        self.assertGreaterEqual(payload["seconds_until_next_cycle"], 599)
-        self.assertLessEqual(payload["seconds_until_next_cycle"], 600)
+        self.assertGreaterEqual(payload["seconds_until_next_cycle"], 299)
+        self.assertLessEqual(payload["seconds_until_next_cycle"], 300)
+
+    def test_config_keeps_selected_five_minute_cycle(self) -> None:
+        trader = AutoTrader()
+
+        state = trader.update_config(
+            "user-five-minute-config",
+            main.RobotConfigUpdate(cycle_minutes=5),
+        )
+
+        self.assertEqual(state.cycle_minutes, 5)
 
     def test_start_never_reuses_previous_cycle(self) -> None:
         trader = AutoTrader()
@@ -80,7 +127,7 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertIsNone(restarted.pending_signal)
         self.assertIsNone(restarted.last_signal)
         self.assertIsNone(restarted.rejection_reason)
-        self.assertGreater(restarted.next_cycle_at, utc_now() + timedelta(minutes=9))
+        self.assertGreater(restarted.next_cycle_at, utc_now() + timedelta(minutes=4))
 
     def test_entry_windows_match_each_timeframe(self) -> None:
         cases = {
@@ -259,6 +306,76 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         main.auto_trader = AutoTrader()
 
+    async def test_robot_config_and_state_are_isolated_by_user_id(self) -> None:
+        with (
+            patch.object(main, "persist_robot") as persist,
+            patch.object(main, "ensure_robot_worker"),
+            patch.object(main, "stop_robot_worker", new=AsyncMock()),
+        ):
+            response_a = await main.robot_config(
+                main.RobotConfigUpdate(entry_value=15, stop_loss=40),
+                {"user_id": "user-a"},
+            )
+            response_b = await main.robot_config(
+                main.RobotConfigUpdate(stop_loss=12),
+                {"user_id": "user-b"},
+            )
+
+        data_a = json.loads(response_a.body)["data"]
+        data_b = json.loads(response_b.body)["data"]
+        self.assertEqual(data_a["entry_value"], 15)
+        self.assertEqual(data_a["stop_loss"], 40)
+        self.assertEqual(data_b["entry_value"], 2)
+        self.assertEqual(data_b["stop_loss"], 12)
+        self.assertEqual(
+            [call.args[0] for call in persist.call_args_list],
+            ["user-a", "user-b"],
+        )
+
+        session_payload = main.build_success(
+            {
+                "connected": True,
+                "active_mode": "PRACTICE",
+                "server_time": SERVER_TIME_M1_OPEN,
+            }
+        )
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(return_value=(200, session_payload)),
+            ),
+            patch.object(main, "sync_user_store_from_payload"),
+        ):
+            state_a_response = await main.robot_state({"user_id": "user-a"})
+            state_b_response = await main.robot_state({"user_id": "user-b"})
+
+        state_a = json.loads(state_a_response.body)["data"]
+        state_b = json.loads(state_b_response.body)["data"]
+        self.assertNotEqual(state_a["entry_value"], state_b["entry_value"])
+        self.assertNotEqual(state_a["stop_loss"], state_b["stop_loss"])
+
+    async def test_user_isolation_debug_reports_current_user_only(self) -> None:
+        main.auto_trader.update_config(
+            "user-a",
+            main.RobotConfigUpdate(entry_value=15, stop_win=90),
+        )
+
+        response = await main.debug_user_isolation({"user_id": "user-b"})
+
+        payload = json.loads(response.body)
+        self.assertEqual(
+            payload,
+            {
+                "user_id": "user-b",
+                "has_state": True,
+                "entry_value": 2.0,
+                "stop_win": 50.0,
+                "stop_loss": 30.0,
+                "source": "default",
+            },
+        )
+
     async def test_robot_state_after_result_returns_next_cycle_contract(self) -> None:
         user_id = "user-result-state"
         state = main.auto_trader.start(user_id)
@@ -366,8 +483,8 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(response.body)["data"]
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["status"], STATUS_WAITING_NEXT_CYCLE)
-        self.assertGreaterEqual(payload["seconds_until_next_cycle"], 599)
-        self.assertLessEqual(payload["seconds_until_next_cycle"], 600)
+        self.assertGreaterEqual(payload["seconds_until_next_cycle"], 299)
+        self.assertLessEqual(payload["seconds_until_next_cycle"], 300)
         self.assertIn("[ROBOT_START_DELAYED]", "\n".join(logs.output))
         self.assertIn("[ROBOT_START_NEW_CYCLE]", "\n".join(logs.output))
         self.assertIsNotNone(payload["cycle_id"])
@@ -557,6 +674,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_code, 200)
         self.assertEqual(payload["data"]["status"], STATUS_PENDING_RESULT)
         self.assertTrue(payload["data"]["operation_in_progress"])
+        self.assertIsNotNone(payload["data"]["last_signal"])
         self.assertEqual(trade["order_id"], "success-1")
         self.assertEqual(trade["active"], "EURUSD-OTC")
         self.assertEqual(trade["direction"], "PUT")
@@ -646,18 +764,48 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "call_bullex_service", side_effect=fake_bullex),
             patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
             patch.object(main.trade_result_monitor, "start", return_value=True) as monitor,
-            self.assertLogs("backend-gateway", level="ERROR") as logs,
+            self.assertLogs("backend-gateway", level="INFO") as logs,
         ):
             status_code, payload = await main.execute_robot_cycle(user_id)
 
         self.assertEqual(status_code, 409)
         self.assertEqual(payload["data"]["status"], STATUS_ORDER_REJECTED)
         self.assertEqual(payload["data"]["rejection_reason"], "MARKET_CLOSED")
+        self.assertEqual(payload["data"]["last_order_error"], "MARKET_CLOSED")
+        self.assertIsNotNone(payload["data"]["rejected_at"])
+        self.assertIsNotNone(payload["data"]["last_signal"])
         self.assertIsNone(payload["data"]["pending_signal"])
         self.assertFalse(payload["data"]["operation_in_progress"])
+        self.assertGreaterEqual(payload["data"]["seconds_until_next_cycle"], 299)
+        self.assertLessEqual(payload["data"]["seconds_until_next_cycle"], 300)
         self.assertNotEqual(payload["data"]["status"], STATUS_WAITING_NEXT_CYCLE)
         monitor.assert_not_called()
-        self.assertIn("[ORDER_SEND_FAILED]", "\n".join(logs.output))
+        output = "\n".join(logs.output)
+        self.assertIn("[ORDER_SEND_FAILED]", output)
+        self.assertIn("[ORDER_REJECTED]", output)
+        self.assertIn("[NEXT_CYCLE_SCHEDULED]", output)
+
+    async def test_order_rejected_is_visible_for_five_seconds_then_waits(self) -> None:
+        user_id = "user-order-rejected-visible"
+        state = main.auto_trader.start(user_id)
+        state.cycle_minutes = 5
+        state.last_signal = {"symbol": "EURUSD-OTC", "signal": "CALL"}
+
+        rejected = main.auto_trader.reject_order(
+            user_id,
+            "active suspended",
+            last_order_error=main.readable_order_error("active suspended"),
+        )
+        visible_payload = rejected.to_dict()
+        rejected.rejected_at = utc_now() - timedelta(seconds=5)
+        waiting_payload = rejected.to_dict()
+
+        self.assertEqual(visible_payload["status"], STATUS_ORDER_REJECTED)
+        self.assertEqual(visible_payload["last_order_error"], "Ativo suspenso pela BullEx")
+        self.assertEqual(waiting_payload["status"], STATUS_WAITING_NEXT_CYCLE)
+        self.assertIsNone(waiting_payload["rejection_reason"])
+        self.assertEqual(waiting_payload["last_rejection_reason"], "active suspended")
+        self.assertEqual(waiting_payload["last_signal"]["symbol"], "EURUSD-OTC")
 
     async def test_non_whitelisted_asset_never_operates(self) -> None:
         user_id = "user-apple"

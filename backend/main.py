@@ -15,10 +15,12 @@ from fastapi.responses import JSONResponse
 from backend.auto_trader import (
     AutoTrader,
     RobotConfigUpdate,
+    STATUS_ORDER_REJECTED,
     STATUS_PENDING_RESULT,
     STATUS_WAITING_ENTRY_WINDOW,
     STATUS_WAITING_NEXT_CYCLE,
     parse_datetime,
+    utc_now,
 )
 from backend.openai_signal_reviewer import review_signal
 from backend.robot_persistence import RobotPersistence, create_robot_persistence
@@ -709,6 +711,20 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     return build_success(data)
 
 
+def readable_order_error(error: Any) -> str:
+    raw_error = str(error or "ORDER_FAILED").strip() or "ORDER_FAILED"
+    normalized = raw_error.lower().replace("_", " ").replace("-", " ")
+    if "active suspended" in normalized or "ativo suspenso" in normalized:
+        return "Ativo suspenso pela BullEx"
+    if "payout" in normalized and any(term in normalized for term in ("low", "baixo", "minimum", "minimo")):
+        return "Payout abaixo do minimo permitido"
+    if "active not found" in normalized or "ativo nao encontrado" in normalized:
+        return "Ativo nao encontrado na BullEx"
+    if "account mismatch" in normalized or "mode mismatch" in normalized or "modo da conta" in normalized:
+        return "Conta BullEx incompativel com o modo selecionado"
+    return raw_error
+
+
 async def submit_bullex_order(
     user_id: str,
     endpoint: str,
@@ -734,6 +750,30 @@ def persist_robot(user_id: str) -> None:
             robot_persistence.save_trade(user_id, state.last_trade)
     except Exception:
         logger.exception("[ROBOT PERSISTENCE ERROR] user_id=%s", user_id)
+
+
+def robot_persistence_source() -> str:
+    if robot_persistence.__class__.__name__ == "SupabaseRobotPersistence":
+        return "supabase"
+    return "memory"
+
+
+def get_user_robot_state(user_id: str) -> Any:
+    if auto_trader.has_state(user_id):
+        return auto_trader.get(user_id)
+    try:
+        payload = robot_persistence.load_state(user_id)
+        if payload is not None:
+            trades = robot_persistence.load_trades(user_id)
+            return auto_trader.restore(
+                user_id,
+                payload,
+                trades,
+                source=robot_persistence_source(),
+            )
+    except Exception:
+        logger.exception("[ROBOT USER LOAD ERROR] user_id=%s", user_id)
+    return auto_trader.get(user_id)
 
 
 async def analyze_active_signal(
@@ -1176,23 +1216,75 @@ async def execute_robot_cycle(
                 state.entry_value,
                 entry_window["expiration_minutes"],
             )
-            order_status, order_payload = await submit_bullex_order(
-                user_id,
-                order_path,
-                order_body,
-            )
+            try:
+                order_status, order_payload = await submit_bullex_order(
+                    user_id,
+                    order_path,
+                    order_body,
+                )
+            except Exception as exc:
+                reason = str(exc).strip() or type(exc).__name__
+                friendly_error = readable_order_error(reason)
+                state = auto_trader.reject_order(
+                    user_id,
+                    reason,
+                    last_order_error=friendly_error,
+                )
+                logger.exception("[ORDER_SEND_FAILED] user_id=%s error=%s", user_id, reason)
+                logger.error(
+                    "[ORDER_REJECTED] user_id=%s reason=%s last_order_error=%s",
+                    user_id,
+                    reason,
+                    friendly_error,
+                )
+                logger.info(
+                    "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                    user_id,
+                    state.next_cycle_at,
+                )
+                return 502, build_robot_payload(state)
             mark_disconnected_from_payload(user_id, order_payload)
             if not order_payload.get("ok"):
                 reason = str(order_payload.get("error") or "ORDER_FAILED")
-                state = auto_trader.reject_order(user_id, reason)
+                friendly_error = readable_order_error(reason)
+                state = auto_trader.reject_order(
+                    user_id,
+                    reason,
+                    last_order_error=friendly_error,
+                )
                 logger.error("[ORDER_SEND_FAILED] user_id=%s error=%s", user_id, reason)
+                logger.error(
+                    "[ORDER_REJECTED] user_id=%s reason=%s last_order_error=%s",
+                    user_id,
+                    reason,
+                    friendly_error,
+                )
+                logger.info(
+                    "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                    user_id,
+                    state.next_cycle_at,
+                )
                 return order_status, build_robot_payload(state)
 
             order_data = order_payload.get("data") if isinstance(order_payload.get("data"), dict) else {}
             order_id = order_data.get("order_id")
             if order_id is None or not str(order_id).strip():
-                state = auto_trader.reject_order(user_id, "ORDER_ID_MISSING")
+                state = auto_trader.reject_order(
+                    user_id,
+                    "ORDER_ID_MISSING",
+                    last_order_error="BullEx nao retornou o identificador da ordem",
+                )
                 logger.error("[ORDER_SEND_FAILED] user_id=%s error=ORDER_ID_MISSING", user_id)
+                logger.error(
+                    "[ORDER_REJECTED] user_id=%s reason=ORDER_ID_MISSING last_order_error=%s",
+                    user_id,
+                    state.last_order_error,
+                )
+                logger.info(
+                    "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                    user_id,
+                    state.next_cycle_at,
+                )
                 return 502, build_robot_payload(state)
 
             sent_at = datetime.now(timezone.utc)
@@ -1222,13 +1314,14 @@ async def execute_robot_cycle(
                 "cycle_id": state.cycle_id,
             }
             trade["timestamp"] = trade["sent_at"]
-            auto_trader.clear_pending_signal(user_id)
+            state = auto_trader.record_trade(user_id, trade)
+            state.pending_signal = None
+            state.entry_window_open = False
             logger.info(
                 "[PENDING_SIGNAL_CLEARED] user_id=%s symbol=%s reason=TRADE_SENT",
                 user_id,
                 symbol,
             )
-            state = auto_trader.record_trade(user_id, trade)
             logger.info(
                 "[EXPIRATION_SET] user_id=%s order_id=%s timeframe=%s expected_expire_at=%s source=%s server_time_at_send=%s",
                 user_id,
@@ -1285,6 +1378,8 @@ async def robot_worker(user_id: str) -> None:
                 delay = 3
             elif state.status == STATUS_WAITING_ENTRY_WINDOW:
                 delay = max(1, state.seconds_until_entry_window)
+            elif state.status == STATUS_ORDER_REJECTED and state.rejected_at is not None:
+                delay = max(1, 5 - int((utc_now() - state.rejected_at).total_seconds()))
             else:
                 delay = max(1, state.to_dict()["seconds_until_next_cycle"])
             await asyncio.sleep(delay)
@@ -1347,7 +1442,12 @@ async def restore_robot_states() -> None:
     for user_id, payload in persisted_states:
         try:
             trades = robot_persistence.load_trades(user_id)
-            state = auto_trader.restore(user_id, payload, trades)
+            state = auto_trader.restore(
+                user_id,
+                payload,
+                trades,
+                source=robot_persistence_source(),
+            )
             session_restored = await read_restored_session_status(user_id)
             if state.operation_in_progress and state.last_trade:
                 order_id = state.last_trade.get("order_id")
@@ -1466,13 +1566,14 @@ async def signals_top_reviewed(auth: dict[str, str] = Depends(require_headers)) 
 
 @app.get("/robot/state")
 async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    _, session_payload = await call_bullex_service("GET", "/sessions/status", auth["user_id"])
-    sync_user_store_from_payload(auth["user_id"], session_payload)
+    user_id = auth["user_id"]
+    state = get_user_robot_state(user_id)
+    _, session_payload = await call_bullex_service("GET", "/sessions/status", user_id)
+    sync_user_store_from_payload(user_id, session_payload)
     connected, active_mode = extract_account_status(session_payload)
-    state = auto_trader.get(auth["user_id"])
     if not connected:
-        state = auto_trader.disconnect_account(auth["user_id"])
-        logger.warning("[ROBOT_BLOCKED_ACCOUNT_DISCONNECTED] user_id=%s", auth["user_id"])
+        state = auto_trader.disconnect_account(user_id)
+        logger.warning("[ROBOT_BLOCKED_ACCOUNT_DISCONNECTED] user_id=%s", user_id)
         return json_response(
             200,
             build_robot_payload(
@@ -1486,7 +1587,7 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     server_timestamp = extract_server_timestamp(session_payload)
     if server_timestamp is not None:
         auto_trader.update_entry_window(
-            auth["user_id"],
+            user_id,
             get_entry_window(state.timeframe, server_timestamp),
         )
     block_reason = real_block_reason(state, connected=connected, active_mode=active_mode)
@@ -1617,24 +1718,45 @@ async def debug_bullex_connection_schema(
     return json_response(200, build_success(diagnostic))
 
 
+@app.get("/debug/user-isolation")
+async def debug_user_isolation(
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    user_id = auth["user_id"]
+    state = get_user_robot_state(user_id)
+    return JSONResponse(
+        status_code=200,
+        content={
+            "user_id": user_id,
+            "has_state": auto_trader.has_state(user_id),
+            "entry_value": state.entry_value,
+            "stop_win": state.stop_win,
+            "stop_loss": state.stop_loss,
+            "source": auto_trader.source(user_id),
+        },
+    )
+
+
 @app.post("/robot/config")
 async def robot_config(
     body: RobotConfigUpdate,
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
-    state = auto_trader.update_config(auth["user_id"], body)
-    persist_robot(auth["user_id"])
+    user_id = auth["user_id"]
+    get_user_robot_state(user_id)
+    state = auto_trader.update_config(user_id, body)
+    persist_robot(user_id)
     if state.enabled:
-        ensure_robot_worker(auth["user_id"])
+        ensure_robot_worker(user_id)
     else:
-        await stop_robot_worker(auth["user_id"])
+        await stop_robot_worker(user_id)
     return json_response(200, build_robot_payload(state))
 
 
 @app.post("/robot/start")
 async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     user_id = auth["user_id"]
-    state = auto_trader.get(user_id)
+    state = get_user_robot_state(user_id)
     if state.account_mode == "REAL":
         _, session_payload = await call_bullex_service("GET", "/sessions/status", user_id)
         mark_disconnected_from_payload(user_id, session_payload)

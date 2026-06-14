@@ -270,6 +270,8 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             persistence.save_state("user-robot", state.to_dict())
             persistence.save_trade("user-robot", state.last_trade)
 
+            self.assertEqual(persistence.load_state("user-robot")["entry_value"], 5)
+            self.assertIsNone(persistence.load_state("other-user"))
             restored_trader = AutoTrader()
             user_id, payload = persistence.load_states()[0]
             restored = restored_trader.restore(user_id, payload, persistence.load_trades(user_id))
@@ -280,12 +282,14 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(restored.wins, 1)
             self.assertEqual(restored.profit, 4.4)
             self.assertEqual(restored_trader.history(user_id)["trades"][0]["order_id"], "order-1")
+            self.assertEqual(restored_trader.source(user_id), "memory")
 
     async def test_startup_reactivates_enabled_robot_and_records_diagnostic(self) -> None:
         from backend import main
 
         persistence = SimpleNamespace(
             load_states=lambda: [("user-restore", {"enabled": True, "status": "STOPPED"})],
+            load_state=lambda _user_id: None,
             load_trades=lambda _user_id: [],
             save_restore_status=unittest.mock.Mock(),
         )
@@ -305,6 +309,10 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             state = main.auto_trader.get("user-restore")
             self.assertTrue(state.enabled)
             self.assertNotEqual(state.status, "STOPPED")
+            self.assertEqual(state.entry_value, 2)
+            self.assertEqual(state.min_confidence, 90)
+            self.assertEqual(state.min_payout, 85)
+            self.assertEqual(main.auto_trader.source("user-restore"), "memory")
             ensure_worker.assert_called_once_with("user-restore")
             persistence.save_restore_status.assert_called_once_with(
                 "user-restore",

@@ -200,7 +200,7 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["blocked_filters"], ["TREND_CLEAR"])
         self.assertEqual(data["quality_score"], 40)
         self.assertIsNone(data["pending_signal"])
-        self.assertGreaterEqual(data["seconds_until_next_cycle"], 599)
+        self.assertGreaterEqual(data["seconds_until_next_cycle"], 299)
         output = "\n".join(logs.output)
         self.assertIn("[SIGNAL_REJECTED]", output)
         self.assertIn("[NEXT_CYCLE_SCHEDULED]", output)

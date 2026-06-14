@@ -27,6 +27,10 @@ class RobotPersistence(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def load_state(self, user_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
     def save_trade(self, user_id: str, trade: dict[str, Any]) -> None:
         raise NotImplementedError
 
@@ -82,6 +86,14 @@ class SQLiteRobotPersistence(RobotPersistence):
                 "select user_id, state_json from robot_states order by user_id"
             ).fetchall()
         return [(row["user_id"], json.loads(row["state_json"])) for row in rows]
+
+    def load_state(self, user_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "select state_json from robot_states where user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return json.loads(row["state_json"]) if row is not None else None
 
     def save_trade(self, user_id: str, trade: dict[str, Any]) -> None:
         order_id = str(trade.get("order_id") or "").strip()
@@ -277,9 +289,9 @@ class SupabaseRobotPersistence(RobotPersistence):
             "enabled": state.get("enabled", False),
             "account_mode": state.get("account_mode", "DEMO"),
             "entry_value": state.get("entry_value", 2),
-            "cycle_minutes": state.get("cycle_minutes", 10),
-            "min_confidence": state.get("min_confidence", 85),
-            "min_payout": state.get("min_payout", 80),
+            "cycle_minutes": state.get("cycle_minutes", 5),
+            "min_confidence": state.get("min_confidence", 90),
+            "min_payout": state.get("min_payout", 85),
             "stop_win": state.get("stop_win", 50),
             "stop_loss": state.get("stop_loss", 30),
             "wins": state.get("wins", 0),
@@ -298,6 +310,16 @@ class SupabaseRobotPersistence(RobotPersistence):
     def load_states(self) -> list[tuple[str, dict[str, Any]]]:
         rows = self._request("GET", "/robot_states?select=user_id,state_json")
         return [(row["user_id"], row.get("state_json") or {}) for row in rows]
+
+    def load_state(self, user_id: str) -> dict[str, Any] | None:
+        rows = self._request(
+            "GET",
+            f"/robot_states?user_id=eq.{quote(user_id, safe='')}"
+            "&select=state_json&limit=1",
+        )
+        if not rows:
+            return None
+        return rows[0].get("state_json") or {}
 
     def save_trade(self, user_id: str, trade: dict[str, Any]) -> None:
         self._ensure_user(user_id)

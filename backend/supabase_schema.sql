@@ -50,9 +50,9 @@ create table if not exists public.robot_states (
   account_mode text not null default 'DEMO',
   strategy_mode text not null default 'conservative',
   entry_value numeric not null default 2,
-  cycle_minutes integer not null default 10,
-  min_confidence integer not null default 85,
-  min_payout numeric not null default 80,
+  cycle_minutes integer not null default 5,
+  min_confidence integer not null default 90,
+  min_payout numeric not null default 85,
   stop_win numeric not null default 50,
   stop_loss numeric not null default 30,
   wins integer not null default 0,
@@ -71,9 +71,9 @@ alter table public.robot_states
   add column if not exists account_mode text not null default 'DEMO',
   add column if not exists strategy_mode text not null default 'conservative',
   add column if not exists entry_value numeric not null default 2,
-  add column if not exists cycle_minutes integer not null default 10,
-  add column if not exists min_confidence integer not null default 85,
-  add column if not exists min_payout numeric not null default 80,
+  add column if not exists cycle_minutes integer not null default 5,
+  add column if not exists min_confidence integer not null default 90,
+  add column if not exists min_payout numeric not null default 85,
   add column if not exists stop_win numeric not null default 50,
   add column if not exists stop_loss numeric not null default 30,
   add column if not exists wins integer not null default 0,
@@ -83,6 +83,11 @@ alter table public.robot_states
   add column if not exists state_json jsonb not null default '{}'::jsonb,
   add column if not exists created_at timestamptz not null default timezone('utc'::text, now()),
   add column if not exists updated_at timestamptz not null default timezone('utc'::text, now());
+
+alter table public.robot_states
+  alter column cycle_minutes set default 5,
+  alter column min_confidence set default 90,
+  alter column min_payout set default 85;
 
 alter table public.robot_states
   alter column id set default gen_random_uuid();

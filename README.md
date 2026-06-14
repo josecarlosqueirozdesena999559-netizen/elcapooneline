@@ -286,7 +286,7 @@ curl -H "x-api-key: CHAVE" -H "x-user-id: teste1" "http://localhost:8080/signals
 ## Robot cycle
 
 O estado e mantido em memoria por `x-user-id`. O modo padrao e `DEMO`, o ciclo
-padrao e de 10 minutos e operacoes REAL permanecem bloqueadas ate que todas as
+padrao e de 5 minutos e operacoes REAL permanecem bloqueadas ate que todas as
 confirmacoes sejam fornecidas.
 
 Endpoints:
@@ -306,7 +306,7 @@ curl -X POST \
   -H "x-api-key: CHAVE" \
   -H "x-user-id: teste1" \
   -H "Content-Type: application/json" \
-  -d "{\"enabled\":true,\"account_mode\":\"DEMO\",\"entry_value\":2,\"cycle_minutes\":10,\"min_confidence\":85,\"min_payout\":80,\"stop_win\":50,\"stop_loss\":30}" \
+  -d "{\"enabled\":true,\"account_mode\":\"DEMO\",\"entry_value\":2,\"cycle_minutes\":5,\"min_confidence\":90,\"min_payout\":85,\"stop_win\":50,\"stop_loss\":30}" \
   http://localhost:8080/robot/config
 ```
 

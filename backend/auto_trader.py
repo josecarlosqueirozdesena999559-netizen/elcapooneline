@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 AccountMode = Literal["DEMO", "REAL"]
 Timeframe = Literal["M1", "M5", "M15", "M30"]
 StrategyMode = Literal["aggressive", "balanced", "conservative"]
+StateSource = Literal["memory", "supabase", "default"]
 
 STATUS_STOPPED = "STOPPED"
 STATUS_WAITING_NEXT_CYCLE = "WAITING_NEXT_CYCLE"
@@ -79,9 +80,9 @@ class RobotState:
     timeframe: Timeframe = "M1"
     strategy_mode: StrategyMode = "conservative"
     entry_value: float = 2.0
-    cycle_minutes: int = 10
-    min_confidence: int = 85
-    min_payout: float = 80.0
+    cycle_minutes: int = 5
+    min_confidence: int = 90
+    min_payout: float = 85.0
     stop_win: float = 50.0
     stop_loss: float = 30.0
     max_entries_per_cycle: int = 1
@@ -109,6 +110,7 @@ class RobotState:
     current_candle_seconds: float = 0.0
     expiration_seconds: int = 60
     last_rejection_reason: str | None = None
+    last_order_error: str | None = None
     blocked_filters: list[str] = field(default_factory=list)
     approved_filters: list[str] = field(default_factory=list)
     quality_score: int = 0
@@ -119,7 +121,7 @@ class RobotState:
             value = data[key]
             data[key] = value.isoformat() if value is not None else None
         now = utc_now()
-        if self.status == STATUS_SIGNAL_REJECTED and self.rejected_at is not None:
+        if self.status in {STATUS_SIGNAL_REJECTED, STATUS_ORDER_REJECTED} and self.rejected_at is not None:
             if (now - self.rejected_at).total_seconds() >= 5:
                 data["status"] = STATUS_WAITING_NEXT_CYCLE if self.enabled else STATUS_STOPPED
                 data["rejection_reason"] = None
@@ -180,9 +182,21 @@ class AutoTrader:
     _locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     _histories: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     _completed_order_ids: dict[str, set[str]] = field(default_factory=dict)
+    _sources: dict[str, StateSource] = field(default_factory=dict)
 
     def get(self, user_id: str) -> RobotState:
-        return self._states.setdefault(user_id, RobotState())
+        state = self._states.get(user_id)
+        if state is None:
+            state = RobotState()
+            self._states[user_id] = state
+            self._sources[user_id] = "default"
+        return state
+
+    def has_state(self, user_id: str) -> bool:
+        return user_id in self._states
+
+    def source(self, user_id: str) -> StateSource:
+        return self._sources.get(user_id, "default")
 
     @staticmethod
     def _next_cycle_base(state: RobotState) -> datetime | None:
@@ -205,6 +219,8 @@ class AutoTrader:
         user_id: str,
         payload: dict[str, Any],
         trades: list[dict[str, Any]] | None = None,
+        *,
+        source: StateSource = "memory",
     ) -> RobotState:
         state = RobotState()
         datetime_fields = {"current_cycle_started_at", "next_cycle_at", "last_entry_at", "last_analysis_at", "rejected_at"}
@@ -224,6 +240,7 @@ class AutoTrader:
             self._schedule_next_cycle(state)
             state.entry_window_open = False
         self._states[user_id] = state
+        self._sources[user_id] = source
 
         restored_trades = [dict(trade) for trade in (trades or [])]
         self._histories[user_id] = [
@@ -261,6 +278,8 @@ class AutoTrader:
             else:
                 state.enabled = False
                 state.status = STATUS_STOPPED
+        if changes:
+            self._sources[user_id] = "memory"
         return state
 
     def start(self, user_id: str) -> RobotState:
@@ -270,6 +289,7 @@ class AutoTrader:
         state.status = STATUS_WAITING_NEXT_CYCLE
         state.rejection_reason = None
         state.last_rejection_reason = None
+        state.last_order_error = None
         state.rejected_at = None
         state.pending_signal = None
         state.last_signal = None
@@ -437,16 +457,30 @@ class AutoTrader:
         state = self.get(user_id)
         state.status = STATUS_SENDING_ORDER
         state.rejection_reason = None
+        state.rejected_at = None
+        state.last_order_error = None
         return state
 
-    def reject_order(self, user_id: str, reason: str) -> RobotState:
+    def reject_order(
+        self,
+        user_id: str,
+        reason: str,
+        *,
+        last_order_error: str | None = None,
+    ) -> RobotState:
         state = self.get(user_id)
+        rejected_at = utc_now()
         state.pending_signal = None
-        state.last_signal = None
         state.operation_in_progress = False
         state.status = STATUS_ORDER_REJECTED
         state.rejection_reason = reason
         state.last_rejection_reason = reason
+        state.last_order_error = last_order_error or reason
+        state.rejected_at = rejected_at
+        state.next_cycle_at = rejected_at + timedelta(minutes=state.cycle_minutes)
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        state.last_analysis_result = STATUS_ORDER_REJECTED
         return state
 
     def record_trade(self, user_id: str, trade: dict[str, Any]) -> RobotState:
@@ -472,6 +506,7 @@ class AutoTrader:
         state.operation_in_progress = True
         state.status = STATUS_PENDING_RESULT
         state.rejection_reason = None
+        state.last_order_error = None
         return state
 
     def lock_real(self, user_id: str, reason: str = "REAL_TRADING_LOCKED") -> RobotState:

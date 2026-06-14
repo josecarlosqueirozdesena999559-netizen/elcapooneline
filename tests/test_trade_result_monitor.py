@@ -58,8 +58,8 @@ class AutoTraderResultTests(unittest.TestCase):
         self.assertEqual(payload["status"], STATUS_WAITING_NEXT_CYCLE)
         self.assertFalse(payload["operation_in_progress"])
         self.assertFalse(payload["entry_window_open"])
-        self.assertGreaterEqual(payload["seconds_until_next_cycle"], 599)
-        self.assertLessEqual(payload["seconds_until_next_cycle"], 600)
+        self.assertGreaterEqual(payload["seconds_until_next_cycle"], 299)
+        self.assertLessEqual(payload["seconds_until_next_cycle"], 300)
 
     def test_loss_subtracts_entry_amount(self) -> None:
         trader = AutoTrader()
