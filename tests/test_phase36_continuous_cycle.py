@@ -93,6 +93,40 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(data["pending_signal"])
         self.assertEqual(data["last_trade"]["active"], "EURUSD-OTC")
 
+    async def test_expiration_uses_fresh_bullex_time_after_order(self) -> None:
+        user_id = "phase36-fresh-expiration"
+        state = main.auto_trader.start(user_id)
+        state.next_cycle_at = utc_now() - timedelta(seconds=1)
+        main.auto_trader.set_analysis_candidates(user_id, [make_signal()], make_signal())
+        state.status = STATUS_WAITING_NEXT_CYCLE
+        state.pending_signal = None
+        session_calls = 0
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            nonlocal session_calls
+            if path == "/sessions/status":
+                session_calls += 1
+                server_time = 359.0 if session_calls == 1 else 314.0
+                return 200, main.build_success(
+                    {"connected": True, "active_mode": "PRACTICE", "server_time": server_time}
+                )
+            if path == "/orders/buy-demo":
+                return 200, main.build_success({"order_id": "phase36-expiration-1"})
+            raise AssertionError(f"unexpected path: {path}")
+
+        with (
+            patch.object(main, "call_bullex_service", new=AsyncMock(side_effect=fake_bullex)),
+            patch.object(main.trade_result_monitor, "start"),
+            patch.object(main, "persist_robot"),
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        trade = payload["data"]["last_trade"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(trade["server_timestamp_at_send"], 314.0)
+        self.assertEqual(trade["expiration_source"], "server_time_aligned")
+        self.assertEqual(trade["expected_expire_at"], "1970-01-01T00:06:01+00:00")
+
     async def test_cycle_due_analyzes_once_when_best_candidate_is_missing(self) -> None:
         user_id = "phase36-force-analysis"
         state = main.auto_trader.start(user_id)

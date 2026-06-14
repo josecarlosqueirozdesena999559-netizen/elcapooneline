@@ -128,13 +128,13 @@ class AutoTraderResultTests(unittest.TestCase):
         can_run, waiting_analysis = trader.prepare_cycle("user-cycle-delay")
 
         self.assertTrue(can_run)
-        self.assertEqual(waiting_analysis.status, "WAITING_ANALYSIS_WINDOW")
+        self.assertEqual(waiting_analysis.status, STATUS_WAITING_NEXT_CYCLE)
 
 
 class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
-    def test_default_poll_interval_is_one_second(self) -> None:
+    def test_default_poll_interval_is_realtime(self) -> None:
         monitor = TradeResultMonitor(AsyncMock(), AsyncMock(), AsyncMock())
-        self.assertEqual(monitor.poll_seconds, 1.0)
+        self.assertEqual(monitor.poll_seconds, 0.25)
 
     def test_normalizes_bullex_results(self) -> None:
         self.assertEqual(
@@ -168,7 +168,7 @@ class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
         finish.assert_awaited_once_with("user-monitor", "104", "WIN", 1.76)
         timeout.assert_not_awaited()
 
-    async def test_monitor_waits_until_expiration_before_fetching(self) -> None:
+    async def test_monitor_fetches_immediately_instead_of_waiting_expiration(self) -> None:
         fetch = AsyncMock(
             return_value=(200, {"ok": True, "data": {"result": "win", "profit": 1.5}, "error": None})
         )
@@ -181,8 +181,7 @@ class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
             monitor.start("user-monitor-delay", "106", expires_at.isoformat())
             await asyncio.gather(*list(monitor._tasks.values()))
 
-        self.assertEqual(sleep.await_count, 1)
-        self.assertGreater(sleep.await_args.args[0], 9)
+        sleep.assert_not_awaited()
         fetch.assert_awaited_once_with("user-monitor-delay", "106")
         finish.assert_awaited_once_with("user-monitor-delay", "106", "WIN", 1.5)
 

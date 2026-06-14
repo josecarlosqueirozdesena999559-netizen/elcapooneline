@@ -2338,10 +2338,26 @@ async def execute_robot_cycle(
                     return 502, build_robot_payload(state)
 
                 sent_at = datetime.now(timezone.utc)
+                expiration_window = entry_window
+                try:
+                    fresh_status, fresh_payload = await call_bullex_service("GET", "/sessions/status", user_id)
+                    fresh_timestamp = extract_server_timestamp(fresh_payload)
+                    if fresh_status < 500 and fresh_timestamp is not None:
+                        expiration_window = get_entry_window(
+                            state.timeframe,
+                            fresh_timestamp,
+                            server_time_source="bullex",
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[EXPIRATION_SERVER_TIME_REFRESH_FAILED] user_id=%s error=%s",
+                        user_id,
+                        str(exc).strip() or type(exc).__name__,
+                    )
                 expected_expire_at, expiration_source = calculate_expected_expire_at(
                     state.timeframe,
                     order_data,
-                    entry_window,
+                    expiration_window,
                     sent_at,
                 )
                 trade = {
@@ -2359,8 +2375,8 @@ async def execute_robot_cycle(
                     "expected_expire_at": expected_expire_at.isoformat(),
                     "expires_at": expected_expire_at.isoformat(),
                     "expiration_source": expiration_source,
-                    "server_time_at_send": entry_window.get("server_time"),
-                    "server_timestamp_at_send": entry_window.get("server_timestamp"),
+                    "server_time_at_send": expiration_window.get("server_time"),
+                    "server_timestamp_at_send": expiration_window.get("server_timestamp"),
                     "cycle_id": state.cycle_id,
                     "order_attempts": state.order_attempts,
                     "fallback_candidate_used": state.fallback_candidate_used,
@@ -2482,7 +2498,7 @@ async def robot_worker(user_id: str) -> None:
             elif state.status == STATUS_ORDER_REJECTED and state.rejected_at is not None:
                 delay = max(1, 5 - int((utc_now() - state.rejected_at).total_seconds()))
             elif state.status == STATUS_WAITING_NEXT_CYCLE and state.enabled:
-                delay = 3
+                delay = max(0.2, min(3, float(state.to_dict()["seconds_until_next_cycle"])))
             else:
                 delay = max(1, state.to_dict()["seconds_until_next_cycle"])
             await asyncio.sleep(delay)

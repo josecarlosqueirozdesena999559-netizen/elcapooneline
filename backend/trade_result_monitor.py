@@ -45,7 +45,7 @@ class TradeResultMonitor:
     fetch_result: FetchResult
     finish_trade: FinishTrade
     timeout_trade: TimeoutTrade
-    poll_seconds: float = 1.0
+    poll_seconds: float = 0.25
     timeout_seconds: float = 2100.0
     _tasks: dict[tuple[str, str], asyncio.Task[None]] = field(default_factory=dict)
 
@@ -76,6 +76,7 @@ class TradeResultMonitor:
         key = (user_id, order_id)
         logger.info("[ROBOT TRADE MONITOR START] user_id=%s order_id=%s", user_id, order_id)
         try:
+            timeout_seconds = self.timeout_seconds
             if expires_at is not None:
                 try:
                     expiration = (
@@ -86,8 +87,7 @@ class TradeResultMonitor:
                     if expiration.tzinfo is None:
                         expiration = expiration.replace(tzinfo=timezone.utc)
                     delay = max(0.0, (expiration - datetime.now(timezone.utc)).total_seconds())
-                    if delay > 0:
-                        await asyncio.sleep(delay)
+                    timeout_seconds = max(timeout_seconds, delay + 30.0)
                 except (TypeError, ValueError):
                     logger.warning(
                         "[RESULT_MONITOR_EXPIRATION_INVALID] user_id=%s order_id=%s expires_at=%s",
@@ -96,7 +96,7 @@ class TradeResultMonitor:
                         expires_at,
                     )
             started_at = monotonic()
-            while monotonic() - started_at < self.timeout_seconds:
+            while monotonic() - started_at < timeout_seconds:
                 try:
                     _, payload = await self.fetch_result(user_id, order_id)
                     normalized = normalize_trade_result(payload)
