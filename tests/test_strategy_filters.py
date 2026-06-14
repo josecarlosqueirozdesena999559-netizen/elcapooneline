@@ -1,5 +1,7 @@
+import json
 import unittest
 from datetime import timedelta
+from unittest.mock import AsyncMock, patch
 
 from backend import main
 from backend.auto_trader import AutoTrader, utc_now
@@ -145,3 +147,95 @@ class StrategyFilterTests(unittest.TestCase):
         trader.finish_trade(user_id, "daily-win-1", "WIN", 3)
 
         self.assertEqual(main.daily_stop_reason(user_id, state), "DAILY_STOP_WIN_REACHED")
+
+
+class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        main.auto_trader = AutoTrader()
+
+    async def test_low_quality_block_schedules_next_cycle_and_clears_signal(self) -> None:
+        user_id = "user-low-quality"
+        state = main.auto_trader.start(user_id)
+        state.next_cycle_at = utc_now() - timedelta(seconds=1)
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {"connected": True, "active_mode": "PRACTICE", "server_time": 56.0}
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        scan_payload = main.build_success(
+            [
+                {
+                    "symbol": "EURUSD-OTC",
+                    "signal": "CALL",
+                    "confidence": 92,
+                    "strength": 10,
+                    "payout": 90,
+                    "trade_allowed": False,
+                    "blocked_filters": ["TREND_CLEAR"],
+                    "approved_filters": ["MIN_CONFIDENCE"],
+                    "quality_score": 40,
+                    "quality_reason": "TREND_CLEAR",
+                }
+            ]
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
+            patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "SIGNAL_REJECTED")
+        self.assertEqual(data["rejection_reason"], "SIGNAL_BLOCKED_LOW_QUALITY")
+        self.assertEqual(data["last_rejection_reason"], "TREND_CLEAR")
+        self.assertEqual(data["blocked_filters"], ["TREND_CLEAR"])
+        self.assertEqual(data["quality_score"], 40)
+        self.assertIsNone(data["pending_signal"])
+        self.assertGreaterEqual(data["seconds_until_next_cycle"], 599)
+        output = "\n".join(logs.output)
+        self.assertIn("[SIGNAL_REJECTED]", output)
+        self.assertIn("[NEXT_CYCLE_SCHEDULED]", output)
+
+    async def test_low_quality_rejection_returns_waiting_after_five_seconds(self) -> None:
+        user_id = "user-low-quality-state"
+        state = main.auto_trader.start(user_id)
+        state = main.auto_trader.reject_strategy(
+            user_id,
+            "SIGNAL_BLOCKED_LOW_QUALITY",
+            last_rejection_reason="TREND_CLEAR",
+            blocked_filters=["TREND_CLEAR"],
+            quality_score=40,
+        )
+        state.rejected_at = utc_now() - timedelta(seconds=6)
+        state.next_cycle_at = utc_now() + timedelta(minutes=9, seconds=54)
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success(
+                            {"connected": True, "active_mode": "PRACTICE", "server_time": 10.0}
+                        ),
+                    )
+                ),
+            ),
+            patch.object(main, "sync_user_store_from_payload"),
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["status"], "WAITING_NEXT_CYCLE")
+        self.assertIsNone(data["rejection_reason"])
+        self.assertEqual(data["last_rejection_reason"], "TREND_CLEAR")
+        self.assertGreaterEqual(data["seconds_until_next_cycle"], 590)
+        self.assertIsNone(data["pending_signal"])

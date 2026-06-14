@@ -85,6 +85,7 @@ class RobotState:
     current_cycle_started_at: datetime | None = None
     next_cycle_at: datetime | None = None
     last_entry_at: datetime | None = None
+    rejected_at: datetime | None = None
     operation_in_progress: bool = False
     last_signal: dict[str, Any] | None = None
     pending_signal: dict[str, Any] | None = None
@@ -103,10 +104,14 @@ class RobotState:
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        for key in ("current_cycle_started_at", "next_cycle_at", "last_entry_at"):
+        for key in ("current_cycle_started_at", "next_cycle_at", "last_entry_at", "rejected_at"):
             value = data[key]
             data[key] = value.isoformat() if value is not None else None
         now = utc_now()
+        if self.status == STATUS_SIGNAL_REJECTED and self.rejected_at is not None:
+            if (now - self.rejected_at).total_seconds() >= 5:
+                data["status"] = STATUS_WAITING_NEXT_CYCLE if self.enabled else STATUS_STOPPED
+                data["rejection_reason"] = None
         data["seconds_until_next_cycle"] = (
             max(0, int((self.next_cycle_at - now).total_seconds()))
             if self.next_cycle_at is not None
@@ -171,7 +176,7 @@ class AutoTrader:
         trades: list[dict[str, Any]] | None = None,
     ) -> RobotState:
         state = RobotState()
-        datetime_fields = {"current_cycle_started_at", "next_cycle_at", "last_entry_at"}
+        datetime_fields = {"current_cycle_started_at", "next_cycle_at", "last_entry_at", "rejected_at"}
         for key, value in payload.items():
             if not hasattr(state, key) or key in {"accuracy", "seconds_until_next_cycle"}:
                 continue
@@ -279,6 +284,7 @@ class AutoTrader:
         state.status = STATUS_SIGNAL_REJECTED
         state.rejection_reason = reason
         state.last_rejection_reason = reason
+        state.rejected_at = utc_now()
         return state
 
     def reject_strategy(
@@ -286,14 +292,22 @@ class AutoTrader:
         user_id: str,
         reason: str,
         *,
+        last_rejection_reason: str | None = None,
         blocked_filters: list[str] | None = None,
         approved_filters: list[str] | None = None,
         quality_score: int = 0,
     ) -> RobotState:
         state = self.reject(user_id, reason)
+        if last_rejection_reason:
+            state.last_rejection_reason = last_rejection_reason
         state.blocked_filters = list(blocked_filters or [])
         state.approved_filters = list(approved_filters or [])
         state.quality_score = int(quality_score or 0)
+        state.pending_signal = None
+        state.last_signal = None
+        state.operation_in_progress = False
+        state.entry_window_open = False
+        state.next_cycle_at = state.rejected_at + timedelta(minutes=state.cycle_minutes)
         return state
 
     def fail(self, user_id: str, reason: str) -> RobotState:

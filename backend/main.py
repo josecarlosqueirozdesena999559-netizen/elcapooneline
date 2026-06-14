@@ -1035,16 +1035,35 @@ async def execute_robot_cycle(
                         payout=payout,
                     )
                     if not allowed:
-                        rejection = strategy_rejection or LOW_QUALITY_SIGNAL
+                        rejection = "SIGNAL_BLOCKED_LOW_QUALITY"
 
                 if rejection is not None:
-                    state = auto_trader.reject_strategy(
-                        user_id,
-                        rejection,
-                        blocked_filters=list(selected.get("blocked_filters") or []),
-                        approved_filters=list(selected.get("approved_filters") or []),
-                        quality_score=int(selected.get("quality_score") or 0),
-                    )
+                    if rejection == "SIGNAL_BLOCKED_LOW_QUALITY":
+                        last_rejection_reason = str(selected.get("quality_reason") or rejection)
+                        last_rejection_reason = ",".join(selected.get("blocked_filters") or []) or LOW_QUALITY_SIGNAL
+                        state = auto_trader.reject_strategy(
+                            user_id,
+                            rejection,
+                            last_rejection_reason=last_rejection_reason,
+                            blocked_filters=list(selected.get("blocked_filters") or []),
+                            approved_filters=list(selected.get("approved_filters") or []),
+                            quality_score=int(selected.get("quality_score") or 0),
+                        )
+                        logger.info(
+                            "[SIGNAL_REJECTED] user_id=%s reason=%s last_rejection_reason=%s quality_score=%s blocked_filters=%s",
+                            user_id,
+                            rejection,
+                            state.last_rejection_reason,
+                            state.quality_score,
+                            state.blocked_filters,
+                        )
+                        logger.info(
+                            "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                            user_id,
+                            state.next_cycle_at,
+                        )
+                    else:
+                        state = auto_trader.reject(user_id, rejection)
                     logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=%s", user_id, rejection)
                     return 200, build_robot_payload(state)
 
