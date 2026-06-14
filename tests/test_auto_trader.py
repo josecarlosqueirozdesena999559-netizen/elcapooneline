@@ -485,6 +485,33 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(state_a["entry_value"], state_b["entry_value"])
         self.assertNotEqual(state_a["stop_loss"], state_b["stop_loss"])
 
+    async def test_robot_config_accepts_frontend_camel_case_stop_fields(self) -> None:
+        user_id = "user-camel-stop"
+        body = main.RobotConfigUpdate.model_validate(
+            {
+                "entryValue": 7,
+                "stopWin": 120,
+                "stopLoss": 35,
+                "cycleMinutes": 5,
+            }
+        )
+
+        with (
+            patch.object(main, "persist_robot") as persist,
+            patch.object(main, "ensure_robot_worker"),
+            patch.object(main, "stop_robot_worker", new=AsyncMock()),
+        ):
+            response = await main.robot_config(body, {"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["entry_value"], 7)
+        self.assertEqual(data["stop_win"], 120)
+        self.assertEqual(data["stop_loss"], 35)
+        self.assertEqual(main.auto_trader.get(user_id).stop_win, 120)
+        self.assertEqual(main.auto_trader.get(user_id).stop_loss, 35)
+        persist.assert_called_once_with(user_id)
+
     async def test_user_isolation_debug_reports_current_user_only(self) -> None:
         main.auto_trader.update_config(
             "user-a",

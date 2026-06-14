@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 AccountMode = Literal["DEMO", "REAL"]
@@ -69,18 +69,18 @@ class RobotConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool | None = None
-    account_mode: AccountMode | None = None
+    account_mode: AccountMode | None = Field(default=None, validation_alias=AliasChoices("account_mode", "accountMode"))
     timeframe: Timeframe | None = None
-    strategy_mode: StrategyMode | None = None
-    entry_value: float | None = Field(default=None, gt=0)
-    cycle_minutes: int | None = Field(default=None, ge=1)
-    min_confidence: int | None = Field(default=None, ge=0, le=100)
-    min_payout: float | None = Field(default=None, ge=0, le=100)
-    stop_win: float | None = Field(default=None, ge=0)
-    stop_loss: float | None = Field(default=None, ge=0)
-    max_entries_per_cycle: int | None = Field(default=None, ge=1, le=1)
-    allow_real: bool | None = None
-    confirm_real: bool | None = None
+    strategy_mode: StrategyMode | None = Field(default=None, validation_alias=AliasChoices("strategy_mode", "strategyMode"))
+    entry_value: float | None = Field(default=None, gt=0, validation_alias=AliasChoices("entry_value", "entryValue"))
+    cycle_minutes: int | None = Field(default=None, ge=1, validation_alias=AliasChoices("cycle_minutes", "cycleMinutes"))
+    min_confidence: int | None = Field(default=None, ge=0, le=100, validation_alias=AliasChoices("min_confidence", "minConfidence"))
+    min_payout: float | None = Field(default=None, ge=0, le=100, validation_alias=AliasChoices("min_payout", "minPayout"))
+    stop_win: float | None = Field(default=None, ge=0, validation_alias=AliasChoices("stop_win", "stopWin"))
+    stop_loss: float | None = Field(default=None, ge=0, validation_alias=AliasChoices("stop_loss", "stopLoss"))
+    max_entries_per_cycle: int | None = Field(default=None, ge=1, le=1, validation_alias=AliasChoices("max_entries_per_cycle", "maxEntriesPerCycle"))
+    allow_real: bool | None = Field(default=None, validation_alias=AliasChoices("allow_real", "allowReal"))
+    confirm_real: bool | None = Field(default=None, validation_alias=AliasChoices("confirm_real", "confirmReal"))
 
 
 @dataclass
