@@ -54,6 +54,26 @@ CRITICAL_TRADE_BLOCKS = {
     "OPERATION_IN_PROGRESS",
     "CANDLES_UNAVAILABLE",
 }
+ANALYSIS_DETAIL_FIELDS = (
+    "ema9",
+    "ema21",
+    "rsi",
+    "rsi14",
+    "atr",
+    "atr_pct",
+    "body_ratio",
+    "candle_body",
+    "upper_wick",
+    "lower_wick",
+    "upper_wick_ratio",
+    "lower_wick_ratio",
+    "directional_candles_5",
+    "alternating_last_3",
+    "candle_reading",
+    "entry_reason",
+    "block_reasons",
+    "metrics",
+)
 ORDER_AVAILABILITY_ERROR_TERMS = (
     "asset is not available",
     "active suspended",
@@ -1093,7 +1113,10 @@ def apply_strategy_guard(
     selected["signal"] = direction
     selected["strategy_score"] = strategy_score
     selected["quality_score"] = strategy_score
+    selected["score"] = strategy_score
+    selected["block_reasons"] = list(blocked_filters)
     selected["reason"] = reason
+    selected["entry_reason"] = selected.get("entry_reason") or reason
     selected["quality_reason"] = "OK" if trade_allowed else ",".join(hard_blocks)
     if trade_allowed:
         logger.info(
@@ -1278,8 +1301,12 @@ def build_strategy_narration(candidate: dict[str, Any]) -> tuple[str, str, list[
         used.append("RSI")
     if "CANDLE_STRENGTH" in approved or "body_ratio" in candidate:
         used.append("Candle Force")
+    if "WICK_REJECTION" in approved or "upper_wick_ratio" in candidate or "lower_wick_ratio" in candidate:
+        used.append("Pavios")
     if "LAST_5_CONFIRMATION" in approved or "directional_candles_5" in candidate:
         used.append("Ultimos Candles")
+    if "VOLATILITY" in approved or "atr_pct" in candidate:
+        used.append("Volatilidade")
     if candidate.get("payout") is not None:
         used.append("Payout")
     if not used:
@@ -1526,6 +1553,15 @@ async def select_fallback_candidate(
             "confidence": 1,
             "payout": payout,
             "reason": "Fallback operacional pelo movimento simples das ultimas velas.",
+            "entry_reason": "Fallback operacional pelo movimento simples das ultimas velas.",
+            "candle_reading": "Leitura simplificada por fallback operacional.",
+            "block_reasons": [],
+            "metrics": {
+                "symbol": symbol,
+                "timeframe": state.timeframe,
+                "candles_count": len(candles),
+                "fallback": True,
+            },
             "approved_filters": ["FALLBACK_OPEN_ASSET"],
             "blocked_filters": [],
             "trade_allowed": True,
@@ -1640,13 +1676,7 @@ async def update_cycle_analysis(
         candidate = {
             **{
                 key: ranked[key]
-                for key in (
-                    "ema9",
-                    "ema21",
-                    "rsi",
-                    "body_ratio",
-                    "directional_candles_5",
-                )
+                for key in ANALYSIS_DETAIL_FIELDS
                 if key in ranked
             },
             "symbol": symbol,
@@ -1658,6 +1688,10 @@ async def update_cycle_analysis(
             "confidence": int(ranked.get("confidence") or 0),
             "payout": payout,
             "reason": ranked.get("reason") or ranked.get("signal_explanation"),
+            "entry_reason": ranked.get("entry_reason") or ranked.get("reason") or ranked.get("signal_explanation"),
+            "candle_reading": ranked.get("candle_reading"),
+            "block_reasons": list(ranked.get("block_reasons") or ranked.get("blocked_filters") or []),
+            "metrics": dict(ranked.get("metrics") or {}),
             "approved_filters": list(ranked.get("approved_filters") or []),
             "blocked_filters": blocked_filters,
             "trade_allowed": bool(allowed and real_block is None and direction in {"CALL", "PUT"}),
@@ -2087,13 +2121,7 @@ async def execute_robot_cycle(
                     candidate = {
                         **{
                             key: ranked[key]
-                            for key in (
-                                "ema9",
-                                "ema21",
-                                "rsi",
-                                "body_ratio",
-                                "directional_candles_5",
-                            )
+                            for key in ANALYSIS_DETAIL_FIELDS
                             if key in ranked
                         },
                         "symbol": symbol,
@@ -2105,6 +2133,12 @@ async def execute_robot_cycle(
                         "confidence": int(ranked.get("confidence") or 0),
                         "payout": payout,
                         "reason": ranked.get("reason") or ranked.get("signal_explanation"),
+                        "entry_reason": ranked.get("entry_reason")
+                        or ranked.get("reason")
+                        or ranked.get("signal_explanation"),
+                        "candle_reading": ranked.get("candle_reading"),
+                        "block_reasons": list(ranked.get("block_reasons") or ranked.get("blocked_filters") or []),
+                        "metrics": dict(ranked.get("metrics") or {}),
                         "approved_filters": list(ranked.get("approved_filters") or []),
                         "blocked_filters": list(ranked.get("blocked_filters") or []),
                         "trade_allowed": bool(allowed and ranked.get("trade_allowed")),

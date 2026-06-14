@@ -153,6 +153,10 @@ class RobotState:
     strategy_name: str | None = None
     strategy_reason: str | None = None
     used_strategies: list[str] = field(default_factory=list)
+    candle_reading: str | None = None
+    entry_reason: str | None = None
+    block_reasons: list[str] = field(default_factory=list)
+    metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -197,6 +201,10 @@ class RobotState:
             self.strategy_name = None
             self.strategy_reason = None
             self.used_strategies = []
+            self.candle_reading = None
+            self.entry_reason = None
+            self.block_reasons = []
+            self.metrics = {}
             data["status"] = self.status
             data["next_cycle_at"] = self.next_cycle_at.isoformat() if self.next_cycle_at is not None else None
             data["pending_signal"] = None
@@ -207,6 +215,10 @@ class RobotState:
             data["strategy_name"] = None
             data["strategy_reason"] = None
             data["used_strategies"] = []
+            data["candle_reading"] = None
+            data["entry_reason"] = None
+            data["block_reasons"] = []
+            data["metrics"] = {}
         if self.status in {STATUS_SIGNAL_REJECTED, STATUS_ORDER_REJECTED} and self.rejected_at is not None:
             if (now - self.rejected_at).total_seconds() >= 5:
                 data["status"] = STATUS_WAITING_NEXT_CYCLE if self.enabled else STATUS_STOPPED
@@ -262,6 +274,10 @@ class RobotState:
             data["strategy_name"] = None
             data["strategy_reason"] = "Analisando mercado em silêncio. A entrada será revelada quando o contador zerar."
             data["used_strategies"] = []
+            data["candle_reading"] = None
+            data["entry_reason"] = None
+            data["block_reasons"] = []
+            data["metrics"] = {}
             data["last_signal"] = None
             data["pending_signal"] = None
             data["analysis_message"] = "Analisando mercado em silêncio..."
@@ -472,6 +488,10 @@ class AutoTrader:
         state.strategy_name = None
         state.strategy_reason = None
         state.used_strategies = []
+        state.candle_reading = None
+        state.entry_reason = None
+        state.block_reasons = []
+        state.metrics = {}
         state.analysis_message = None
         state.cycle_id = self._new_cycle_id()
         state.current_cycle_started_at = now
@@ -504,6 +524,10 @@ class AutoTrader:
             state.strategy_name = None
             state.strategy_reason = None
             state.used_strategies = []
+            state.candle_reading = None
+            state.entry_reason = None
+            state.block_reasons = []
+            state.metrics = {}
         last_trade_result = str((state.last_trade or {}).get("result") or "").upper()
         result_waiting = (
             state.status == STATUS_PENDING_RESULT
@@ -619,6 +643,10 @@ class AutoTrader:
         state.strategy_name = None
         state.strategy_reason = None
         state.used_strategies = []
+        state.candle_reading = None
+        state.entry_reason = None
+        state.block_reasons = []
+        state.metrics = {}
         return state
 
     def recover_timed_out_analysis(self, user_id: str) -> tuple[bool, RobotState]:
@@ -663,6 +691,10 @@ class AutoTrader:
         state.strategy_name = None
         state.strategy_reason = None
         state.used_strategies = []
+        state.candle_reading = None
+        state.entry_reason = None
+        state.block_reasons = []
+        state.metrics = {}
         state.analysis_message = None
         state.pending_signal = None
         state.last_signal = None
@@ -712,6 +744,12 @@ class AutoTrader:
             "strategy_score": int(signal.get("strategy_score") or 0),
             "score": int(signal.get("strategy_score") or signal.get("score") or 0),
             "reason": signal.get("reason") or signal.get("signal_explanation"),
+            "entry_reason": signal.get("entry_reason")
+            or signal.get("reason")
+            or signal.get("signal_explanation"),
+            "candle_reading": signal.get("candle_reading"),
+            "block_reasons": list(signal.get("block_reasons") or signal.get("blocked_filters") or []),
+            "metrics": dict(signal.get("metrics") or {}),
             "strategy_name": signal.get("strategy_name"),
             "strategy_reason": signal.get("strategy_reason")
             or signal.get("reason")
@@ -745,6 +783,10 @@ class AutoTrader:
         state.strategy_name = pending_signal["strategy_name"]
         state.strategy_reason = pending_signal["strategy_reason"]
         state.used_strategies = list(pending_signal["used_strategies"])
+        state.candle_reading = pending_signal["candle_reading"]
+        state.entry_reason = pending_signal["entry_reason"]
+        state.block_reasons = list(pending_signal["block_reasons"])
+        state.metrics = dict(pending_signal["metrics"])
         return state
 
     def set_order_attempt(self, user_id: str, candidate: dict[str, Any], attempt: int) -> RobotState:
@@ -848,6 +890,14 @@ class AutoTrader:
         state.strategy_name = (best_candidate or {}).get("strategy_name")
         state.strategy_reason = (best_candidate or {}).get("strategy_reason")
         state.used_strategies = list((best_candidate or {}).get("used_strategies") or [])
+        state.candle_reading = (best_candidate or {}).get("candle_reading")
+        state.entry_reason = (best_candidate or {}).get("entry_reason")
+        state.block_reasons = list(
+            (best_candidate or {}).get("block_reasons")
+            or (best_candidate or {}).get("blocked_filters")
+            or []
+        )
+        state.metrics = dict((best_candidate or {}).get("metrics") or {})
         state.last_analysis_at = utc_now()
         state.last_analysis_result = "BEST_CANDIDATE_UPDATED" if best_candidate is not None else "NO_CANDIDATES"
         state.analysis_result = state.last_analysis_result
@@ -872,6 +922,10 @@ class AutoTrader:
         state.strategy_name = None
         state.strategy_reason = None
         state.used_strategies = []
+        state.candle_reading = None
+        state.entry_reason = None
+        state.block_reasons = []
+        state.metrics = {}
         state.analysis_message = ANALYSIS_MESSAGE if analyze else None
         return state
 
@@ -897,6 +951,10 @@ class AutoTrader:
         state.candidates_count = 0
         state.candidates = []
         state.best_candidate = None
+        state.candle_reading = None
+        state.entry_reason = None
+        state.block_reasons = []
+        state.metrics = {}
         return state
 
     def sync_connection(
