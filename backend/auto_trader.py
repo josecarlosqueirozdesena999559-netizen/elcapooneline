@@ -384,12 +384,13 @@ class AutoTrader:
         if result_visible:
             state.operation_in_progress = False
         elif state.enabled and state.pending_signal:
-            state.status = STATUS_WAITING_ENTRY_WINDOW
-            state.rejection_reason = STATUS_WAITING_ENTRY_WINDOW
+            state.status = STATUS_SENDING_ORDER
+            state.rejection_reason = None
         elif state.enabled and not state.operation_in_progress:
             state.status = STATUS_WAITING_NEXT_CYCLE
             state.rejection_reason = None
-            self._schedule_next_cycle(state)
+            if state.next_cycle_at is None:
+                self._schedule_next_cycle(state)
             state.entry_window_open = False
         self._states[user_id] = state
         self._sources[user_id] = source

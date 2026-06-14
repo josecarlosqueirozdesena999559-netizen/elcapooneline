@@ -2568,6 +2568,14 @@ async def restore_robot_states() -> None:
                 source=robot_persistence_source(),
             )
             session_restored = await read_restored_session_status(user_id)
+            if session_restored:
+                state = auto_trader.sync_connection(
+                    user_id,
+                    connected=True,
+                    active_mode=state.active_mode or "PRACTICE",
+                    source="bullex_service",
+                    align_status=state.pending_signal is None,
+                )
             if state.operation_in_progress and state.last_trade:
                 order_id = state.last_trade.get("order_id")
                 if order_id:

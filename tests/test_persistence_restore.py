@@ -403,6 +403,8 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             state = main.auto_trader.get("user-restore")
             self.assertTrue(state.enabled)
             self.assertNotEqual(state.status, "STOPPED")
+            self.assertTrue(state.connected)
+            self.assertEqual(state.connection_status_source, "bullex_service")
             self.assertEqual(state.entry_value, 2)
             self.assertEqual(state.min_confidence, 94)
             self.assertEqual(state.min_payout, 88)
@@ -413,6 +415,56 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 session_restored=True,
                 robot_restored=True,
             )
+        finally:
+            main.auto_trader = old_trader
+            main.robot_persistence = old_persistence
+            main.robot_tasks = old_tasks
+
+    async def test_restore_pending_signal_resumes_sending_order_worker(self) -> None:
+        from backend import main
+        from backend.auto_trader import STATUS_SENDING_ORDER
+
+        persistence = SimpleNamespace(
+            load_states=lambda: [
+                (
+                    "user-pending-restore",
+                    {
+                        "enabled": True,
+                        "status": "SENDING_ORDER",
+                        "pending_signal": {
+                            "symbol": "EURUSD-OTC",
+                            "signal": "CALL",
+                            "direction": "CALL",
+                            "confidence": 94,
+                            "payout": 88,
+                            "strategy_score": 94,
+                        },
+                    },
+                )
+            ],
+            load_state=lambda _user_id: None,
+            load_trades=lambda _user_id: [],
+            save_restore_status=unittest.mock.Mock(),
+        )
+        old_trader = main.auto_trader
+        old_persistence = main.robot_persistence
+        old_tasks = main.robot_tasks
+        main.auto_trader = AutoTrader()
+        main.robot_persistence = persistence
+        main.robot_tasks = {}
+        try:
+            with (
+                patch.object(main, "read_restored_session_status", new=AsyncMock(return_value=True)),
+                patch.object(main, "ensure_robot_worker") as ensure_worker,
+            ):
+                await main.restore_robot_states()
+
+            state = main.auto_trader.get("user-pending-restore")
+            self.assertTrue(state.enabled)
+            self.assertTrue(state.connected)
+            self.assertEqual(state.status, STATUS_SENDING_ORDER)
+            self.assertIsNotNone(state.pending_signal)
+            ensure_worker.assert_called_once_with("user-pending-restore")
         finally:
             main.auto_trader = old_trader
             main.robot_persistence = old_persistence
