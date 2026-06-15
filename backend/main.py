@@ -424,7 +424,11 @@ def build_live_candles_payload(
         candles[-1]["is_closed"] = False
     return {
         "symbol": symbol,
+        "active": symbol,
         "timeframe": timeframe,
+        "interval": interval,
+        "count": min(limit, len(candles)),
+        "limit": limit,
         "server_time": server_time,
         "candles": candles[-limit:],
     }
@@ -3650,6 +3654,7 @@ async def debug_candles_live(
         build_success(
             {
                 "symbol": normalize_binary_active(symbol),
+                "timeframe": timeframe,
                 "last_candle_time": int(last_candle_time) if last_candle_time is not None else None,
                 "last_close": last_candle.get("close") if isinstance(last_candle, dict) else None,
                 "server_time": server_time,

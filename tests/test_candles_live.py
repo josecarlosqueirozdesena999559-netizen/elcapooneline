@@ -34,7 +34,11 @@ class CandlesLiveTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(response.body)["data"]
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["symbol"], "EURUSD-OTC")
+        self.assertEqual(payload["active"], "EURUSD-OTC")
         self.assertEqual(payload["timeframe"], "M1")
+        self.assertEqual(payload["interval"], 60)
+        self.assertEqual(payload["count"], 3)
+        self.assertEqual(payload["limit"], 60)
         self.assertEqual(payload["server_time"], 125.0)
         self.assertEqual(payload["candles"][-1]["time"], 120)
         self.assertEqual(payload["candles"][-1]["close"], 1.25)
@@ -63,7 +67,10 @@ class CandlesLiveTests(unittest.IsolatedAsyncioTestCase):
 
         payload = json.loads(response.body)["data"]
         self.assertEqual(payload["symbol"], "EURUSD-OTC")
+        self.assertEqual(payload["active"], "EURUSD-OTC")
         self.assertEqual(payload["timeframe"], "M1")
+        self.assertEqual(payload["interval"], 60)
+        self.assertEqual(payload["count"], 1)
         self.assertEqual(len(payload["candles"]), 1)
         self.assertEqual(payload["candles"][0]["time"], 120)
         self.assertFalse(payload["candles"][0]["is_closed"])
@@ -88,6 +95,7 @@ class CandlesLiveTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(response.body)["data"]
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["symbol"], "EURUSD-OTC")
+        self.assertEqual(payload["timeframe"], "M1")
         self.assertEqual(payload["last_candle_time"], 120)
         self.assertEqual(payload["last_close"], 1.35)
         self.assertEqual(payload["server_time"], 125.0)
