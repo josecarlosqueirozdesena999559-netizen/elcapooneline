@@ -4,6 +4,7 @@ import os
 import asyncio
 import json
 from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -104,6 +105,10 @@ BINARY_ALLOWED_ASSETS = [
     "AUDCHF-OTC",
 ]
 BINARY_ALLOWED_ASSET_SET = set(BINARY_ALLOWED_ASSETS)
+SESSION_CACHE_TTL_SECONDS = 10
+SESSION_OFFLINE_TTL_SECONDS = 60
+SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
+SESSION_CACHEABLE_PATHS = {"/sessions/status", "/account"}
 
 
 def build_success(data: Any) -> dict[str, Any]:
@@ -156,6 +161,98 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+@dataclass
+class BullexResponseCacheEntry:
+    status_code: int
+    payload: dict[str, Any]
+    expires_at: datetime
+
+
+@dataclass
+class BullexUserSessionCache:
+    responses: dict[str, BullexResponseCacheEntry] = field(default_factory=dict)
+    failure_count: int = 0
+    next_retry_at: datetime | None = None
+    offline_until: datetime | None = None
+
+
+session_response_cache: dict[str, BullexUserSessionCache] = {}
+
+
+def get_session_cache(user_id: str) -> BullexUserSessionCache:
+    return session_response_cache.setdefault(user_id, BullexUserSessionCache())
+
+
+def session_backoff_seconds(failure_count: int) -> int:
+    if failure_count <= 0:
+        return 0
+    index = min(failure_count, len(SESSION_FAILURE_BACKOFF_SECONDS)) - 1
+    return SESSION_FAILURE_BACKOFF_SECONDS[index]
+
+
+def payload_connected_state(payload: dict[str, Any]) -> bool | None:
+    data = payload.get("data")
+    if not isinstance(data, dict) or "connected" not in data:
+        return None
+    return bool(data.get("connected"))
+
+
+def disconnected_cache_payload(*, source: str) -> dict[str, Any]:
+    return build_success({"connected": False, "connection_status_source": source})
+
+
+def cache_bullex_response(user_id: str, path: str, status_code: int, payload: dict[str, Any]) -> None:
+    cache = get_session_cache(user_id)
+    cache.responses[path] = BullexResponseCacheEntry(
+        status_code=status_code,
+        payload=payload,
+        expires_at=utc_now() + timedelta(seconds=SESSION_CACHE_TTL_SECONDS),
+    )
+
+
+def clear_session_backoff(user_id: str) -> None:
+    cache = get_session_cache(user_id)
+    cache.failure_count = 0
+    cache.next_retry_at = None
+    cache.offline_until = None
+
+
+def mark_session_failure(user_id: str, *, offline: bool = False) -> None:
+    cache = get_session_cache(user_id)
+    cache.failure_count += 1
+    now = utc_now()
+    if offline:
+        cache.offline_until = now + timedelta(seconds=SESSION_OFFLINE_TTL_SECONDS)
+        cache.next_retry_at = cache.offline_until
+        for path in SESSION_CACHEABLE_PATHS:
+            cache_bullex_response(
+                user_id,
+                path,
+                200 if path == "/account" else 404,
+                disconnected_cache_payload(source="offline_cache"),
+            )
+        return
+
+    cache.next_retry_at = now + timedelta(seconds=session_backoff_seconds(cache.failure_count))
+    for path in SESSION_CACHEABLE_PATHS:
+        cache_bullex_response(
+            user_id,
+            path,
+            200,
+            disconnected_cache_payload(source="backoff_active"),
+        )
+
+
+def connection_guard_reason(user_id: str) -> tuple[str, float] | None:
+    cache = get_session_cache(user_id)
+    now = utc_now()
+    if cache.offline_until is not None and now < cache.offline_until:
+        return "offline", (cache.offline_until - now).total_seconds()
+    if cache.next_retry_at is not None and now < cache.next_retry_at:
+        return "backoff", (cache.next_retry_at - now).total_seconds()
+    return None
 
 
 class GatewayConfig:
@@ -338,6 +435,11 @@ def is_session_disconnected(payload: dict[str, Any]) -> bool:
     return error in {"SESSION_NOT_FOUND", "SESSION_DISCONNECTED"}
 
 
+def payload_indicates_offline(status_code: int, payload: dict[str, Any]) -> bool:
+    connected = payload_connected_state(payload)
+    return status_code == 404 or is_session_disconnected(payload) or connected is False
+
+
 async def close_market_websocket(websocket: WebSocket, payload: dict[str, Any]) -> None:
     try:
         await websocket.send_json(payload)
@@ -449,6 +551,27 @@ async def call_bullex_service(
     json_body: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
+    if method == "GET" and path in SESSION_CACHEABLE_PATHS:
+        cache = get_session_cache(user_id)
+        cached = cache.responses.get(path)
+        now = utc_now()
+        if cached is not None and now < cached.expires_at:
+            logger.info("[CACHE_HIT] user_id=%s path=%s ttl_remaining=%.2f", user_id, path, (cached.expires_at - now).total_seconds())
+            return cached.status_code, cached.payload
+        logger.info("[CACHE_MISS] user_id=%s path=%s", user_id, path)
+        guard = connection_guard_reason(user_id)
+        if guard is not None:
+            reason, remaining = guard
+            logger.warning("[SESSION_CHECK_SKIPPED] user_id=%s path=%s reason=%s retry_in=%.2f", user_id, path, reason, remaining)
+            if reason == "offline":
+                logger.warning("[USER_OFFLINE_SKIPPED] user_id=%s path=%s retry_in=%.2f", user_id, path, remaining)
+            else:
+                logger.warning("[BACKOFF_ACTIVE] user_id=%s path=%s retry_in=%.2f", user_id, path, remaining)
+            logger.warning("[CPU_LOOP_PROTECTION] user_id=%s path=%s reason=%s", user_id, path, reason)
+            if cached is not None:
+                return cached.status_code, cached.payload
+            return 200, disconnected_cache_payload(source="offline_cache" if reason == "offline" else "backoff_active")
+
     headers = {"x-user-id": user_id}
     url = f"{config.bullex_service_url}{path}"
 
@@ -462,6 +585,8 @@ async def call_bullex_service(
                 params=params,
             )
     except httpx.HTTPError:
+        if method == "GET" and path in SESSION_CACHEABLE_PATHS:
+            mark_session_failure(user_id)
         return 502, build_error("BULLEX_SERVICE_UNAVAILABLE")
 
     try:
@@ -471,6 +596,15 @@ async def call_bullex_service(
 
     if not isinstance(payload, dict) or "ok" not in payload or "data" not in payload or "error" not in payload:
         payload = build_success(payload) if response.is_success else build_error("INVALID_BULLEX_RESPONSE")
+
+    if method == "GET" and path in SESSION_CACHEABLE_PATHS:
+        if payload.get("ok") and payload_connected_state(payload) is True:
+            clear_session_backoff(user_id)
+            cache_bullex_response(user_id, path, response.status_code, payload)
+        elif payload_indicates_offline(response.status_code, payload):
+            mark_session_failure(user_id, offline=True)
+        else:
+            mark_session_failure(user_id)
 
     return response.status_code, payload
 
@@ -727,6 +861,10 @@ def cached_robot_connection_payload(state: Any) -> dict[str, Any]:
             "connection_status_source": getattr(state, "connection_status_source", "cached"),
         }
     )
+
+
+def build_guarded_connection_payload(reason: str) -> dict[str, Any]:
+    return disconnected_cache_payload(source="offline_cache" if reason == "offline" else "backoff_active")
 
 
 TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
@@ -2666,6 +2804,16 @@ async def robot_worker(user_id: str) -> None:
     try:
         while auto_trader.get(user_id).enabled:
             robot_worker_last_tick_at[user_id] = utc_now()
+            guard = connection_guard_reason(user_id)
+            if guard is not None:
+                reason, remaining = guard
+                if reason == "offline":
+                    logger.warning("[USER_OFFLINE_SKIPPED] user_id=%s retry_in=%.2f", user_id, remaining)
+                else:
+                    logger.warning("[BACKOFF_ACTIVE] user_id=%s retry_in=%.2f", user_id, remaining)
+                logger.warning("[CPU_LOOP_PROTECTION] user_id=%s reason=%s", user_id, reason)
+                await asyncio.sleep(max(1, min(remaining, SESSION_OFFLINE_TTL_SECONDS)))
+                continue
             logger.info("[ROBOT_WORKER_TICK] user_id=%s", user_id)
             await execute_robot_cycle(user_id)
             state = auto_trader.get(user_id)
@@ -2700,6 +2848,11 @@ async def robot_worker(user_id: str) -> None:
 
 
 def ensure_robot_worker(user_id: str) -> None:
+    guard = connection_guard_reason(user_id)
+    if guard is not None:
+        reason, remaining = guard
+        logger.warning("[SESSION_CHECK_SKIPPED] user_id=%s worker_start=true reason=%s retry_in=%.2f", user_id, reason, remaining)
+        return
     task = robot_tasks.get(user_id)
     if task is None or task.done():
         robot_tasks[user_id] = asyncio.create_task(robot_worker(user_id))
@@ -2898,7 +3051,14 @@ async def signals_top_reviewed(auth: dict[str, str] = Depends(require_headers)) 
 async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     user_id = auth["user_id"]
     state = get_user_robot_state(user_id)
-    if fresh_robot_connection(state):
+    guard = connection_guard_reason(user_id)
+    if guard is not None:
+        reason, _ = guard
+        session_payload = build_guarded_connection_payload(reason)
+        connected = False
+        active_mode = state.active_mode
+        source = "offline_cache" if reason == "offline" else "backoff_active"
+    elif fresh_robot_connection(state):
         session_payload = cached_robot_connection_payload(state)
         connected = True
         active_mode = state.active_mode
@@ -3296,6 +3456,7 @@ async def bullex_connect(
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
     user_id = auth["user_id"]
+    clear_session_backoff(user_id)
     status_code, payload = await call_bullex_service(
         "POST",
         "/sessions/connect",
@@ -3558,6 +3719,7 @@ async def bullex_buy_real(
 @app.post("/bullex/disconnect")
 async def bullex_disconnect(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     status_code, payload = await call_bullex_service("POST", "/sessions/disconnect", auth["user_id"])
+    mark_session_failure(auth["user_id"], offline=True)
     if payload.get("ok"):
         user_store.disconnect(auth["user_id"])
     else:
@@ -3567,6 +3729,7 @@ async def bullex_disconnect(auth: dict[str, str] = Depends(require_headers)) -> 
 
 @app.post("/bullex/reconnect")
 async def bullex_reconnect(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    clear_session_backoff(auth["user_id"])
     status_code, payload = await call_bullex_service("POST", "/sessions/reconnect", auth["user_id"])
     sync_user_store_from_payload(auth["user_id"], payload)
     return json_response(status_code, payload)
@@ -3576,6 +3739,8 @@ async def bullex_reconnect(auth: dict[str, str] = Depends(require_headers)) -> J
 async def bullex_account(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     status_code, payload = await call_bullex_service("GET", "/account", auth["user_id"])
     sync_user_store_from_payload(auth["user_id"], payload)
+    if status_code == 404 or is_session_disconnected(payload) or payload_connected_state(payload) is False:
+        return json_response(200, build_success({"connected": False}))
     return json_response(status_code, payload)
 
 

@@ -10,6 +10,30 @@ from backend.auto_trader import AutoTrader
 from backend.user_store import SupabaseUserStore
 
 
+class AsyncResponse:
+    def __init__(self, status_code: int, payload: dict) -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.is_success = 200 <= status_code < 400
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class AsyncClientContext:
+    def __init__(self, response_factory) -> None:
+        self._response_factory = response_factory
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def request(self, **kwargs):
+        return self._response_factory(**kwargs)
+
+
 class FailingUserStore:
     def save_connection(self, *_args, **_kwargs):
         raise httpx.HTTPStatusError(
@@ -98,10 +122,14 @@ class EndpointResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.old_trader = main.auto_trader
         main.user_store = FailingUserStore()
         main.auto_trader = AutoTrader()
+        main.session_response_cache.clear()
+        main.robot_tasks.clear()
 
     def tearDown(self) -> None:
         main.user_store = self.old_store
         main.auto_trader = self.old_trader
+        main.session_response_cache.clear()
+        main.robot_tasks.clear()
 
     async def test_robot_state_stays_200_when_supabase_fails(self) -> None:
         main.auto_trader.start("user-robot")
@@ -138,6 +166,48 @@ class EndpointResilienceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(json.loads(response.body)["data"]["connected"])
+
+    async def test_robot_state_cache_prevents_repeated_bullex_calls(self) -> None:
+        user_id = "user-cache"
+        main.auto_trader.start(user_id)
+        requests: list[str] = []
+
+        def response_factory(**kwargs):
+            requests.append(kwargs["url"])
+            return AsyncResponse(
+                200,
+                main.build_success({"connected": True, "active_mode": "PRACTICE", "server_time": 125.0}),
+            )
+
+        with patch("backend.main.httpx.AsyncClient", return_value=AsyncClientContext(response_factory)):
+            for _ in range(100):
+                response = await main.robot_state({"user_id": user_id})
+                self.assertEqual(response.status_code, 200)
+
+        self.assertEqual(len(requests), 1)
+
+    async def test_bullex_account_returns_connected_false_instead_of_404(self) -> None:
+        with patch.object(
+            main,
+            "call_bullex_service",
+            new=AsyncMock(return_value=(404, {"ok": False, "data": {"connected": False}, "error": "SESSION_NOT_FOUND"})),
+        ):
+            response = await main.bullex_account({"user_id": "user-account-missing"})
+
+        body = json.loads(response.body)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(body["ok"])
+        self.assertFalse(body["data"]["connected"])
+
+    async def test_worker_is_not_started_while_user_is_offline(self) -> None:
+        user_id = "user-offline-worker"
+        state = main.auto_trader.start(user_id)
+        state.enabled = True
+        main.mark_session_failure(user_id, offline=True)
+
+        main.ensure_robot_worker(user_id)
+
+        self.assertNotIn(user_id, main.robot_tasks)
 
     async def test_debug_endpoint_returns_upsert_contract(self) -> None:
         response = await main.debug_bullex_connection_schema({"user_id": "user-debug"})

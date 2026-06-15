@@ -50,6 +50,9 @@ BINARY_ALLOWED_ASSETS = [
 ]
 BINARY_ALLOWED_ASSET_SET = set(BINARY_ALLOWED_ASSETS)
 SESSION_EXCEPTION_TYPES = (WebSocketConnectionClosedException, ConnectionError, TimeoutError)
+SESSION_CACHE_TTL_SECONDS = 10
+SESSION_OFFLINE_TTL_SECONDS = 60
+SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
 
 
 class ServiceError(Exception):
@@ -102,9 +105,25 @@ class ManagedSession:
     state: SessionState = field(default_factory=SessionState)
 
 
+@dataclass
+class CachedProbe:
+    status_code: int
+    payload: dict[str, Any]
+    expires_at: float
+
+
+@dataclass
+class SessionProbeState:
+    responses: dict[str, CachedProbe] = field(default_factory=dict)
+    failure_count: int = 0
+    next_retry_at: float = 0.0
+    offline_until: float = 0.0
+
+
 class SessionManager:
     def __init__(self, store: SessionStore | None = None) -> None:
         self.sessions: dict[str, ManagedSession] = {}
+        self._probe_cache: dict[str, SessionProbeState] = {}
         self.store = store
         self._runtime_lock = RLock()
         self._max_concurrent_api_calls = read_max_concurrent_api_calls()
@@ -119,12 +138,74 @@ class SessionManager:
     def get(self, user_id: str) -> ManagedSession | None:
         return self.sessions.get(user_id)
 
+    def get_probe_state(self, user_id: str) -> SessionProbeState:
+        return self._probe_cache.setdefault(user_id, SessionProbeState())
+
     def upsert(self, session: ManagedSession) -> ManagedSession:
         self.sessions[session.user_id] = session
         return session
 
     def remove(self, user_id: str) -> None:
         self.sessions.pop(user_id, None)
+
+    def _cache_probe(self, user_id: str, path: str, status_code: int, payload: dict[str, Any]) -> None:
+        self.get_probe_state(user_id).responses[path] = CachedProbe(
+            status_code=status_code,
+            payload=payload,
+            expires_at=time.time() + SESSION_CACHE_TTL_SECONDS,
+        )
+
+    def _probe_backoff_seconds(self, failure_count: int) -> int:
+        index = min(max(failure_count, 1), len(SESSION_FAILURE_BACKOFF_SECONDS)) - 1
+        return SESSION_FAILURE_BACKOFF_SECONDS[index]
+
+    def _mark_probe_success(self, user_id: str, path: str, status_code: int, payload: dict[str, Any]) -> None:
+        probe = self.get_probe_state(user_id)
+        probe.failure_count = 0
+        probe.next_retry_at = 0.0
+        probe.offline_until = 0.0
+        self._cache_probe(user_id, path, status_code, payload)
+
+    def _mark_probe_failure(self, user_id: str, *, offline: bool = False) -> None:
+        probe = self.get_probe_state(user_id)
+        probe.failure_count += 1
+        now = time.time()
+        disconnected_payload = build_success({"connected": False})
+        if offline:
+            probe.offline_until = now + SESSION_OFFLINE_TTL_SECONDS
+            probe.next_retry_at = probe.offline_until
+            self._cache_probe(user_id, "/sessions/status", 404, {"ok": False, "data": {"connected": False}, "error": SESSION_NOT_FOUND})
+            self._cache_probe(user_id, "/account", 200, disconnected_payload)
+            return
+        probe.next_retry_at = now + self._probe_backoff_seconds(probe.failure_count)
+        self._cache_probe(user_id, "/sessions/status", 200, disconnected_payload)
+        self._cache_probe(user_id, "/account", 200, disconnected_payload)
+
+    def get_cached_probe(self, user_id: str, path: str) -> tuple[int, dict[str, Any]] | None:
+        probe = self.get_probe_state(user_id)
+        now = time.time()
+        cached = probe.responses.get(path)
+        if cached is not None and now < cached.expires_at:
+            logger.info("[CACHE_HIT] %s %s", user_id, path)
+            return cached.status_code, cached.payload
+        logger.info("[CACHE_MISS] %s %s", user_id, path)
+        if probe.offline_until > now:
+            logger.warning("[SESSION_CHECK_SKIPPED] %s %s reason=offline", user_id, path)
+            logger.warning("[USER_OFFLINE_SKIPPED] %s %s", user_id, path)
+            logger.warning("[CPU_LOOP_PROTECTION] %s %s reason=offline", user_id, path)
+            if cached is not None:
+                return cached.status_code, cached.payload
+            if path == "/account":
+                return 200, build_success({"connected": False})
+            return 404, {"ok": False, "data": {"connected": False}, "error": SESSION_NOT_FOUND}
+        if probe.next_retry_at > now:
+            logger.warning("[SESSION_CHECK_SKIPPED] %s %s reason=backoff", user_id, path)
+            logger.warning("[BACKOFF_ACTIVE] %s %s", user_id, path)
+            logger.warning("[CPU_LOOP_PROTECTION] %s %s reason=backoff", user_id, path)
+            if cached is not None:
+                return cached.status_code, cached.payload
+            return 200, build_success({"connected": False})
+        return None
 
     def require(self, user_id: str) -> ManagedSession:
         session = self.get(user_id)
@@ -133,6 +214,11 @@ class SessionManager:
         return session
 
     def ensure_session_alive(self, user_id: str) -> ManagedSession:
+        cached = self.get_cached_probe(user_id, "/sessions/status")
+        if cached is not None:
+            session = self.get(user_id)
+            if session is not None:
+                return session
         logger.info("[SESSION-CHECK] %s", user_id)
         session = self.require(user_id)
         if session.requires_2fa:
@@ -154,6 +240,7 @@ class SessionManager:
             return session
 
         logger.warning("[SESSION-DEAD] %s %s", user_id, dead_reason)
+        self._mark_probe_failure(user_id)
         return self._attempt_reconnect(session, dead_reason)
 
     def run(self, user_id: str, operation):
@@ -172,6 +259,10 @@ class SessionManager:
             self._mark_disconnected(user_id, type(exc).__name__)
 
     def connect(self, user_id: str, payload: ConnectRequest) -> ManagedSession:
+        probe = self.get_probe_state(user_id)
+        probe.failure_count = 0
+        probe.next_retry_at = 0.0
+        probe.offline_until = 0.0
         existing = self.get(user_id)
 
         if payload.sms_code and existing and not payload.email and not payload.password:
@@ -220,6 +311,7 @@ class SessionManager:
         self.remove(user_id)
         if self.store is not None:
             self.store.mark_disconnected(user_id, revoke_token=True)
+        self._mark_probe_failure(user_id, offline=True)
         logger.info("[SESSION-DISCONNECTED] %s", user_id)
         return user_id
 
@@ -344,6 +436,7 @@ class SessionManager:
         self.remove(user_id)
         if self.store is not None:
             self.store.mark_disconnected(user_id)
+        self._mark_probe_failure(user_id, offline=True)
         raise ServiceError(SESSION_DISCONNECTED, 409) from None
 
     def _persist_connected(self, session: ManagedSession) -> None:
@@ -634,6 +727,10 @@ def connect_session(payload: ConnectRequest, x_user_id: str | None = Header(defa
 @app.get("/sessions/status")
 def session_status(x_user_id: str | None = Header(default=None)) -> JSONResponse:
     user_id = require_user_id(x_user_id)
+    cached = session_manager.get_cached_probe(user_id, "/sessions/status")
+    if cached is not None:
+        status_code, payload = cached
+        return JSONResponse(status_code=status_code, content=payload)
 
     def operation(current: ManagedSession) -> dict[str, Any]:
         connected = bool(current.client.check_connect())
@@ -648,14 +745,15 @@ def session_status(x_user_id: str | None = Header(default=None)) -> JSONResponse
         }
 
     try:
-        return JSONResponse(status_code=200, content=build_success(session_manager.run(user_id, operation)))
+        payload = build_success(session_manager.run(user_id, operation))
+        session_manager._mark_probe_success(user_id, "/sessions/status", 200, payload)
+        return JSONResponse(status_code=200, content=payload)
     except ServiceError as exc:
         if exc.message in {SESSION_NOT_FOUND, SESSION_DISCONNECTED}:
             status_code = 404 if exc.message == SESSION_NOT_FOUND else 409
-            return JSONResponse(
-                status_code=status_code,
-                content={"ok": False, "data": {"connected": False}, "error": exc.message},
-            )
+            payload = {"ok": False, "data": {"connected": False}, "error": exc.message}
+            session_manager._mark_probe_failure(user_id, offline=True)
+            return JSONResponse(status_code=status_code, content=payload)
         raise
 
 
@@ -696,11 +794,30 @@ def account_balance(x_user_id: str | None = Header(default=None)) -> dict[str, A
 @app.get("/account")
 def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
+    cached = session_manager.get_cached_probe(user_id, "/account")
+    if cached is not None:
+        _, payload = cached
+        return payload
+    if session_manager.get(user_id) is None:
+        payload = build_success({"connected": False})
+        session_manager._mark_probe_failure(user_id, offline=True)
+        return payload
 
     def operation(session: ManagedSession) -> dict[str, Any]:
         return build_account_payload(session)
 
-    return build_success(session_manager.run(user_id, operation))
+    try:
+        payload = build_success(session_manager.run(user_id, operation))
+        if bool((payload.get("data") or {}).get("connected")):
+            session_manager._mark_probe_success(user_id, "/account", 200, payload)
+        else:
+            session_manager._mark_probe_failure(user_id, offline=True)
+        return payload
+    except ServiceError as exc:
+        if exc.message in {SESSION_NOT_FOUND, SESSION_DISCONNECTED}:
+            session_manager._mark_probe_failure(user_id, offline=True)
+            return build_success({"connected": False})
+        raise
 
 
 @app.post("/account/change-mode")
