@@ -132,15 +132,17 @@ class EndpointResilienceTests(unittest.IsolatedAsyncioTestCase):
         main.robot_tasks.clear()
 
     async def test_robot_state_stays_200_when_supabase_fails(self) -> None:
-        main.auto_trader.start("user-robot")
-        payload = main.build_success({"connected": True, "active_mode": "PRACTICE"})
+        state = main.auto_trader.start("user-robot")
+        state.connected = True
+        state.active_mode = "PRACTICE"
 
-        with patch.object(main, "call_bullex_service", new=AsyncMock(return_value=(200, payload))):
+        with patch.object(main, "call_bullex_service", new=AsyncMock()) as service_call:
             response = await main.robot_state({"user_id": "user-robot"})
 
         body = json.loads(response.body)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(body["data"]["connected"])
+        service_call.assert_not_awaited()
 
     async def test_bullex_account_stays_200_when_supabase_fails(self) -> None:
         payload = main.build_success(
@@ -169,22 +171,16 @@ class EndpointResilienceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_robot_state_cache_prevents_repeated_bullex_calls(self) -> None:
         user_id = "user-cache"
-        main.auto_trader.start(user_id)
-        requests: list[str] = []
+        state = main.auto_trader.start(user_id)
+        state.connected = True
+        state.active_mode = "PRACTICE"
 
-        def response_factory(**kwargs):
-            requests.append(kwargs["url"])
-            return AsyncResponse(
-                200,
-                main.build_success({"connected": True, "active_mode": "PRACTICE", "server_time": 125.0}),
-            )
-
-        with patch("backend.main.httpx.AsyncClient", return_value=AsyncClientContext(response_factory)):
+        with patch.object(main, "call_bullex_service", new=AsyncMock()) as service_call:
             for _ in range(100):
                 response = await main.robot_state({"user_id": user_id})
                 self.assertEqual(response.status_code, 200)
 
-        self.assertEqual(len(requests), 1)
+        service_call.assert_not_awaited()
 
     async def test_bullex_account_returns_connected_false_instead_of_404(self) -> None:
         with patch.object(
@@ -208,6 +204,42 @@ class EndpointResilienceTests(unittest.IsolatedAsyncioTestCase):
         main.ensure_robot_worker(user_id)
 
         self.assertNotIn(user_id, main.robot_tasks)
+
+    async def test_sessions_status_is_throttled_for_15_seconds(self) -> None:
+        user_id = "user-throttle"
+        requests: list[str] = []
+
+        def response_factory(**kwargs):
+            requests.append(kwargs["url"])
+            return AsyncResponse(
+                200,
+                main.build_success({"connected": True, "active_mode": "PRACTICE", "server_time": 125.0}),
+            )
+
+        with patch("backend.main.httpx.AsyncClient", return_value=AsyncClientContext(response_factory)):
+            first_status, first_payload = await main.call_bullex_service("GET", "/sessions/status", user_id)
+            second_status, second_payload = await main.call_bullex_service("GET", "/sessions/status", user_id)
+
+        self.assertEqual(first_status, 200)
+        self.assertEqual(second_status, 200)
+        self.assertEqual(first_payload, second_payload)
+        self.assertEqual(len(requests), 1)
+
+    def test_temporary_recovery_state_returns_to_waiting_next_cycle(self) -> None:
+        user_id = "user-recovery"
+        state = main.auto_trader.start(user_id)
+        main.auto_trader.defer_cycle(
+            user_id,
+            "WAITING_RECOVERY",
+            wait_seconds=1,
+            rejection_reason="WAITING_RECOVERY",
+        )
+
+        state.next_cycle_at = main.utc_now()
+        payload = state.to_dict()
+
+        self.assertEqual(payload["status"], "WAITING_NEXT_CYCLE")
+        self.assertTrue(state.enabled)
 
     async def test_debug_endpoint_returns_upsert_contract(self) -> None:
         response = await main.debug_bullex_connection_schema({"user_id": "user-debug"})

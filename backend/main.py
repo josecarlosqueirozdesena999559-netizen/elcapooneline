@@ -17,14 +17,19 @@ from fastapi.responses import JSONResponse
 from backend.auto_trader import (
     AutoTrader,
     RobotConfigUpdate,
+    STATUS_ACTIVE_COOLDOWN,
     STATUS_ACCOUNT_DISCONNECTED,
     STATUS_ANALYZING,
+    STATUS_CONNECTION_BACKOFF,
     STATUS_ORDER_REJECTED,
     STATUS_PENDING_RESULT,
+    STATUS_PAYOUT_COOLDOWN,
     STATUS_SENDING_ORDER,
+    STATUS_WAITING_RECOVERY,
     STATUS_WAITING_ANALYSIS_WINDOW,
     STATUS_WAITING_ENTRY_WINDOW,
     STATUS_WAITING_NEXT_CYCLE,
+    TEMPORARY_WAIT_STATUSES,
     parse_datetime,
     utc_now,
 )
@@ -114,10 +119,16 @@ BINARY_ALLOWED_ASSETS = [
     "AUDCHF-OTC",
 ]
 BINARY_ALLOWED_ASSET_SET = set(BINARY_ALLOWED_ASSETS)
-SESSION_CACHE_TTL_SECONDS = 10
+SESSION_CACHE_TTL_SECONDS = 15
 SESSION_OFFLINE_TTL_SECONDS = 60
 SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
 SESSION_CACHEABLE_PATHS = {"/sessions/status", "/account"}
+ACCOUNT_CACHE_TTL_SECONDS = 15
+ASSETS_CACHE_TTL_SECONDS = 60
+PAYOUT_CACHE_TTL_SECONDS = 30
+CANDLES_CACHE_TTL_SECONDS = 2
+ACTIVE_COOLDOWN_SECONDS = 300
+PAYOUT_COOLDOWN_SECONDS = 30
 
 
 def build_success(data: Any) -> dict[str, Any]:
@@ -188,6 +199,8 @@ class BullexUserSessionCache:
 
 
 session_response_cache: dict[str, BullexUserSessionCache] = {}
+active_cooldowns: dict[str, dict[str, datetime]] = {}
+payout_cooldowns: dict[str, dict[str, datetime]] = {}
 
 
 def get_session_cache(user_id: str) -> BullexUserSessionCache:
@@ -197,8 +210,7 @@ def get_session_cache(user_id: str) -> BullexUserSessionCache:
 def session_backoff_seconds(failure_count: int) -> int:
     if failure_count <= 0:
         return 0
-    index = min(failure_count, len(SESSION_FAILURE_BACKOFF_SECONDS)) - 1
-    return SESSION_FAILURE_BACKOFF_SECONDS[index]
+    return SESSION_OFFLINE_TTL_SECONDS
 
 
 def payload_connected_state(payload: dict[str, Any]) -> bool | None:
@@ -226,12 +238,30 @@ def clear_session_backoff(user_id: str) -> None:
     cache.failure_count = 0
     cache.next_retry_at = None
     cache.offline_until = None
+    state = auto_trader.get(user_id)
+    if state.status in {STATUS_CONNECTION_BACKOFF, STATUS_WAITING_RECOVERY} and state.enabled:
+        logger.info("[RECOVERY_SUCCESS] user_id=%s", user_id)
+        auto_trader.defer_cycle(user_id, STATUS_WAITING_NEXT_CYCLE, wait_seconds=1, rejection_reason=None)
 
 
 def mark_session_failure(user_id: str, *, offline: bool = False) -> None:
     cache = get_session_cache(user_id)
     cache.failure_count += 1
     now = utc_now()
+    auto_trader.defer_cycle(
+        user_id,
+        STATUS_WAITING_RECOVERY if offline else STATUS_CONNECTION_BACKOFF,
+        wait_seconds=SESSION_OFFLINE_TTL_SECONDS,
+        rejection_reason="WAITING_RECOVERY" if offline else "CONNECTION_BACKOFF",
+        last_rejection_reason="WAITING_RECOVERY" if offline else "CONNECTION_BACKOFF",
+    )
+    logger.warning(
+        "[%s] user_id=%s retry_at=%s failures=%s",
+        "WAITING_RECOVERY" if offline else "USER_BACKOFF_ACTIVE",
+        user_id,
+        (now + timedelta(seconds=SESSION_OFFLINE_TTL_SECONDS)).isoformat(),
+        cache.failure_count,
+    )
     if offline:
         cache.offline_until = now + timedelta(seconds=SESSION_OFFLINE_TTL_SECONDS)
         cache.next_retry_at = cache.offline_until
@@ -262,6 +292,89 @@ def connection_guard_reason(user_id: str) -> tuple[str, float] | None:
     if cache.next_retry_at is not None and now < cache.next_retry_at:
         return "backoff", (cache.next_retry_at - now).total_seconds()
     return None
+
+
+def request_cache_ttl_seconds(path: str, params: dict[str, Any] | None = None) -> int | None:
+    if path == "/sessions/status":
+        return SESSION_CACHE_TTL_SECONDS
+    if path == "/account":
+        return ACCOUNT_CACHE_TTL_SECONDS
+    if path == "/assets":
+        return ASSETS_CACHE_TTL_SECONDS
+    if path == "/payouts":
+        return PAYOUT_CACHE_TTL_SECONDS
+    if path == "/candles":
+        return CANDLES_CACHE_TTL_SECONDS
+    return None
+
+
+def build_cache_key(path: str, params: dict[str, Any] | None = None) -> str:
+    if not params:
+        return path
+    parts = [f"{key}={params[key]}" for key in sorted(params)]
+    return f"{path}?{'&'.join(parts)}"
+
+
+def cache_log_label(path: str) -> str | None:
+    if path == "/sessions/status":
+        return "SESSION_THROTTLED"
+    if path == "/payouts":
+        return "PAYOUT_THROTTLED"
+    if path == "/candles":
+        return "CANDLE_THROTTLED"
+    return None
+
+
+def get_named_cooldown(
+    store: dict[str, dict[str, datetime]],
+    user_id: str,
+    symbol: str,
+) -> float | None:
+    user_cooldowns = store.get(user_id, {})
+    expires_at = user_cooldowns.get(symbol)
+    if expires_at is None:
+        return None
+    remaining = (expires_at - utc_now()).total_seconds()
+    if remaining <= 0:
+        user_cooldowns.pop(symbol, None)
+        if not user_cooldowns:
+            store.pop(user_id, None)
+        return None
+    return remaining
+
+
+def set_named_cooldown(
+    store: dict[str, dict[str, datetime]],
+    user_id: str,
+    symbol: str,
+    *,
+    seconds: int,
+    log_label: str,
+    status: str,
+    reason: str,
+) -> None:
+    normalized = normalize_binary_active(symbol)
+    if not normalized:
+        return
+    expires_at = utc_now() + timedelta(seconds=seconds)
+    store.setdefault(user_id, {})[normalized] = expires_at
+    auto_trader.defer_cycle(
+        user_id,
+        status,
+        wait_seconds=seconds,
+        rejection_reason=reason,
+        last_rejection_reason=reason,
+        last_order_error=reason,
+    )
+    logger.warning("[%s] user_id=%s symbol=%s until=%s", log_label, user_id, normalized, expires_at.isoformat())
+
+
+def active_cooldown_remaining(user_id: str, symbol: str) -> float | None:
+    return get_named_cooldown(active_cooldowns, user_id, normalize_binary_active(symbol))
+
+
+def payout_cooldown_remaining(user_id: str, symbol: str) -> float | None:
+    return get_named_cooldown(payout_cooldowns, user_id, normalize_binary_active(symbol))
 
 
 class GatewayConfig:
@@ -564,15 +677,24 @@ async def call_bullex_service(
     json_body: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    if method == "GET" and path in SESSION_CACHEABLE_PATHS:
+    cache_key = build_cache_key(path, params)
+    ttl_seconds = request_cache_ttl_seconds(path, params)
+    if method == "GET" and ttl_seconds is not None:
         cache = get_session_cache(user_id)
-        cached = cache.responses.get(path)
+        cached = cache.responses.get(cache_key)
         now = utc_now()
         if cached is not None and now < cached.expires_at:
-            logger.info("[CACHE_HIT] user_id=%s path=%s ttl_remaining=%.2f", user_id, path, (cached.expires_at - now).total_seconds())
+            ttl_remaining = (cached.expires_at - now).total_seconds()
+            logger.info("[CACHE_HIT] user_id=%s path=%s ttl_remaining=%.2f", user_id, path, ttl_remaining)
+            throttled_label = cache_log_label(path)
+            if throttled_label is not None:
+                logger.info("[%s] user_id=%s path=%s retry_in=%.2f", throttled_label, user_id, path, ttl_remaining)
             return cached.status_code, cached.payload
         logger.info("[CACHE_MISS] user_id=%s path=%s", user_id, path)
-        guard = connection_guard_reason(user_id)
+        if path in SESSION_CACHEABLE_PATHS:
+            guard = connection_guard_reason(user_id)
+        else:
+            guard = None
         if guard is not None:
             reason, remaining = guard
             logger.warning("[SESSION_CHECK_SKIPPED] user_id=%s path=%s reason=%s retry_in=%.2f", user_id, path, reason, remaining)
@@ -600,6 +722,18 @@ async def call_bullex_service(
     except httpx.HTTPError:
         if method == "GET" and path in SESSION_CACHEABLE_PATHS:
             mark_session_failure(user_id)
+        elif method == "GET" and path == "/payouts":
+            symbol = normalize_binary_active(str((params or {}).get("active") or ""))
+            if symbol:
+                set_named_cooldown(
+                    payout_cooldowns,
+                    user_id,
+                    symbol,
+                    seconds=PAYOUT_COOLDOWN_SECONDS,
+                    log_label="PAYOUT_COOLDOWN",
+                    status=STATUS_PAYOUT_COOLDOWN,
+                    reason="PAYOUT_COOLDOWN",
+                )
         return 502, build_error("BULLEX_SERVICE_UNAVAILABLE")
 
     try:
@@ -610,6 +744,13 @@ async def call_bullex_service(
     if not isinstance(payload, dict) or "ok" not in payload or "data" not in payload or "error" not in payload:
         payload = build_success(payload) if response.is_success else build_error("INVALID_BULLEX_RESPONSE")
 
+    if method == "GET" and ttl_seconds is not None and response.is_success:
+        get_session_cache(user_id).responses[cache_key] = BullexResponseCacheEntry(
+            status_code=response.status_code,
+            payload=payload,
+            expires_at=utc_now() + timedelta(seconds=ttl_seconds),
+        )
+
     if method == "GET" and path in SESSION_CACHEABLE_PATHS:
         if payload.get("ok") and payload_connected_state(payload) is True:
             clear_session_backoff(user_id)
@@ -618,6 +759,35 @@ async def call_bullex_service(
             mark_session_failure(user_id, offline=True)
         else:
             mark_session_failure(user_id)
+
+    if method == "GET" and path in {"/candles", "/payouts"}:
+        symbol = normalize_binary_active(str((params or {}).get("active") or ""))
+        error_text = str(payload.get("error") or "").strip().lower()
+        if symbol and (
+            response.status_code == 404
+            or "asset unavailable" in error_text
+            or "active suspended" in error_text
+            or "active not found" in error_text
+        ):
+            set_named_cooldown(
+                active_cooldowns,
+                user_id,
+                symbol,
+                seconds=ACTIVE_COOLDOWN_SECONDS,
+                log_label="ACTIVE_COOLDOWN",
+                status=STATUS_ACTIVE_COOLDOWN,
+                reason="ACTIVE_COOLDOWN",
+            )
+        elif path == "/payouts" and symbol and (response.status_code >= 500 or not payload.get("ok")):
+            set_named_cooldown(
+                payout_cooldowns,
+                user_id,
+                symbol,
+                seconds=PAYOUT_COOLDOWN_SECONDS,
+                log_label="PAYOUT_COOLDOWN",
+                status=STATUS_PAYOUT_COOLDOWN,
+                reason="PAYOUT_COOLDOWN",
+            )
 
     return response.status_code, payload
 
@@ -826,17 +996,23 @@ async def reconcile_robot_connection_from_payload(
         return state, True, state.active_mode, "bullex_service"
 
     if state.connection_failure_count >= 3 and not connection_grace_active(state):
-        state = auto_trader.disconnect_account(user_id)
+        state = auto_trader.defer_cycle(
+            user_id,
+            STATUS_WAITING_RECOVERY,
+            wait_seconds=SESSION_OFFLINE_TTL_SECONDS,
+            rejection_reason="WAITING_RECOVERY",
+            last_rejection_reason="WAITING_RECOVERY",
+            last_order_error="WAITING_RECOVERY",
+        )
+        state.connected = False
         state.active_mode = account_active_mode or active_mode
-        mark_disconnected_from_payload(user_id, payload)
-        mark_disconnected_from_payload(user_id, account_payload)
         logger.warning(
-            "[CONNECTION_CONFIRMED_DISCONNECTED] user_id=%s failures=%s account_status=%s",
+            "[WAITING_RECOVERY] user_id=%s failures=%s account_status=%s",
             user_id,
             state.connection_failure_count,
             account_status,
         )
-        return state, False, state.active_mode, "disconnected"
+        return state, False, state.active_mode, "backoff_active"
 
     logger.warning(
         "[CONNECTION_GRACE_ACTIVE] user_id=%s failures=%s account_connected=false grace_until=%s",
@@ -1119,6 +1295,9 @@ def daily_stop_reason(user_id: str, state: Any) -> str | None:
 
 
 def asset_cooldown_reason(user_id: str, symbol: str) -> str | None:
+    remaining = active_cooldown_remaining(user_id, symbol)
+    if remaining is not None:
+        return "ACTIVE_COOLDOWN"
     losses = []
     for trade in auto_trader.history(user_id).get("trades", []):
         if normalize_binary_active(str(trade.get("active") or "")) != symbol:
@@ -1543,6 +1722,32 @@ async def analyze_active_signal(
     endtime: int | None = None,
     strategy_mode: str = "conservative",
 ) -> tuple[int, dict[str, Any]]:
+    if active_cooldown_remaining(user_id, symbol) is not None:
+        logger.warning("[ACTIVE_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
+        return 200, build_success(
+            {
+                "symbol": symbol,
+                "signal": "WAIT",
+                "confidence": 0,
+                "trade_allowed": False,
+                "quality_reason": "ACTIVE_COOLDOWN",
+                "blocked_filters": ["ACTIVE_COOLDOWN"],
+                "approved_filters": [],
+            }
+        )
+    if payout_cooldown_remaining(user_id, symbol) is not None:
+        logger.warning("[PAYOUT_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
+        return 200, build_success(
+            {
+                "symbol": symbol,
+                "signal": "WAIT",
+                "confidence": 0,
+                "trade_allowed": False,
+                "quality_reason": "PAYOUT_COOLDOWN",
+                "blocked_filters": ["PAYOUT_COOLDOWN"],
+                "approved_filters": [],
+            }
+        )
     interval = TIMEFRAME_SECONDS[timeframe]
     candle_params: dict[str, Any] = {
         "active": symbol,
@@ -1571,6 +1776,16 @@ async def analyze_active_signal(
     )
     mark_disconnected_from_payload(user_id, payout_payload)
     payout = extract_payout(payout_payload, symbol) if payout_payload.get("ok") else None
+    if payout is None and payout_status >= 400:
+        set_named_cooldown(
+            payout_cooldowns,
+            user_id,
+            symbol,
+            seconds=PAYOUT_COOLDOWN_SECONDS,
+            log_label="PAYOUT_COOLDOWN",
+            status=STATUS_PAYOUT_COOLDOWN,
+            reason="PAYOUT_COOLDOWN",
+        )
     signal = analyze_signal(
         symbol,
         extract_candles(payload),
@@ -1649,6 +1864,12 @@ async def select_fallback_candidate(
     endtime: int | None = None,
 ) -> dict[str, Any] | None:
     for symbol in BINARY_ALLOWED_ASSETS:
+        if active_cooldown_remaining(user_id, symbol) is not None:
+            logger.warning("[ACTIVE_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
+            continue
+        if payout_cooldown_remaining(user_id, symbol) is not None:
+            logger.warning("[PAYOUT_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
+            continue
         try:
             payout_status, payout_payload = await call_bullex_service(
                 "GET",
@@ -1663,6 +1884,15 @@ async def select_fallback_candidate(
                 else None
             )
             if payout is None:
+                set_named_cooldown(
+                    payout_cooldowns,
+                    user_id,
+                    symbol,
+                    seconds=PAYOUT_COOLDOWN_SECONDS,
+                    log_label="PAYOUT_COOLDOWN",
+                    status=STATUS_PAYOUT_COOLDOWN,
+                    reason="PAYOUT_COOLDOWN",
+                )
                 continue
 
             candle_params: dict[str, Any] = {
@@ -1788,7 +2018,13 @@ async def update_cycle_analysis(
         symbol = normalize_binary_active(str(raw_signal.get("symbol") or ""))
         if not symbol:
             continue
+        if active_cooldown_remaining(user_id, symbol) is not None:
+            logger.warning("[ACTIVE_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
+            continue
         payout = raw_signal.get("payout")
+        if payout is None and payout_cooldown_remaining(user_id, symbol) is not None:
+            logger.warning("[PAYOUT_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
+            continue
         if payout is None and is_binary_asset_allowed(symbol):
             payout_status, payout_payload = await call_bullex_service(
                 "GET",
@@ -1802,6 +2038,16 @@ async def update_cycle_analysis(
                 if payout_status < 400 and payout_payload.get("ok")
                 else None
             )
+            if payout is None and payout_status >= 400:
+                set_named_cooldown(
+                    payout_cooldowns,
+                    user_id,
+                    symbol,
+                    seconds=PAYOUT_COOLDOWN_SECONDS,
+                    log_label="PAYOUT_COOLDOWN",
+                    status=STATUS_PAYOUT_COOLDOWN,
+                    reason="PAYOUT_COOLDOWN",
+                )
 
         allowed, ranked, _ = apply_strategy_guard(
             user_id,
@@ -1903,6 +2149,13 @@ async def finish_monitored_trade(user_id: str, order_id: str, result: str, profi
         if finalized and state.last_trade:
             logger.info(
                 "[RESULT_RECEIVED] user_id=%s order_id=%s result=%s profit=%s",
+                user_id,
+                order_id,
+                result,
+                state.last_trade.get("profit"),
+            )
+            logger.info(
+                "[TRADE_RESULT] user_id=%s order_id=%s result=%s profit=%s",
                 user_id,
                 order_id,
                 result,
@@ -2484,6 +2737,15 @@ async def execute_robot_cycle(
                     logger.exception("[ORDER_SEND_FAILED] user_id=%s active=%s error=%s", user_id, symbol, reason)
                     if is_order_availability_error(reason):
                         attempted_unavailable = True
+                        set_named_cooldown(
+                            active_cooldowns,
+                            user_id,
+                            symbol,
+                            seconds=ACTIVE_COOLDOWN_SECONDS,
+                            log_label="ACTIVE_COOLDOWN",
+                            status=STATUS_ACTIVE_COOLDOWN,
+                            reason="ACTIVE_COOLDOWN",
+                        )
                         logger.info(
                             "[ORDER_FALLBACK_NEXT_CANDIDATE] user_id=%s failed_active=%s attempts=%s",
                             user_id,
@@ -2518,6 +2780,15 @@ async def execute_robot_cycle(
                     logger.error("[ORDER_SEND_FAILED] user_id=%s active=%s error=%s", user_id, symbol, reason)
                     if is_order_availability_error(reason):
                         attempted_unavailable = True
+                        set_named_cooldown(
+                            active_cooldowns,
+                            user_id,
+                            symbol,
+                            seconds=ACTIVE_COOLDOWN_SECONDS,
+                            log_label="ACTIVE_COOLDOWN",
+                            status=STATUS_ACTIVE_COOLDOWN,
+                            reason="ACTIVE_COOLDOWN",
+                        )
                         logger.info(
                             "[ORDER_FALLBACK_NEXT_CANDIDATE] user_id=%s failed_active=%s attempts=%s",
                             user_id,
@@ -2633,6 +2904,14 @@ async def execute_robot_cycle(
                     state.status,
                 )
                 logger.info(
+                    "[TRADE_EXECUTED] user_id=%s order_id=%s symbol=%s direction=%s amount=%s",
+                    user_id,
+                    order_id,
+                    symbol,
+                    direction,
+                    state.entry_value,
+                )
+                logger.info(
                     "[PENDING_RESULT] user_id=%s order_id=%s",
                     user_id,
                     order_id,
@@ -2715,6 +2994,7 @@ async def robot_worker(user_id: str) -> None:
     try:
         while auto_trader.get(user_id).enabled:
             robot_worker_last_tick_at[user_id] = utc_now()
+            logger.info("[ROBOT_RUNNING] user_id=%s", user_id)
             guard = connection_guard_reason(user_id)
             if guard is not None:
                 reason, remaining = guard
@@ -2723,25 +3003,23 @@ async def robot_worker(user_id: str) -> None:
                 else:
                     logger.warning("[BACKOFF_ACTIVE] user_id=%s retry_in=%.2f", user_id, remaining)
                 logger.warning("[CPU_LOOP_PROTECTION] user_id=%s reason=%s", user_id, reason)
-                await asyncio.sleep(max(1, min(remaining, SESSION_OFFLINE_TTL_SECONDS)))
+                await asyncio.sleep(max(1, remaining))
                 continue
             logger.info("[ROBOT_WORKER_TICK] user_id=%s", user_id)
             await execute_robot_cycle(user_id)
             state = auto_trader.get(user_id)
-            if state.status == STATUS_ACCOUNT_DISCONNECTED:
-                state.enabled = False
-                persist_robot(user_id)
-                break
             if state.operation_in_progress:
                 delay = 3
             elif state.status == STATUS_WAITING_ENTRY_WINDOW:
                 delay = max(1, state.seconds_until_entry_window)
+            elif state.status in TEMPORARY_WAIT_STATUSES:
+                delay = max(1, state.to_dict()["seconds_until_next_cycle"])
             elif state.status == STATUS_WAITING_ANALYSIS_WINDOW:
                 delay = 3
             elif state.status == STATUS_ORDER_REJECTED and state.rejected_at is not None:
                 delay = max(1, 5 - int((utc_now() - state.rejected_at).total_seconds()))
             elif state.status == STATUS_WAITING_NEXT_CYCLE and state.enabled:
-                delay = max(0.2, min(3, float(state.to_dict()["seconds_until_next_cycle"])))
+                delay = max(1, min(5, float(state.to_dict()["seconds_until_next_cycle"])))
             else:
                 delay = max(1, state.to_dict()["seconds_until_next_cycle"])
             await asyncio.sleep(delay)
@@ -2965,56 +3243,18 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     guard = connection_guard_reason(user_id)
     if guard is not None:
         reason, _ = guard
-        session_payload = build_guarded_connection_payload(reason)
-        connected = False
+        connected = bool(state.connected)
         active_mode = state.active_mode
         source = "offline_cache" if reason == "offline" else "backoff_active"
-    elif fresh_robot_connection(state):
-        session_payload = cached_robot_connection_payload(state)
-        connected = True
+    else:
+        connected = bool(state.connected)
         active_mode = state.active_mode
         source = state.connection_status_source
-    else:
-        _, session_payload, state, connected, active_mode, source = await fetch_and_sync_robot_connection(user_id)
-    if not connected:
-        if state.status == STATUS_ACCOUNT_DISCONNECTED:
-            logger.warning("[ROBOT_BLOCKED_ACCOUNT_DISCONNECTED] user_id=%s", user_id)
-        return json_response(
-            200,
-            build_robot_payload(
-                state,
-                user_id=user_id,
-                connected=False,
-                active_mode=active_mode,
-                connection_checked_at=state.connection_checked_at.isoformat()
-                if state.connection_checked_at is not None
-                else None,
-                connection_status_source=source,
-                real_ready=False,
-                real_block_reason="BULLEX_NOT_CONNECTED",
-            ),
-        )
-    server_timestamp = extract_server_timestamp(session_payload)
-    if server_timestamp is None:
-        window = get_entry_window(
-            state.timeframe,
-            utc_now().timestamp(),
-            server_time_source="vps_fallback",
-        )
-        logger.warning(
-            "[SERVER_TIME_FALLBACK] user_id=%s source=robot_state current_candle_seconds=%s",
-            user_id,
-            window["current_candle_seconds"],
-        )
-    else:
-        previous_source = getattr(state, "server_time_source", None)
-        window = get_entry_window(
-            state.timeframe,
-            server_timestamp,
-            server_time_source="bullex",
-        )
-        if previous_source == "vps_fallback" and getattr(state, "server_time", None):
-            logger.info("[SERVER_TIME_BULLEX_RESTORED] user_id=%s", user_id)
+    window = get_entry_window(
+        state.timeframe,
+        utc_now().timestamp(),
+        server_time_source="vps_fallback",
+    )
     auto_trader.update_entry_window(
         user_id,
         window,

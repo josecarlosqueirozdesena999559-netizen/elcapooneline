@@ -32,6 +32,17 @@ STATUS_ANALYSIS_TIMEOUT = "ANALYSIS_TIMEOUT"
 STATUS_ANALYSIS_ERROR = "ANALYSIS_ERROR"
 STATUS_NO_CANDIDATES = "NO_CANDIDATES"
 STATUS_NO_CANDIDATE_THIS_CANDLE = "NO_CANDIDATE_THIS_CANDLE"
+STATUS_CONNECTION_BACKOFF = "CONNECTION_BACKOFF"
+STATUS_WAITING_RECOVERY = "WAITING_RECOVERY"
+STATUS_ACTIVE_COOLDOWN = "ACTIVE_COOLDOWN"
+STATUS_PAYOUT_COOLDOWN = "PAYOUT_COOLDOWN"
+
+TEMPORARY_WAIT_STATUSES = {
+    STATUS_CONNECTION_BACKOFF,
+    STATUS_WAITING_RECOVERY,
+    STATUS_ACTIVE_COOLDOWN,
+    STATUS_PAYOUT_COOLDOWN,
+}
 
 TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
 RESULT_WAITING_MESSAGE = "Aguardando resultado..."
@@ -177,6 +188,17 @@ class RobotState:
             value = data[key]
             data[key] = value.isoformat() if value is not None else None
         now = utc_now()
+        if (
+            self.status in TEMPORARY_WAIT_STATUSES
+            and self.next_cycle_at is not None
+            and now >= self.next_cycle_at
+            and self.enabled
+            and not self.operation_in_progress
+        ):
+            self.status = STATUS_WAITING_NEXT_CYCLE
+            self.rejection_reason = None
+            data["status"] = self.status
+            data["rejection_reason"] = None
         if self.status == STATUS_WAITING_ANALYSIS_WINDOW:
             self.status = STATUS_WAITING_NEXT_CYCLE if self.enabled else STATUS_STOPPED
             self.rejection_reason = None
@@ -250,6 +272,9 @@ class RobotState:
         elif data["status"] == STATUS_WAITING_NEXT_CANDLE_ENTRY:
             display_countdown_label = "Entrada no inicio da proxima vela em"
             display_countdown_seconds = max(0, int(data["seconds_until_entry_window"]))
+        elif data["status"] in TEMPORARY_WAIT_STATUSES:
+            display_countdown_label = "Recuperando em"
+            display_countdown_seconds = max(0, int(data["seconds_until_next_cycle"]))
         data["display_countdown_label"] = display_countdown_label
         data["display_countdown_seconds"] = display_countdown_seconds
         data["status_message"] = None
@@ -524,6 +549,11 @@ class AutoTrader:
         if not state.enabled:
             state.status = STATUS_STOPPED
             return False, state
+        if state.status in TEMPORARY_WAIT_STATUSES:
+            if state.next_cycle_at is not None and now < state.next_cycle_at:
+                return False, state
+            state.status = STATUS_WAITING_NEXT_CYCLE
+            state.rejection_reason = None
         if state.status == STATUS_RESULT_RECEIVED and state.result_display_until is not None:
             if now < state.result_display_until:
                 return False, state
@@ -968,6 +998,29 @@ class AutoTrader:
         state.entry_reason = None
         state.block_reasons = []
         state.metrics = {}
+        return state
+
+    def defer_cycle(
+        self,
+        user_id: str,
+        status: str,
+        *,
+        wait_seconds: int,
+        rejection_reason: str | None = None,
+        last_rejection_reason: str | None = None,
+        last_order_error: str | None = None,
+    ) -> RobotState:
+        state = self.get(user_id)
+        now = utc_now()
+        state.status = status
+        state.rejection_reason = rejection_reason or status
+        state.last_rejection_reason = last_rejection_reason or state.rejection_reason
+        state.last_order_error = last_order_error
+        state.operation_in_progress = False
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        state.next_cycle_at = now + timedelta(seconds=max(1, int(wait_seconds)))
+        state.analysis_message = None
         return state
 
     def sync_connection(
