@@ -139,6 +139,38 @@ class RobotHistoryEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[RESULT_RECEIVED]", output)
         self.assertIn("[RESULT_DISPLAY_UNTIL]", output)
 
+    async def test_history_without_items_returns_empty_success_payload(self) -> None:
+        response = await main.robot_history(1, {"user_id": "user-empty"})
+        payload = json.loads(response.body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"], {"items": []})
+        self.assertIsNone(payload["error"])
+
+    async def test_stats_without_items_returns_empty_success_payload(self) -> None:
+        response = await main.robot_stats(1, {"user_id": "user-empty"})
+        payload = json.loads(response.body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            payload["data"],
+            {
+                "wins": 0,
+                "losses": 0,
+                "total_trades": 0,
+                "win_rate": 0.0,
+                "profit": 0.0,
+                "profit_factor": 0.0,
+                "current_win_streak": 0,
+                "current_loss_streak": 0,
+                "best_win_streak": 0,
+                "best_loss_streak": 0,
+            },
+        )
+        self.assertIsNone(payload["error"])
+
     async def test_real_finished_trade_is_saved_with_real_account_mode(self) -> None:
         user_id = "user-real-finished"
         state = main.auto_trader.start(user_id)
