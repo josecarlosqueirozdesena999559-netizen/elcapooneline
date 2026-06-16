@@ -873,10 +873,10 @@ def build_guarded_connection_payload(reason: str) -> dict[str, Any]:
 
 TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
 ENTRY_WINDOWS = {
-    "M1": (25, 29),
-    "M5": (265, 269),
-    "M15": (865, 869),
-    "M30": (1765, 1769),
+    "M1": (0, 3),
+    "M5": (0, 3),
+    "M15": (0, 3),
+    "M30": (0, 3),
 }
 ANALYSIS_WINDOWS = {
     "M1": (5, 20),
@@ -941,10 +941,8 @@ def get_entry_window(
     missed_entry_window = seconds_in_candle > window_end
     if entry_window_open:
         seconds_until_entry_window = 0
-    elif seconds_in_candle < window_start:
-        seconds_until_entry_window = math.ceil(window_start - seconds_in_candle)
     else:
-        seconds_until_entry_window = 0
+        seconds_until_entry_window = math.ceil(expiration_seconds - seconds_in_candle + window_start)
 
     return {
         "server_timestamp": float(server_timestamp),
@@ -2021,7 +2019,7 @@ async def execute_robot_cycle(
                 return 200, build_robot_payload(state)
             selected = dict(state.pending_signal) if state.pending_signal else None
             if selected is not None and not state.operation_in_progress:
-                state.status = STATUS_SENDING_ORDER
+                state.status = STATUS_WAITING_ENTRY_WINDOW
                 state.rejection_reason = None
             seconds_until_next_cycle = state.to_dict()["seconds_until_next_cycle"]
             if (
@@ -2065,52 +2063,6 @@ async def execute_robot_cycle(
                         state.next_cycle_at,
                     )
                     return 200, build_robot_payload(state)
-            if (
-                selected is not None
-                and state.status == STATUS_WAITING_ENTRY_WINDOW
-                and not entry_window["entry_window_open"]
-            ):
-                if not entry_window["missed_entry_window"]:
-                    logger.info(
-                        "[ENTRY_WINDOW_WAIT] user_id=%s server_time=%s timeframe=%s "
-                        "seconds_in_candle=%s seconds_until_entry_window=%s "
-                        "window_start=%s window_end=%s",
-                        user_id,
-                        entry_window["server_time"],
-                        state.timeframe,
-                        entry_window["current_candle_seconds"],
-                        entry_window["seconds_until_entry_window"],
-                        entry_window["entry_window_start_second"],
-                        entry_window["entry_window_end_second"],
-                    )
-                    return 200, build_robot_payload(state)
-                logger.info(
-                    "[PENDING_SIGNAL_CLEARED] user_id=%s symbol=%s reason=MISSED_ENTRY_WINDOW",
-                    user_id,
-                    selected.get("symbol"),
-                )
-                state = auto_trader.reject_strategy(
-                    user_id,
-                    "MISSED_ENTRY_WINDOW",
-                    blocked_filters=["MISSED_ENTRY_WINDOW"],
-                    approved_filters=list(selected.get("approved_filters") or []),
-                    quality_score=int(selected.get("quality_score") or 0),
-                )
-                logger.info(
-                    "[MISSED_ENTRY_WINDOW] user_id=%s timeframe=%s "
-                    "current_candle_seconds=%s window_end=%s",
-                    user_id,
-                    state.timeframe,
-                    entry_window["current_candle_seconds"],
-                    entry_window["entry_window_end_second"],
-                )
-                logger.info(
-                    "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
-                    user_id,
-                    state.next_cycle_at,
-                )
-                return 200, build_robot_payload(state)
-
             if selected is None and False:
                 if not entry_window["analysis_window_open"]:
                     state = auto_trader.wait_analysis_window(user_id, entry_window)
@@ -2405,7 +2357,7 @@ async def execute_robot_cycle(
                 state = auto_trader.set_pending_signal(user_id, selected)
                 selected = dict(state.pending_signal or {})
                 logger.info(
-                    "[PENDING_SIGNAL_SET] user_id=%s symbol=%s signal=%s confidence=%s "
+                    "[CYCLE_FINISHED_SIGNAL_LOCKED] user_id=%s symbol=%s signal=%s confidence=%s "
                     "payout=%s timeframe=%s",
                     user_id,
                     selected.get("symbol"),
@@ -2414,89 +2366,35 @@ async def execute_robot_cycle(
                     selected.get("payout"),
                     selected.get("timeframe"),
                 )
-                logger.info(
-                    "[WAITING_ENTRY_WINDOW] user_id=%s symbol=%s cycle_id=%s",
-                    user_id,
-                    selected.get("symbol"),
-                    state.cycle_id,
-                )
 
-                timing_status, timing_payload, entry_window = await refresh_entry_window(user_id, state)
-                state, connected, active_mode, connection_source = await reconcile_robot_connection_from_payload(
-                    user_id,
-                    timing_payload,
-                )
-                if not connected or active_mode != expected_bullex_mode:
-                    if not connected and state.status != STATUS_ACCOUNT_DISCONNECTED:
-                        return 200, build_robot_payload(
-                            state,
-                            connected=False,
-                            active_mode=active_mode,
-                            connection_checked_at=state.connection_checked_at.isoformat()
-                            if state.connection_checked_at is not None
-                            else None,
-                            connection_status_source=connection_source,
-                        )
-                    reason = (
-                        "ACCOUNT_DISCONNECTED"
-                        if not connected
-                        else f"ACCOUNT_MODE_MUST_BE_{expected_bullex_mode}"
-                    )
-                    state = (
-                        auto_trader.disconnect_account(user_id)
-                        if reason == "ACCOUNT_DISCONNECTED"
-                        else auto_trader.reject(user_id, reason)
-                    )
-                    return 200, build_robot_payload(state)
-                if entry_window is None:
-                    state = recover_analysis_error_to_window(user_id, "SERVER_TIME_UNAVAILABLE")
-                    return timing_status, build_robot_payload(state)
-                if not entry_window["entry_window_open"]:
-                    if entry_window["missed_entry_window"]:
-                        logger.info(
-                            "[PENDING_SIGNAL_CLEARED] user_id=%s symbol=%s "
-                            "reason=WAITING_NEXT_ANALYSIS_WINDOW",
-                            user_id,
-                            selected.get("symbol"),
-                        )
-                        state = auto_trader.wait_analysis_window(
-                            user_id,
-                            entry_window,
-                            clear_pending=True,
-                        )
-                        logger.info(
-                            "[WAITING_ANALYSIS_WINDOW] user_id=%s timeframe=%s "
-                            "current_candle_seconds=%s analysis_window_start=%s "
-                            "analysis_window_end=%s seconds_until_analysis_window=%s",
-                            user_id,
-                            state.timeframe,
-                            entry_window["current_candle_seconds"],
-                            entry_window["analysis_window_start_second"],
-                            entry_window["analysis_window_end_second"],
-                            entry_window["seconds_until_analysis_window"],
-                        )
-                        logger.info(
-                            "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
-                            user_id,
-                            state.next_cycle_at,
-                        )
-                        return 200, build_robot_payload(state)
+            if selected is not None and not entry_window["entry_window_open"]:
+                if entry_window["missed_entry_window"]:
                     logger.info(
-                        "[ENTRY_WINDOW_WAIT] user_id=%s server_time=%s timeframe=%s "
-                        "seconds_in_candle=%s seconds_until_entry_window=%s "
-                        "window_start=%s window_end=%s",
+                        "[MISSED_NEXT_CANDLE_ENTRY_WINDOW] user_id=%s symbol=%s server_time=%s "
+                        "timeframe=%s current_candle_seconds=%s window_end=%s",
                         user_id,
+                        selected.get("symbol"),
                         entry_window["server_time"],
                         state.timeframe,
                         entry_window["current_candle_seconds"],
-                        entry_window["seconds_until_entry_window"],
-                        entry_window["entry_window_start_second"],
                         entry_window["entry_window_end_second"],
                     )
-                    return 200, build_robot_payload(state)
+                logger.info(
+                    "[WAITING_NEXT_CANDLE_ENTRY] user_id=%s symbol=%s server_time=%s timeframe=%s "
+                    "current_candle_seconds=%s seconds_until_entry=%s window_start=%s window_end=%s",
+                    user_id,
+                    selected.get("symbol"),
+                    entry_window["server_time"],
+                    state.timeframe,
+                    entry_window["current_candle_seconds"],
+                    entry_window["seconds_until_entry_window"],
+                    entry_window["entry_window_start_second"],
+                    entry_window["entry_window_end_second"],
+                )
+                return 200, build_robot_payload(state)
 
             logger.info(
-                "[ENTRY_WINDOW_OPEN] user_id=%s server_time=%s timeframe=%s "
+                "[NEXT_CANDLE_ENTRY_WINDOW_OPEN] user_id=%s server_time=%s timeframe=%s "
                 "seconds_in_candle=%s window_start=%s window_end=%s buy_target_second=%s",
                 user_id,
                 entry_window["server_time"],

@@ -8,6 +8,7 @@ from backend.auto_trader import (
     STATUS_PENDING_RESULT,
     STATUS_RESULT_RECEIVED,
     STATUS_SENDING_ORDER,
+    STATUS_WAITING_NEXT_CANDLE_ENTRY,
     STATUS_WAITING_NEXT_CYCLE,
     utc_now,
 )
@@ -132,7 +133,7 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
             nonlocal session_calls
             if path == "/sessions/status":
                 session_calls += 1
-                server_time = 359.0 if session_calls == 1 else 314.0
+                server_time = 359.0 if session_calls == 1 else (360.0 if session_calls == 2 else 314.0)
                 return 200, main.build_success(
                     {"connected": True, "active_mode": "PRACTICE", "server_time": server_time}
                 )
@@ -145,8 +146,11 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main.trade_result_monitor, "start"),
             patch.object(main, "persist_robot"),
         ):
+            first_status, first_payload = await main.execute_robot_cycle(user_id)
             status_code, payload = await main.execute_robot_cycle(user_id)
 
+        self.assertEqual(first_status, 200)
+        self.assertEqual(first_payload["data"]["status"], STATUS_WAITING_NEXT_CANDLE_ENTRY)
         trade = payload["data"]["last_trade"]
         self.assertEqual(status_code, 200)
         self.assertEqual(trade["server_timestamp_at_send"], 314.0)
@@ -211,7 +215,7 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
         )
         state.next_cycle_at = utc_now() - timedelta(seconds=1)
         main.auto_trader.set_pending_signal(user_id, make_signal("GBPUSD-OTC", "PUT", 90))
-        self.assertEqual(main.auto_trader.get(user_id).status, STATUS_SENDING_ORDER)
+        self.assertEqual(main.auto_trader.get(user_id).status, STATUS_WAITING_NEXT_CANDLE_ENTRY)
         calls: list[str] = []
 
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
@@ -231,7 +235,7 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
 
         data = json.loads(response.body)["data"]
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(data["status"], STATUS_SENDING_ORDER)
+        self.assertEqual(data["status"], STATUS_WAITING_NEXT_CANDLE_ENTRY)
         self.assertEqual(data["pending_signal"]["symbol"], "GBPUSD-OTC")
         self.assertFalse(data["operation_in_progress"])
         self.assertNotIn("/orders/buy-demo", calls)
@@ -243,10 +247,9 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
 
         payload = state.to_dict()
 
-        self.assertEqual(payload["status"], STATUS_SENDING_ORDER)
-        self.assertIn("Entrada liberada agora", payload["voice_message"])
-        self.assertIn("GBPUSD-OTC", payload["voice_message"])
-        self.assertIn("PUT", payload["voice_message"])
+        self.assertEqual(payload["status"], STATUS_WAITING_NEXT_CANDLE_ENTRY)
+        self.assertEqual(payload["status_message"], "Sinal preparado")
+        self.assertIn("Entrada preparada", payload["voice_message"])
         self.assertIsNotNone(payload["voice_event_id"])
 
 

@@ -19,7 +19,7 @@ from backend.auto_trader import (
 from backend import main
 
 
-SERVER_TIME_M1_OPEN = 25.0
+SERVER_TIME_M1_OPEN = 0.0
 
 
 def make_cycle_due(user_id: str) -> None:
@@ -233,10 +233,10 @@ class AutoTraderStateTests(unittest.TestCase):
 
     def test_entry_windows_match_each_timeframe(self) -> None:
         cases = {
-            "M1": (25, 24, 29, 30),
-            "M5": (265, 264, 269, 270),
-            "M15": (865, 864, 869, 870),
-            "M30": (1765, 1764, 1769, 1770),
+            "M1": (0, 59, 3, 4),
+            "M5": (0, 299, 3, 4),
+            "M15": (0, 899, 3, 4),
+            "M30": (0, 1799, 3, 4),
         }
         for timeframe, (open_at, before_at, end_at, missed_at) in cases.items():
             with self.subTest(timeframe=timeframe):
@@ -248,10 +248,10 @@ class AutoTraderStateTests(unittest.TestCase):
                 missed = main.get_entry_window(timeframe, missed_at)
                 self.assertFalse(missed["entry_window_open"])
                 self.assertTrue(missed["missed_entry_window"])
-                self.assertEqual(missed["seconds_until_entry_window"], 0)
+                self.assertEqual(missed["seconds_until_entry_window"], int(main.TIMEFRAME_SECONDS[timeframe]) - missed_at)
 
     def test_entry_window_contract_exposes_target_seconds(self) -> None:
-        window = main.get_entry_window("M1", 24)
+        window = main.get_entry_window("M1", 59)
 
         self.assertFalse(window["entry_window_open"])
         self.assertEqual(window["seconds_until_entry_window"], 1)
@@ -259,9 +259,9 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertEqual(window["seconds_until_analysis_window"], 41)
         self.assertEqual(window["analysis_window_start_second"], 5)
         self.assertEqual(window["analysis_window_end_second"], 20)
-        self.assertEqual(window["entry_window_start_second"], 25)
-        self.assertEqual(window["entry_window_end_second"], 29)
-        self.assertEqual(window["buy_target_second"], 25)
+        self.assertEqual(window["entry_window_start_second"], 0)
+        self.assertEqual(window["entry_window_end_second"], 3)
+        self.assertEqual(window["buy_target_second"], 0)
 
     def test_analysis_window_contract_for_m1(self) -> None:
         window_at_10 = main.get_entry_window("M1", 10)
@@ -294,14 +294,16 @@ class AutoTraderStateTests(unittest.TestCase):
 
         payload = state.to_dict()
 
-        self.assertEqual(payload["status"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(payload["status"], "WAITING_NEXT_CANDLE_ENTRY")
         self.assertIn("seconds_until_next_cycle", payload)
-        self.assertEqual(payload["seconds_until_entry_window"], 145)
-        self.assertEqual(payload["display_countdown_label"], "Entrada em")
-        self.assertEqual(payload["display_countdown_seconds"], 145)
-        self.assertEqual(payload["entry_window_start_second"], 265)
-        self.assertEqual(payload["entry_window_end_second"], 269)
-        self.assertEqual(payload["buy_target_second"], 265)
+        self.assertEqual(payload["seconds_until_entry_window"], 180)
+        self.assertEqual(payload["seconds_until_entry"], 180)
+        self.assertEqual(payload["display_countdown_label"], "Entrada no inicio da proxima vela em")
+        self.assertEqual(payload["display_countdown_seconds"], 180)
+        self.assertEqual(payload["entry_window_start_second"], 0)
+        self.assertEqual(payload["entry_window_end_second"], 3)
+        self.assertEqual(payload["buy_target_second"], 0)
+        self.assertEqual(payload["entry_target"], "NEXT_CANDLE_OPEN")
         self.assertEqual(payload["expiration_seconds"], 300)
         self.assertFalse(payload["entry_window_open"])
         self.assertFalse(payload["operation_in_progress"])
@@ -378,7 +380,7 @@ class AutoTraderStateTests(unittest.TestCase):
 
         restored = AutoTrader().restore("user-pending-restore", state.to_dict())
 
-        self.assertEqual(restored.status, "WAITING_ENTRY_WINDOW")
+        self.assertEqual(restored.status, "WAITING_NEXT_CANDLE_ENTRY")
         self.assertEqual(restored.pending_signal["symbol"], "EURUSD-OTC")
         self.assertEqual(restored.pending_signal["signal"], "CALL")
         self.assertEqual(restored.last_signal, restored.pending_signal)
@@ -772,11 +774,11 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         data = payload["data"]
         output = "\n".join(logs.output)
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(data["status"], "WAITING_NEXT_CANDLE_ENTRY")
         self.assertEqual(data["analysis_window_start_second"], 5)
         self.assertEqual(data["analysis_window_end_second"], 20)
-        self.assertEqual(data["entry_window_start_second"], 25)
-        self.assertEqual(data["entry_window_end_second"], 29)
+        self.assertEqual(data["entry_window_start_second"], 0)
+        self.assertEqual(data["entry_window_end_second"], 3)
         self.assertEqual(data["current_candle_seconds"], 20.0)
         self.assertEqual(data["last_analysis_result"], "BEST_CANDIDATE_SELECTED")
         self.assertEqual(data["analysis_result"], "BEST_CANDIDATE_SELECTED")
@@ -796,7 +798,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[ANALYSIS_FINISHED]", output)
         self.assertIn("[ANALYSIS_CANDIDATES]", output)
         self.assertIn("[BEST_CANDIDATE_SELECTED]", output)
-        self.assertIn("[PENDING_SIGNAL_SET]", output)
+        self.assertIn("[CYCLE_FINISHED_SIGNAL_LOCKED]", output)
         scan.assert_awaited_once()
 
     async def test_due_cycle_analyzes_at_second_10_and_prepares_pending_signal(self) -> None:
@@ -837,10 +839,10 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
 
         data = payload["data"]
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(data["status"], "WAITING_NEXT_CANDLE_ENTRY")
         self.assertTrue(data["analysis_window_open"])
         self.assertEqual(data["seconds_until_analysis_window"], 0)
-        self.assertEqual(data["seconds_until_entry_window"], 15)
+        self.assertEqual(data["seconds_until_entry_window"], 50)
         self.assertEqual(data["pending_signal"]["symbol"], "EURUSD-OTC")
         self.assertEqual(data["pending_signal"]["signal"], "PUT")
         scan.assert_awaited_once()
@@ -885,7 +887,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         data = payload["data"]
         output = "\n".join(logs.output)
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(data["status"], "WAITING_NEXT_CANDLE_ENTRY")
         self.assertEqual(data["server_time_source"], "vps_fallback")
         self.assertEqual(data["current_candle_seconds"], 10.0)
         self.assertEqual(data["pending_signal"]["symbol"], "EURUSD-OTC")
@@ -1173,7 +1175,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             status_code, payload = await main.execute_robot_cycle(user_id)
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["data"]["status"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(payload["data"]["status"], "WAITING_NEXT_CANDLE_ENTRY")
         self.assertIsNotNone(payload["data"]["pending_signal"])
         scan.assert_not_awaited()
 
@@ -1281,7 +1283,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
 
         data = payload["data"]
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(data["status"], "WAITING_NEXT_CANDLE_ENTRY")
         self.assertEqual(data["candidates_count"], 2)
         self.assertEqual(len(data["candidates"]), 2)
         self.assertEqual(data["best_candidate"]["symbol"], "GBPUSD-OTC")
@@ -1352,7 +1354,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_code, 200)
         self.assertEqual(payload["data"]["status"], STATUS_PENDING_RESULT)
         self.assertTrue(payload["data"]["operation_in_progress"])
-        self.assertEqual(sending_from_statuses, ["WAITING_ENTRY_WINDOW"])
+        self.assertEqual(sending_from_statuses, ["WAITING_NEXT_CANDLE_ENTRY"])
 
     async def test_successful_order_goes_to_pending_result_with_last_trade_contract(self) -> None:
         user_id = "user-order-success"
@@ -2343,7 +2345,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
 
         pending = first_payload["data"]["pending_signal"]
         self.assertEqual(first_status, 200)
-        self.assertEqual(first_payload["data"]["status"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(first_payload["data"]["status"], "WAITING_NEXT_CANDLE_ENTRY")
         self.assertEqual(pending["symbol"], "EURUSD-OTC")
         self.assertEqual(pending["signal"], "CALL")
         self.assertEqual(pending["direction"], "CALL")
@@ -2351,7 +2353,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending["payout"], 90.0)
         self.assertEqual(pending["timeframe"], "M1")
         self.assertIsNotNone(pending["created_at"])
-        self.assertEqual(first_payload["data"]["seconds_until_entry_window"], 5)
+        self.assertEqual(first_payload["data"]["seconds_until_entry_window"], 40)
         self.assertFalse(first_payload["data"]["entry_window_open"])
         self.assertEqual(first_payload["data"]["expiration_seconds"], 60)
         self.assertEqual(second_status, 200)
@@ -2361,10 +2363,9 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scan.await_count, 1)
         self.assertEqual(calls.count("/orders/buy-demo"), 1)
         output = "\n".join(logs.output)
-        self.assertIn("[PENDING_SIGNAL_SET]", output)
-        self.assertIn("[WAITING_ENTRY_WINDOW]", output)
-        self.assertIn("[ENTRY_WINDOW_WAIT]", output)
-        self.assertIn("[ENTRY_WINDOW_OPEN]", output)
+        self.assertIn("[CYCLE_FINISHED_SIGNAL_LOCKED]", output)
+        self.assertIn("[WAITING_NEXT_CANDLE_ENTRY]", output)
+        self.assertIn("[NEXT_CANDLE_ENTRY_WINDOW_OPEN]", output)
         self.assertIn("[SENDING_ORDER]", output)
         self.assertIn("[PENDING_RESULT]", output)
         self.assertIn("[TRADE_SENT_AT]", output)
@@ -2372,15 +2373,14 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_m1_only_buys_between_seconds_25_and_29(self) -> None:
         cases = {
-            24.0: "WAITING_ENTRY_WINDOW",
-            25.0: "PENDING_RESULT",
-            29.0: "PENDING_RESULT",
-            30.0: "SIGNAL_REJECTED",
-            55.0: "SIGNAL_REJECTED",
-            56.0: "SIGNAL_REJECTED",
-            57.0: "SIGNAL_REJECTED",
-            58.0: "SIGNAL_REJECTED",
-            59.0: "SIGNAL_REJECTED",
+            0.0: "PENDING_RESULT",
+            3.0: "PENDING_RESULT",
+            4.0: "WAITING_NEXT_CANDLE_ENTRY",
+            20.0: "WAITING_NEXT_CANDLE_ENTRY",
+            30.0: "WAITING_NEXT_CANDLE_ENTRY",
+            50.0: "WAITING_NEXT_CANDLE_ENTRY",
+            55.0: "WAITING_NEXT_CANDLE_ENTRY",
+            59.0: "WAITING_NEXT_CANDLE_ENTRY",
         }
 
         for second, expected_status in cases.items():
@@ -2438,10 +2438,10 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(status_code, 200)
                 self.assertEqual(data["status"], expected_status)
                 self.assertEqual(data["current_candle_seconds"], second)
-                self.assertEqual(data["entry_window_start_second"], 25)
-                self.assertEqual(data["entry_window_end_second"], 29)
-                self.assertEqual(data["buy_target_second"], 25)
-                if second in {25.0, 29.0}:
+                self.assertEqual(data["entry_window_start_second"], 0)
+                self.assertEqual(data["entry_window_end_second"], 3)
+                self.assertEqual(data["buy_target_second"], 0)
+                if second in {0.0, 3.0}:
                     self.assertTrue(
                         main.get_entry_window("M1", second)["entry_window_open"]
                     )
@@ -2449,15 +2449,12 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertFalse(data["entry_window_open"])
                     self.assertNotIn("/orders/buy-demo", calls)
-                if second == 24.0:
+                if second == 59.0:
                     self.assertEqual(data["seconds_until_entry_window"], 1)
-                if second >= 30.0:
-                    self.assertEqual(
-                        data["rejection_reason"],
-                        "MISSED_ENTRY_WINDOW",
-                    )
+                if second > 3.0:
+                    self.assertIsNotNone(data["pending_signal"])
 
-    async def test_missed_entry_window_finishes_with_clear_rejection(self) -> None:
+    async def test_missed_next_candle_window_keeps_pending_signal_locked(self) -> None:
         user_id = "user-window-missed"
         state = main.auto_trader.start(user_id)
         main.auto_trader.set_pending_signal(
@@ -2486,15 +2483,13 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             status_code, payload = await main.execute_robot_cycle(user_id)
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["data"]["status"], "SIGNAL_REJECTED")
-        self.assertEqual(payload["data"]["rejection_reason"], "MISSED_ENTRY_WINDOW")
-        self.assertEqual(payload["data"]["last_rejection_reason"], "MISSED_ENTRY_WINDOW")
-        self.assertIsNone(payload["data"]["pending_signal"])
-        self.assertGreaterEqual(payload["data"]["seconds_until_next_cycle"], 299)
+        self.assertEqual(payload["data"]["status"], "WAITING_NEXT_CANDLE_ENTRY")
+        self.assertIsNone(payload["data"]["rejection_reason"])
+        self.assertIsNotNone(payload["data"]["pending_signal"])
+        self.assertEqual(payload["data"]["seconds_until_entry_window"], 30)
         scan.assert_not_awaited()
         output = "\n".join(logs.output)
-        self.assertIn("[PENDING_SIGNAL_CLEARED]", output)
-        self.assertIn("[MISSED_ENTRY_WINDOW]", output)
+        self.assertIn("[MISSED_NEXT_CANDLE_ENTRY_WINDOW]", output)
 
     async def test_m5_sends_five_minute_expiration(self) -> None:
         user_id = "user-m5"
@@ -2515,7 +2510,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             calls.append((path, json_body))
             if path == "/sessions/status":
                 return 200, main.build_success(
-                    {"connected": True, "active_mode": "PRACTICE", "server_time": 265.0}
+                    {"connected": True, "active_mode": "PRACTICE", "server_time": 300.0}
                 )
             if path == "/orders/buy-demo":
                 return 200, main.build_success({"order_id": "demo-m5"})

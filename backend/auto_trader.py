@@ -24,7 +24,8 @@ STATUS_RESULT_RECEIVED = "RESULT_RECEIVED"
 STATUS_ORDER_REJECTED = "ORDER_REJECTED"
 STATUS_ERROR = "ERROR"
 STATUS_REAL_TRADING_LOCKED = "REAL_TRADING_LOCKED"
-STATUS_WAITING_ENTRY_WINDOW = "WAITING_ENTRY_WINDOW"
+STATUS_WAITING_NEXT_CANDLE_ENTRY = "WAITING_NEXT_CANDLE_ENTRY"
+STATUS_WAITING_ENTRY_WINDOW = STATUS_WAITING_NEXT_CANDLE_ENTRY
 STATUS_WAITING_ANALYSIS_WINDOW = "WAITING_ANALYSIS_WINDOW"
 STATUS_ACCOUNT_DISCONNECTED = "ACCOUNT_DISCONNECTED"
 STATUS_ANALYSIS_TIMEOUT = "ANALYSIS_TIMEOUT"
@@ -135,9 +136,9 @@ class RobotState:
     entry_window_open: bool = False
     seconds_until_entry_window: int = 0
     current_candle_seconds: float = 0.0
-    entry_window_start_second: int = 25
-    entry_window_end_second: int = 29
-    buy_target_second: int = 25
+    entry_window_start_second: int = 0
+    entry_window_end_second: int = 3
+    buy_target_second: int = 0
     expiration_seconds: int = 60
     last_rejection_reason: str | None = None
     last_order_error: str | None = None
@@ -246,14 +247,24 @@ class RobotState:
         if data["status"] == STATUS_WAITING_NEXT_CYCLE:
             display_countdown_label = "Entrada em"
             display_countdown_seconds = max(0, int(data["seconds_until_next_cycle"]))
-        elif data["status"] == STATUS_WAITING_ENTRY_WINDOW:
-            display_countdown_label = "Entrada em"
+        elif data["status"] == STATUS_WAITING_NEXT_CANDLE_ENTRY:
+            display_countdown_label = "Entrada no inicio da proxima vela em"
             display_countdown_seconds = max(0, int(data["seconds_until_entry_window"]))
         data["display_countdown_label"] = display_countdown_label
         data["display_countdown_seconds"] = display_countdown_seconds
+        data["status_message"] = None
+        data["entry_target"] = "NEXT_CANDLE_OPEN"
+        data["seconds_until_entry"] = max(0, int(data["seconds_until_entry_window"]))
         data["voice_message"] = None
         data["voice_event_id"] = None
         voice_signal = self.pending_signal or self.best_candidate
+        if self.status == STATUS_WAITING_NEXT_CANDLE_ENTRY and voice_signal:
+            data["status_message"] = "Sinal preparado"
+            data["voice_message"] = "Entrada preparada. Vamos entrar no inicio da proxima vela."
+            symbol = str(voice_signal.get("symbol") or "")
+            direction = str(voice_signal.get("direction") or voice_signal.get("signal") or "")
+            score = int(voice_signal.get("strategy_score") or voice_signal.get("score") or 0)
+            data["voice_event_id"] = f"{self.cycle_id or ''}:{symbol}:{direction}:{score}:prepared"
         if self.status == STATUS_SENDING_ORDER and voice_signal:
             symbol = str(voice_signal.get("symbol") or "")
             direction = str(voice_signal.get("direction") or voice_signal.get("signal") or "")
@@ -397,6 +408,8 @@ class AutoTrader:
             if key in datetime_fields and isinstance(value, str):
                 value = datetime.fromisoformat(value.replace("Z", "+00:00"))
             setattr(state, key, value)
+        if state.status == "WAITING_ENTRY_WINDOW":
+            state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
 
         result_visible = (
             state.status == STATUS_RESULT_RECEIVED
@@ -406,7 +419,7 @@ class AutoTrader:
         if result_visible:
             state.operation_in_progress = False
         elif state.enabled and state.pending_signal:
-            state.status = STATUS_SENDING_ORDER
+            state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
             state.rejection_reason = None
         elif state.enabled and not state.operation_in_progress:
             state.status = STATUS_WAITING_NEXT_CYCLE
@@ -538,7 +551,7 @@ class AutoTrader:
             state.status = STATUS_PENDING_RESULT
             return False, state
         if state.pending_signal:
-            state.status = STATUS_SENDING_ORDER
+            state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
             return True, state
         if state.next_cycle_at is not None and now < state.next_cycle_at:
             state.status = STATUS_WAITING_NEXT_CYCLE
@@ -768,7 +781,7 @@ class AutoTrader:
         }
         state.last_signal = dict(pending_signal)
         state.pending_signal = pending_signal
-        state.status = STATUS_SENDING_ORDER
+        state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.last_analysis_at = utc_now()
@@ -988,7 +1001,7 @@ class AutoTrader:
 
     def start_sending_order(self, user_id: str) -> RobotState:
         state = self.get(user_id)
-        if state.status not in {STATUS_WAITING_ENTRY_WINDOW, STATUS_SENDING_ORDER} or not state.pending_signal:
+        if state.status not in {STATUS_WAITING_NEXT_CANDLE_ENTRY, STATUS_SENDING_ORDER} or not state.pending_signal:
             raise RuntimeError("INVALID_ORDER_STATE_TRANSITION")
         state.status = STATUS_SENDING_ORDER
         state.rejection_reason = None
@@ -1093,11 +1106,11 @@ class AutoTrader:
             and not state.operation_in_progress
             and state.pending_signal
         ):
-            state.status = STATUS_SENDING_ORDER
+            state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
             state.rejection_reason = None
         elif (
             state.entry_window_open
-            and state.status == STATUS_WAITING_ENTRY_WINDOW
+            and state.status == STATUS_WAITING_NEXT_CANDLE_ENTRY
             and not state.pending_signal
         ):
             state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED

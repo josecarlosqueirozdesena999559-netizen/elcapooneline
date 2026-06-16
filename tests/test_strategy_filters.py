@@ -200,8 +200,8 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
         data = payload["data"]
         pending = data["pending_signal"]
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], "WAITING_ENTRY_WINDOW")
-        self.assertEqual(data["rejection_reason"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(data["status"], "WAITING_NEXT_CANDLE_ENTRY")
+        self.assertIsNone(data["rejection_reason"])
         self.assertEqual(data["last_analysis_result"], "BEST_CANDIDATE_SELECTED")
         self.assertIsNotNone(pending)
         self.assertEqual(pending["symbol"], "EURUSD-OTC")
@@ -213,13 +213,13 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(pending["strategy_score"], pending["confidence"])
         self.assertIn("TREND_CLEAR", pending["blocked_filters"])
         self.assertIn("MIN_CONFIDENCE", pending["blocked_filters"])
-        self.assertEqual(pending["target_entry_second"], 25)
-        self.assertEqual(pending["entry_window_start_second"], 25)
-        self.assertEqual(pending["entry_window_end_second"], 29)
+        self.assertEqual(pending["target_entry_second"], 0)
+        self.assertEqual(pending["entry_window_start_second"], 0)
+        self.assertEqual(pending["entry_window_end_second"], 3)
         output = "\n".join(logs.output)
         self.assertIn("[ANALYSIS_CANDIDATES]", output)
         self.assertIn("[BEST_CANDIDATE_SELECTED]", output)
-        self.assertIn("[PENDING_SIGNAL_SET]", output)
+        self.assertIn("[CYCLE_FINISHED_SIGNAL_LOCKED]", output)
 
     async def test_open_analysis_window_forces_analysis_from_robot_state(self) -> None:
         user_id = "user-force-open-window"
@@ -281,13 +281,13 @@ class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):
 
         data = payload["data"]
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], "WAITING_ENTRY_WINDOW")
+        self.assertEqual(data["status"], "WAITING_NEXT_CANDLE_ENTRY")
         self.assertEqual(data["pending_signal"]["symbol"], "EURUSD-OTC")
         self.assertEqual(data["pending_signal"]["direction"], "CALL")
         self.assertIsNotNone(data["best_candidate"])
         output = "\n".join(logs.output)
         self.assertIn("[FALLBACK_CANDIDATE_SELECTED]", output)
-        self.assertIn("[WAITING_ENTRY_WINDOW]", output)
+        self.assertIn("[WAITING_NEXT_CANDLE_ENTRY]", output)
 
     async def test_missing_candles_still_blocks_candidate(self) -> None:
         user_id = "user-no-candles"
