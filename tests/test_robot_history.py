@@ -266,7 +266,7 @@ class RobotHistoryCorsTests(unittest.TestCase):
                 "http://localhost:5174",
             ],
         )
-        self.assertEqual(middleware.kwargs["allow_methods"], main.CORS_ALLOWED_METHODS)
+        self.assertEqual(middleware.kwargs["allow_methods"], ["GET", "POST", "OPTIONS"])
         self.assertEqual(middleware.kwargs["allow_headers"], main.CORS_ALLOWED_HEADERS)
 
     def test_options_robot_stats_returns_cors_headers_for_www_origin(self) -> None:

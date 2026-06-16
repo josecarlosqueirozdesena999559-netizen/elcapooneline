@@ -47,7 +47,7 @@ CORS_ALLOWED_ORIGINS_DEFAULT = (
     "http://localhost:5173,"
     "http://localhost:5174"
 )
-CORS_ALLOWED_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+CORS_ALLOWED_METHODS = ["GET", "POST", "OPTIONS"]
 CORS_ALLOWED_HEADERS = ["x-api-key", "x-user-id", "content-type", "authorization"]
 
 ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
