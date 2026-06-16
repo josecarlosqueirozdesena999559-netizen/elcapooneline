@@ -41,6 +41,15 @@ from backend.user_store import UserStore, create_user_store
 
 logger = logging.getLogger("backend-gateway")
 
+CORS_ALLOWED_ORIGINS_DEFAULT = (
+    "https://www.elcapobot.online,"
+    "https://elcapobot.online,"
+    "http://localhost:5173,"
+    "http://localhost:5174"
+)
+CORS_ALLOWED_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+CORS_ALLOWED_HEADERS = ["x-api-key", "x-user-id", "content-type", "authorization"]
+
 ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
 SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
 SESSION_DISCONNECTED = "SESSION_DISCONNECTED"
@@ -266,7 +275,7 @@ class GatewayConfig:
             origin.strip()
             for origin in os.getenv(
                 "CORS_ORIGINS",
-                "https://www.elcapobot.online,https://elcapobot.online,http://localhost:5173",
+                CORS_ALLOWED_ORIGINS_DEFAULT,
             ).split(",")
             if origin.strip()
         ]
@@ -278,8 +287,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=config.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=CORS_ALLOWED_METHODS,
+    allow_headers=CORS_ALLOWED_HEADERS,
 )
 user_store: UserStore = create_user_store()
 auto_trader = AutoTrader()
@@ -3089,6 +3098,11 @@ async def robot_history(
     return json_response(200, build_success({"items": items}))
 
 
+@app.options("/robot/history")
+async def robot_history_options() -> JSONResponse:
+    return json_response(200, build_success({"preflight": True}))
+
+
 @app.get("/robot/stats")
 async def robot_stats(
     days: int = Query(default=30),
@@ -3098,6 +3112,11 @@ async def robot_stats(
         raise HTTPException(status_code=422, detail="days must be 1, 7, or 30")
     items = robot_persistence.load_trade_history(auth["user_id"], days)
     return json_response(200, build_success(build_robot_stats(items)))
+
+
+@app.options("/robot/stats")
+async def robot_stats_options() -> JSONResponse:
+    return json_response(200, build_success({"preflight": True}))
 
 
 @app.get("/robot/persistence")

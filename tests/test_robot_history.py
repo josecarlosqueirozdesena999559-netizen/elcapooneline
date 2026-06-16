@@ -4,6 +4,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from backend import main
 from backend.auto_trader import AutoTrader
 from backend.robot_persistence import SQLiteRobotPersistence
@@ -210,3 +212,67 @@ class RobotHistoryEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["order_id"] for item in history], ["a-1"])
         self.assertEqual(stats["wins"], 1)
         self.assertEqual(stats["losses"], 0)
+
+
+class RobotHistoryCorsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = TestClient(main.app)
+
+    def test_cors_configuration_matches_expected_contract(self) -> None:
+        middleware = next(
+            middleware
+            for middleware in main.app.user_middleware
+            if middleware.cls.__name__ == "CORSMiddleware"
+        )
+
+        self.assertEqual(
+            middleware.kwargs["allow_origins"],
+            [
+                "https://www.elcapobot.online",
+                "https://elcapobot.online",
+                "http://localhost:5173",
+                "http://localhost:5174",
+            ],
+        )
+        self.assertEqual(middleware.kwargs["allow_methods"], main.CORS_ALLOWED_METHODS)
+        self.assertEqual(middleware.kwargs["allow_headers"], main.CORS_ALLOWED_HEADERS)
+
+    def test_options_robot_stats_returns_cors_headers_for_www_origin(self) -> None:
+        response = self.client.options(
+            "/robot/stats?days=1",
+            headers={
+                "Origin": "https://www.elcapobot.online",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "x-api-key,x-user-id",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers.get("access-control-allow-origin"),
+            "https://www.elcapobot.online",
+        )
+        self.assertIn("GET", response.headers.get("access-control-allow-methods", ""))
+        allow_headers = response.headers.get("access-control-allow-headers", "").lower()
+        self.assertIn("x-api-key", allow_headers)
+        self.assertIn("x-user-id", allow_headers)
+
+    def test_options_robot_history_returns_cors_headers_for_www_origin(self) -> None:
+        response = self.client.options(
+            "/robot/history?days=1",
+            headers={
+                "Origin": "https://www.elcapobot.online",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "x-api-key,x-user-id",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers.get("access-control-allow-origin"),
+            "https://www.elcapobot.online",
+        )
+        self.assertIn("GET", response.headers.get("access-control-allow-methods", ""))
+        allow_headers = response.headers.get("access-control-allow-headers", "").lower()
+        self.assertIn("x-api-key", allow_headers)
+        self.assertIn("x-user-id", allow_headers)
