@@ -29,6 +29,9 @@ ROBOT_SETTING_FIELDS = (
     "allow_real",
     "confirm_real",
     "max_entries_per_cycle",
+    "martingale_enabled",
+    "martingale_steps",
+    "martingale_multiplier",
 )
 
 
@@ -142,8 +145,9 @@ class SQLiteRobotPersistence(RobotPersistence):
                     user_id, entry_value, stop_win, stop_loss, cycle_minutes,
                     min_confidence, min_payout, strategy_mode, account_mode,
                     allow_real, confirm_real, max_entries_per_cycle,
+                    martingale_enabled, martingale_steps, martingale_multiplier,
                     created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(user_id) do update set
                     entry_value = excluded.entry_value,
                     stop_win = excluded.stop_win,
@@ -156,6 +160,9 @@ class SQLiteRobotPersistence(RobotPersistence):
                     allow_real = excluded.allow_real,
                     confirm_real = excluded.confirm_real,
                     max_entries_per_cycle = excluded.max_entries_per_cycle,
+                    martingale_enabled = excluded.martingale_enabled,
+                    martingale_steps = excluded.martingale_steps,
+                    martingale_multiplier = excluded.martingale_multiplier,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -171,6 +178,9 @@ class SQLiteRobotPersistence(RobotPersistence):
                     int(bool(values.get("allow_real", False))),
                     int(bool(values.get("confirm_real", False))),
                     values.get("max_entries_per_cycle", 1),
+                    int(bool(values.get("martingale_enabled", False))),
+                    values.get("martingale_steps", 1),
+                    values.get("martingale_multiplier", 2),
                     now,
                     now,
                 ),
@@ -183,7 +193,8 @@ class SQLiteRobotPersistence(RobotPersistence):
                 """
                 select entry_value, stop_win, stop_loss, cycle_minutes,
                        min_confidence, min_payout, strategy_mode, account_mode,
-                       allow_real, confirm_real, max_entries_per_cycle
+                       allow_real, confirm_real, max_entries_per_cycle,
+                       martingale_enabled, martingale_steps, martingale_multiplier
                 from robot_user_settings where user_id = ?
                 """,
                 (user_id,),
@@ -193,6 +204,7 @@ class SQLiteRobotPersistence(RobotPersistence):
         settings = dict(row)
         settings["allow_real"] = bool(settings["allow_real"])
         settings["confirm_real"] = bool(settings["confirm_real"])
+        settings["martingale_enabled"] = bool(settings["martingale_enabled"])
         return settings
 
     def save_trade(self, user_id: str, trade: dict[str, Any]) -> None:
@@ -232,8 +244,9 @@ class SQLiteRobotPersistence(RobotPersistence):
                 insert into robot_trade_history (
                     user_id, created_at, account_mode, active, direction, amount,
                     confidence, payout, order_id, result, profit, opened_at,
-                    finished_at, timeframe
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    finished_at, timeframe, is_gale, gale_step, parent_order_id,
+                    cycle_result, final_result, original_amount, gale_amount
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(user_id, order_id) do update set
                     account_mode = excluded.account_mode,
                     active = excluded.active,
@@ -245,7 +258,14 @@ class SQLiteRobotPersistence(RobotPersistence):
                     profit = excluded.profit,
                     opened_at = excluded.opened_at,
                     finished_at = excluded.finished_at,
-                    timeframe = excluded.timeframe
+                    timeframe = excluded.timeframe,
+                    is_gale = excluded.is_gale,
+                    gale_step = excluded.gale_step,
+                    parent_order_id = excluded.parent_order_id,
+                    cycle_result = excluded.cycle_result,
+                    final_result = excluded.final_result,
+                    original_amount = excluded.original_amount,
+                    gale_amount = excluded.gale_amount
                 """,
                 (
                     item["user_id"],
@@ -262,6 +282,13 @@ class SQLiteRobotPersistence(RobotPersistence):
                     item["opened_at"],
                     item["finished_at"],
                     item["timeframe"],
+                    item["is_gale"],
+                    item["gale_step"],
+                    item["parent_order_id"],
+                    item["cycle_result"],
+                    item["final_result"],
+                    item["original_amount"],
+                    item["gale_amount"],
                 ),
             )
 
@@ -338,6 +365,9 @@ class SQLiteRobotPersistence(RobotPersistence):
                     allow_real integer not null default 0,
                     confirm_real integer not null default 0,
                     max_entries_per_cycle integer not null default 1,
+                    martingale_enabled integer not null default 0,
+                    martingale_steps integer not null default 1,
+                    martingale_multiplier real not null default 2,
                     created_at text not null,
                     updated_at text not null
                 );
@@ -365,6 +395,13 @@ class SQLiteRobotPersistence(RobotPersistence):
                     opened_at text not null,
                     finished_at text not null,
                     timeframe text not null,
+                    is_gale integer not null default 0,
+                    gale_step integer not null default 0,
+                    parent_order_id text,
+                    cycle_result text,
+                    final_result text,
+                    original_amount real not null default 0,
+                    gale_amount real not null default 0,
                     unique (user_id, order_id)
                 );
                 create index if not exists robot_trade_history_user_finished_idx
@@ -377,6 +414,24 @@ class SQLiteRobotPersistence(RobotPersistence):
                 );
                 """
             )
+            self._ensure_column(connection, "robot_user_settings", "martingale_enabled", "integer not null default 0")
+            self._ensure_column(connection, "robot_user_settings", "martingale_steps", "integer not null default 1")
+            self._ensure_column(connection, "robot_user_settings", "martingale_multiplier", "real not null default 2")
+            self._ensure_column(connection, "robot_trade_history", "is_gale", "integer not null default 0")
+            self._ensure_column(connection, "robot_trade_history", "gale_step", "integer not null default 0")
+            self._ensure_column(connection, "robot_trade_history", "parent_order_id", "text")
+            self._ensure_column(connection, "robot_trade_history", "cycle_result", "text")
+            self._ensure_column(connection, "robot_trade_history", "final_result", "text")
+            self._ensure_column(connection, "robot_trade_history", "original_amount", "real not null default 0")
+            self._ensure_column(connection, "robot_trade_history", "gale_amount", "real not null default 0")
+
+    def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        existing = {
+            row["name"]
+            for row in connection.execute(f"pragma table_info({table})").fetchall()
+        }
+        if column not in existing:
+            connection.execute(f"alter table {table} add column {column} {definition}")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -601,4 +656,11 @@ def build_trade_history_item(user_id: str, trade: dict[str, Any]) -> dict[str, A
         "opened_at": opened_at,
         "finished_at": finished_at,
         "timeframe": str(trade.get("expiration") or trade.get("timeframe") or "M1").upper(),
+        "is_gale": bool(trade.get("is_gale", False)),
+        "gale_step": int(trade.get("gale_step") or 0),
+        "parent_order_id": str(trade.get("parent_order_id") or "") or None,
+        "cycle_result": str(trade.get("cycle_result") or "") or None,
+        "final_result": str(trade.get("final_result") or result),
+        "original_amount": float(trade.get("original_amount") or trade.get("amount") or 0),
+        "gale_amount": float(trade.get("gale_amount") or 0),
     }

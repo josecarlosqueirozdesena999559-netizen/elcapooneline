@@ -22,9 +22,12 @@ from backend.auto_trader import (
     STATUS_ANALYZING,
     STATUS_CONNECTION_BACKOFF,
     STATUS_ORDER_REJECTED,
+    STATUS_PENDING_GALE_RESULT,
     STATUS_PENDING_RESULT,
+    STATUS_SENDING_GALE_ORDER,
     STATUS_PAYOUT_COOLDOWN,
     STATUS_SENDING_ORDER,
+    STATUS_WAITING_GALE_ENTRY,
     STATUS_WAITING_RECOVERY,
     STATUS_WAITING_ANALYSIS_WINDOW,
     STATUS_WAITING_ENTRY_WINDOW,
@@ -1595,6 +1598,8 @@ def candidate_pre_order_block_reason(candidate: dict[str, Any]) -> str | None:
 
 
 def order_attempt_candidates(state: Any, selected: dict[str, Any]) -> list[dict[str, Any]]:
+    if state.gale_pending or bool(selected.get("is_gale")):
+        return [dict(selected)]
     candidates = [dict(selected)]
     ranked_candidates = sorted(
         [candidate for candidate in state.candidates if isinstance(candidate, dict)],
@@ -2146,6 +2151,21 @@ async def fetch_trade_result(user_id: str, order_id: str) -> tuple[int, dict[str
 async def finish_monitored_trade(user_id: str, order_id: str, result: str, profit: float) -> None:
     async with auto_trader.lock(user_id):
         finalized, state = auto_trader.finish_trade(user_id, order_id, result, profit)
+        if not finalized and state.gale_pending:
+            logger.info(
+                "[TRADE_LOSS_GALE_TRIGGERED] user_id=%s order_id=%s gale_amount=%s multiplier=%s",
+                user_id,
+                order_id,
+                state.gale_amount,
+                state.martingale_multiplier,
+            )
+            logger.info(
+                "[WAITING_GALE_ENTRY] user_id=%s order_id=%s active=%s direction=%s",
+                user_id,
+                order_id,
+                (state.pending_signal or {}).get("symbol"),
+                state.gale_direction,
+            )
         if finalized and state.last_trade:
             logger.info(
                 "[RESULT_RECEIVED] user_id=%s order_id=%s result=%s profit=%s",
@@ -2174,6 +2194,16 @@ async def finish_monitored_trade(user_id: str, order_id: str, result: str, profi
                 user_id,
                 state.result_display_until,
             )
+            if state.last_trade.get("is_gale"):
+                logger.info(
+                    "[%s] user_id=%s order_id=%s parent_order_id=%s",
+                    state.cycle_result,
+                    user_id,
+                    order_id,
+                    state.last_trade.get("parent_order_id"),
+                )
+            elif result == "LOSS" and not state.martingale_enabled:
+                logger.info("[GALE_DISABLED_LOSS_FINAL] user_id=%s order_id=%s", user_id, order_id)
         persist_robot(user_id)
 
 
@@ -2281,7 +2311,7 @@ async def execute_robot_cycle(
                 return 200, build_robot_payload(state)
             selected = dict(state.pending_signal) if state.pending_signal else None
             if selected is not None and not state.operation_in_progress:
-                state.status = STATUS_WAITING_ENTRY_WINDOW
+                state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_ENTRY_WINDOW
                 state.rejection_reason = None
             seconds_until_next_cycle = state.to_dict()["seconds_until_next_cycle"]
             if (
@@ -2641,9 +2671,11 @@ async def execute_robot_cycle(
                         entry_window["current_candle_seconds"],
                         entry_window["entry_window_end_second"],
                     )
+                waiting_log = "[WAITING_GALE_ENTRY]" if state.gale_pending else "[WAITING_NEXT_CANDLE_ENTRY]"
                 logger.info(
-                    "[WAITING_NEXT_CANDLE_ENTRY] user_id=%s symbol=%s server_time=%s timeframe=%s "
-                    "current_candle_seconds=%s seconds_until_entry=%s window_start=%s window_end=%s",
+                    "%s user_id=%s symbol=%s server_time=%s timeframe=%s current_candle_seconds=%s "
+                    "seconds_until_entry=%s window_start=%s window_end=%s",
+                    waiting_log,
                     user_id,
                     selected.get("symbol"),
                     entry_window["server_time"],
@@ -2676,6 +2708,7 @@ async def execute_robot_cycle(
             last_friendly_error = NO_AVAILABLE_ASSET_ERROR
             attempted_unavailable = False
             for candidate in order_attempt_candidates(state, selected):
+                is_gale_order = bool(state.gale_pending or candidate.get("is_gale"))
                 if state.order_attempts >= MAX_ORDER_ATTEMPTS_PER_CYCLE:
                     break
                 validation_reason = candidate_pre_order_block_reason(candidate)
@@ -2696,10 +2729,11 @@ async def execute_robot_cycle(
                 symbol = str(selected["symbol"])
                 direction = str(selected.get("signal") or selected.get("direction"))
                 payout = selected.get("payout")
+                order_amount = state.gale_amount if is_gale_order else state.entry_value
                 order_body = {
                     "active": symbol,
                     "action": direction.lower(),
-                    "amount": state.entry_value,
+                    "amount": order_amount,
                     "expiration": entry_window["expiration_minutes"],
                 }
                 if state.account_mode == "REAL":
@@ -2707,18 +2741,20 @@ async def execute_robot_cycle(
 
                 state = auto_trader.start_sending_order(user_id)
                 logger.info(
-                    "[SENDING_ORDER] user_id=%s symbol=%s direction=%s",
+                    "[%s] user_id=%s symbol=%s direction=%s",
+                    "SENDING_GALE_ORDER" if is_gale_order else "SENDING_ORDER",
                     user_id,
                     symbol,
                     direction,
                 )
                 logger.info(
-                    "[ORDER_SEND_START] user_id=%s path=%s active=%s direction=%s amount=%s expiration=%s attempt=%s",
+                    "[%s] user_id=%s path=%s active=%s direction=%s amount=%s expiration=%s attempt=%s",
+                    "GALE_ORDER_SEND_START" if is_gale_order else "ORDER_SEND_START",
                     user_id,
                     order_path,
                     symbol,
                     direction,
-                    state.entry_value,
+                    order_amount,
                     entry_window["expiration_minutes"],
                     state.order_attempts,
                 )
@@ -2863,7 +2899,7 @@ async def execute_robot_cycle(
                     "mode": state.account_mode,
                     "active": symbol,
                     "direction": direction,
-                    "amount": state.entry_value,
+                    "amount": order_amount,
                     "confidence": selected["confidence"],
                     "payout": payout,
                     "expiration": state.timeframe,
@@ -2878,6 +2914,13 @@ async def execute_robot_cycle(
                     "cycle_id": state.cycle_id,
                     "order_attempts": state.order_attempts,
                     "fallback_candidate_used": state.fallback_candidate_used,
+                    "is_gale": is_gale_order,
+                    "gale_step": int(selected.get("gale_step") or (1 if is_gale_order else 0)),
+                    "parent_order_id": selected.get("parent_order_id") or state.gale_original_order_id,
+                    "cycle_result": None,
+                    "final_result": None,
+                    "original_amount": float(selected.get("original_amount") or state.entry_value),
+                    "gale_amount": float(selected.get("gale_amount") or order_amount),
                 }
                 trade["timestamp"] = trade["sent_at"]
                 state = auto_trader.record_trade(user_id, trade)
@@ -2898,7 +2941,8 @@ async def execute_robot_cycle(
                     trade["server_time_at_send"],
                 )
                 logger.info(
-                    "[ORDER_SEND_SUCCESS] user_id=%s order_id=%s status=%s",
+                    "[%s] user_id=%s order_id=%s status=%s",
+                    "GALE_ORDER_SEND_SUCCESS" if is_gale_order else "ORDER_SEND_SUCCESS",
                     user_id,
                     order_id,
                     state.status,
@@ -2909,10 +2953,11 @@ async def execute_robot_cycle(
                     order_id,
                     symbol,
                     direction,
-                    state.entry_value,
+                    order_amount,
                 )
                 logger.info(
-                    "[PENDING_RESULT] user_id=%s order_id=%s",
+                    "[%s] user_id=%s order_id=%s",
+                    "PENDING_GALE_RESULT" if is_gale_order else "PENDING_RESULT",
                     user_id,
                     order_id,
                 )

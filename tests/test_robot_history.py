@@ -18,8 +18,9 @@ def final_trade(
     *,
     finished_at: datetime,
     mode: str = "DEMO",
+    **extra,
 ) -> dict:
-    return {
+    trade = {
         "order_id": order_id,
         "mode": mode,
         "active": "EURUSD-OTC",
@@ -33,6 +34,8 @@ def final_trade(
         "finished_at": finished_at.isoformat(),
         "expiration": "M1",
     }
+    trade.update(extra)
+    return trade
 
 
 class RobotHistoryPersistenceTests(unittest.TestCase):
@@ -81,6 +84,36 @@ class RobotHistoryPersistenceTests(unittest.TestCase):
             items = persistence.load_trade_history("user-a", 1)
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0]["result"], "LOSS")
+
+    def test_history_persists_gale_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            persistence = SQLiteRobotPersistence(str(Path(directory) / "robot.db"))
+            now = datetime.now(timezone.utc)
+            persistence.save_trade_history(
+                "user-gale",
+                final_trade(
+                    "gale-order",
+                    "WIN",
+                    3.52,
+                    finished_at=now,
+                    is_gale=True,
+                    gale_step=1,
+                    parent_order_id="base-order",
+                    cycle_result="GALE_WIN",
+                    final_result="WIN",
+                    original_amount=2.0,
+                    gale_amount=4.0,
+                ),
+            )
+
+            items = persistence.load_trade_history("user-gale", 1)
+
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["parent_order_id"], "base-order")
+            self.assertEqual(items[0]["cycle_result"], "GALE_WIN")
+            self.assertEqual(items[0]["final_result"], "WIN")
+            self.assertEqual(items[0]["original_amount"], 2.0)
+            self.assertEqual(items[0]["gale_amount"], 4.0)
 
 
 class RobotHistoryEndpointTests(unittest.IsolatedAsyncioTestCase):

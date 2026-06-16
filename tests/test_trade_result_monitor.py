@@ -5,9 +5,12 @@ from unittest.mock import AsyncMock, patch
 
 from backend.auto_trader import (
     AutoTrader,
+    STATUS_GALE_RESULT_RECEIVED,
+    STATUS_PENDING_GALE_RESULT,
     STATUS_ANALYZING,
     STATUS_PENDING_RESULT,
     STATUS_RESULT_RECEIVED,
+    STATUS_WAITING_GALE_ENTRY,
     STATUS_WAITING_NEXT_CYCLE,
     parse_datetime,
     utc_now,
@@ -80,6 +83,97 @@ class AutoTraderResultTests(unittest.TestCase):
         self.assertEqual(state.losses, 1)
         self.assertEqual(state.profit, -2.0)
         self.assertEqual(state.last_trade["profit"], -2.0)
+
+    def test_loss_triggers_single_gale_when_enabled(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-gale")
+        state.martingale_enabled = True
+        state.martingale_multiplier = 2
+        trader.record_trade("user-gale", pending_trade("201", amount=2.0))
+
+        finalized, state = trader.finish_trade("user-gale", "201", "LOSS", 0)
+
+        self.assertFalse(finalized)
+        self.assertEqual(state.status, STATUS_WAITING_GALE_ENTRY)
+        self.assertEqual(state.losses, 0)
+        self.assertTrue(state.gale_pending)
+        self.assertTrue(state.gale_active)
+        self.assertEqual(state.gale_step, 1)
+        self.assertEqual(state.gale_amount, 4.0)
+        self.assertEqual(state.gale_direction, "CALL")
+        self.assertEqual(state.gale_original_order_id, "201")
+        self.assertEqual(state.pending_signal["symbol"], "EURUSD-OTC")
+        self.assertEqual(state.pending_signal["signal"], "CALL")
+        self.assertEqual(state.pending_signal["gale_amount"], 4.0)
+        payload = state.to_dict()
+        self.assertTrue(payload["martingale_enabled"])
+        self.assertTrue(payload["gale_pending"])
+        self.assertEqual(payload["gale_step"], 1)
+        self.assertEqual(payload["gale_amount"], 4.0)
+        self.assertTrue(payload["gale_active"])
+        self.assertEqual(payload["gale_direction"], "CALL")
+        self.assertEqual(payload["gale_original_order_id"], "201")
+        self.assertIsNotNone(payload["gale_parent_trade"])
+
+    def test_gale_win_counts_final_win_and_returns_result_status(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-gale-win")
+        state.martingale_enabled = True
+        state.martingale_multiplier = 2
+        trader.record_trade("user-gale-win", pending_trade("301", amount=2.0))
+        trader.finish_trade("user-gale-win", "301", "LOSS", 0)
+        trader.record_trade(
+            "user-gale-win",
+            {
+                **pending_trade("302", amount=4.0),
+                "is_gale": True,
+                "gale_step": 1,
+                "parent_order_id": "301",
+                "original_amount": 2.0,
+                "gale_amount": 4.0,
+            },
+        )
+
+        finalized, state = trader.finish_trade("user-gale-win", "302", "WIN", 3.52)
+
+        self.assertTrue(finalized)
+        self.assertEqual(state.status, STATUS_GALE_RESULT_RECEIVED)
+        self.assertEqual(state.wins, 1)
+        self.assertEqual(state.losses, 0)
+        self.assertEqual(state.cycle_result, "GALE_WIN")
+        self.assertEqual(state.last_trade["parent_order_id"], "301")
+        self.assertTrue(state.last_trade["is_gale"])
+        self.assertEqual(state.last_trade["final_result"], "WIN")
+        self.assertEqual(state.last_trade["original_amount"], 2.0)
+        self.assertEqual(state.last_trade["gale_amount"], 4.0)
+
+    def test_gale_loss_counts_single_final_loss(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-gale-loss")
+        state.martingale_enabled = True
+        state.martingale_multiplier = 2
+        trader.record_trade("user-gale-loss", pending_trade("401", amount=2.0))
+        trader.finish_trade("user-gale-loss", "401", "LOSS", 0)
+        gale_state = trader.record_trade(
+            "user-gale-loss",
+            {
+                **pending_trade("402", amount=4.0),
+                "is_gale": True,
+                "gale_step": 1,
+                "parent_order_id": "401",
+                "original_amount": 2.0,
+                "gale_amount": 4.0,
+            },
+        )
+
+        self.assertEqual(gale_state.status, STATUS_PENDING_GALE_RESULT)
+        finalized, state = trader.finish_trade("user-gale-loss", "402", "LOSS", 0)
+
+        self.assertTrue(finalized)
+        self.assertEqual(state.losses, 1)
+        self.assertEqual(state.wins, 0)
+        self.assertEqual(state.profit, -4.0)
+        self.assertEqual(state.cycle_result, "GALE_LOSS")
 
     def test_history_keeps_only_last_one_hundred_trades(self) -> None:
         trader = AutoTrader()

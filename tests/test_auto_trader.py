@@ -8,11 +8,15 @@ from unittest.mock import AsyncMock, patch
 from backend.auto_trader import (
     AutoTrader,
     STATUS_ACCOUNT_DISCONNECTED,
+    STATUS_GALE_RESULT_RECEIVED,
     STATUS_ORDER_REJECTED,
+    STATUS_PENDING_GALE_RESULT,
     STATUS_PENDING_RESULT,
     STATUS_RESULT_RECEIVED,
+    STATUS_SENDING_GALE_ORDER,
     STATUS_SENDING_ORDER,
     STATUS_STOPPED,
+    STATUS_WAITING_GALE_ENTRY,
     STATUS_WAITING_NEXT_CYCLE,
     utc_now,
 )
@@ -85,6 +89,27 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertEqual(rejected.status, STATUS_ORDER_REJECTED)
         self.assertNotEqual(rejected.status, "ANALYZING")
         self.assertFalse(rejected.operation_in_progress)
+
+    def test_gale_uses_dedicated_waiting_and_sending_statuses(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-gale-status")
+        state.gale_pending = True
+        state.pending_signal = {
+            "symbol": "EURUSD-OTC",
+            "signal": "PUT",
+            "direction": "PUT",
+            "confidence": 92,
+            "payout": 90,
+            "is_gale": True,
+            "gale_amount": 4.0,
+        }
+
+        can_run, waiting = trader.prepare_cycle("user-gale-status")
+        sending = trader.start_sending_order("user-gale-status")
+
+        self.assertTrue(can_run)
+        self.assertEqual(waiting.status, STATUS_WAITING_GALE_ENTRY)
+        self.assertEqual(sending.status, STATUS_SENDING_GALE_ORDER)
 
     def test_disabled_robot_never_opens_cycle(self) -> None:
         trader = AutoTrader()
@@ -512,6 +537,30 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["stop_loss"], 35)
         self.assertEqual(main.auto_trader.get(user_id).stop_win, 120)
         self.assertEqual(main.auto_trader.get(user_id).stop_loss, 35)
+        persist.assert_called_once_with(user_id)
+
+    async def test_robot_config_accepts_martingale_fields(self) -> None:
+        user_id = "user-martingale-config"
+        body = main.RobotConfigUpdate.model_validate(
+            {
+                "martingaleEnabled": True,
+                "martingaleSteps": 1,
+                "martingaleMultiplier": 2.5,
+            }
+        )
+
+        with (
+            patch.object(main, "persist_robot") as persist,
+            patch.object(main, "ensure_robot_worker"),
+            patch.object(main, "stop_robot_worker", new=AsyncMock()),
+        ):
+            response = await main.robot_config(body, {"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(data["martingale_enabled"])
+        self.assertEqual(data["martingale_steps"], 1)
+        self.assertEqual(data["martingale_multiplier"], 2.5)
         persist.assert_called_once_with(user_id)
 
     async def test_user_isolation_debug_reports_current_user_only(self) -> None:

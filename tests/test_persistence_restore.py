@@ -261,6 +261,9 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
                     "allow_real": False,
                     "confirm_real": False,
                     "max_entries_per_cycle": 1,
+                    "martingale_enabled": True,
+                    "martingale_steps": 1,
+                    "martingale_multiplier": 2.5,
                 },
             )
             persistence.save_settings(
@@ -277,6 +280,9 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
                     "allow_real": False,
                     "confirm_real": False,
                     "max_entries_per_cycle": 1,
+                    "martingale_enabled": False,
+                    "martingale_steps": 1,
+                    "martingale_multiplier": 2,
                 },
             )
 
@@ -286,8 +292,11 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(settings_a["entry_value"], 15)
             self.assertEqual(settings_a["stop_loss"], 25)
+            self.assertTrue(settings_a["martingale_enabled"])
+            self.assertEqual(settings_a["martingale_multiplier"], 2.5)
             self.assertEqual(settings_b["entry_value"], 2)
             self.assertEqual(settings_b["stop_loss"], 12)
+            self.assertFalse(settings_b["martingale_enabled"])
             self.assertIsNone(restarted.load_settings("user-new"))
 
     async def test_robot_state_loads_dedicated_settings_after_memory_reset(self) -> None:

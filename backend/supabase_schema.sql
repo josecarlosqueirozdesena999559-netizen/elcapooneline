@@ -112,6 +112,9 @@ create table if not exists public.robot_user_settings (
   allow_real boolean not null default false,
   confirm_real boolean not null default false,
   max_entries_per_cycle integer not null default 1,
+  martingale_enabled boolean not null default false,
+  martingale_steps integer not null default 1,
+  martingale_multiplier numeric not null default 2,
   created_at timestamptz not null default timezone('utc'::text, now()),
   updated_at timestamptz not null default timezone('utc'::text, now())
 );
@@ -128,6 +131,9 @@ alter table public.robot_user_settings
   add column if not exists allow_real boolean not null default false,
   add column if not exists confirm_real boolean not null default false,
   add column if not exists max_entries_per_cycle integer not null default 1,
+  add column if not exists martingale_enabled boolean not null default false,
+  add column if not exists martingale_steps integer not null default 1,
+  add column if not exists martingale_multiplier numeric not null default 2,
   add column if not exists created_at timestamptz not null default timezone('utc'::text, now()),
   add column if not exists updated_at timestamptz not null default timezone('utc'::text, now());
 
@@ -203,8 +209,24 @@ create table if not exists public.robot_trade_history (
   profit numeric not null,
   opened_at timestamptz not null,
   finished_at timestamptz not null,
-  timeframe text not null
+  timeframe text not null,
+  is_gale boolean not null default false,
+  gale_step integer not null default 0,
+  parent_order_id text,
+  cycle_result text,
+  final_result text,
+  original_amount numeric not null default 0,
+  gale_amount numeric not null default 0
 );
+
+alter table public.robot_trade_history
+  add column if not exists is_gale boolean not null default false,
+  add column if not exists gale_step integer not null default 0,
+  add column if not exists parent_order_id text,
+  add column if not exists cycle_result text,
+  add column if not exists final_result text,
+  add column if not exists original_amount numeric not null default 0,
+  add column if not exists gale_amount numeric not null default 0;
 
 create unique index if not exists robot_trade_history_user_order_key
   on public.robot_trade_history (user_id, order_id);

@@ -21,6 +21,10 @@ STATUS_ENTRY_SENT = "ENTRY_SENT"
 STATUS_SENDING_ORDER = "SENDING_ORDER"
 STATUS_PENDING_RESULT = "PENDING_RESULT"
 STATUS_RESULT_RECEIVED = "RESULT_RECEIVED"
+STATUS_WAITING_GALE_ENTRY = "WAITING_GALE_ENTRY"
+STATUS_SENDING_GALE_ORDER = "SENDING_GALE_ORDER"
+STATUS_PENDING_GALE_RESULT = "PENDING_GALE_RESULT"
+STATUS_GALE_RESULT_RECEIVED = "GALE_RESULT_RECEIVED"
 STATUS_ORDER_REJECTED = "ORDER_REJECTED"
 STATUS_ERROR = "ERROR"
 STATUS_REAL_TRADING_LOCKED = "REAL_TRADING_LOCKED"
@@ -93,6 +97,9 @@ class RobotConfigUpdate(BaseModel):
     max_entries_per_cycle: int | None = Field(default=None, ge=1, le=1, validation_alias=AliasChoices("max_entries_per_cycle", "maxEntriesPerCycle"))
     allow_real: bool | None = Field(default=None, validation_alias=AliasChoices("allow_real", "allowReal"))
     confirm_real: bool | None = Field(default=None, validation_alias=AliasChoices("confirm_real", "confirmReal"))
+    martingale_enabled: bool | None = Field(default=None, validation_alias=AliasChoices("martingale_enabled", "martingaleEnabled"))
+    martingale_steps: int | None = Field(default=None, ge=1, le=1, validation_alias=AliasChoices("martingale_steps", "martingaleSteps"))
+    martingale_multiplier: float | None = Field(default=None, gt=0, validation_alias=AliasChoices("martingale_multiplier", "martingaleMultiplier"))
 
 
 @dataclass
@@ -110,6 +117,9 @@ class RobotState:
     max_entries_per_cycle: int = 1
     allow_real: bool = False
     confirm_real: bool = False
+    martingale_enabled: bool = False
+    martingale_steps: int = 1
+    martingale_multiplier: float = 2.0
     wins: int = 0
     losses: int = 0
     profit: float = 0.0
@@ -153,6 +163,14 @@ class RobotState:
     expiration_seconds: int = 60
     last_rejection_reason: str | None = None
     last_order_error: str | None = None
+    gale_pending: bool = False
+    gale_step: int = 0
+    gale_amount: float = 0.0
+    gale_active: bool = False
+    gale_direction: str | None = None
+    gale_original_order_id: str | None = None
+    gale_parent_trade: dict[str, Any] | None = None
+    cycle_result: str | None = None
     order_attempts: int = 0
     fallback_candidate_used: bool = False
     blocked_filters: list[str] = field(default_factory=list)
@@ -209,10 +227,25 @@ class RobotState:
             data["last_analysis_result"] = self.last_analysis_result = None
             data["analysis_message"] = self.analysis_message = None
         if (
-            self.status == STATUS_RESULT_RECEIVED
+            self.status in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED}
             and self.result_display_until is not None
             and now >= self.result_display_until
         ):
+            if self.status == STATUS_GALE_RESULT_RECEIVED:
+                self.gale_pending = False
+                self.gale_step = 0
+                self.gale_amount = 0.0
+                self.gale_active = False
+                self.gale_direction = None
+                self.gale_original_order_id = None
+                self.gale_parent_trade = None
+                data["gale_pending"] = False
+                data["gale_step"] = 0
+                data["gale_amount"] = 0.0
+                data["gale_active"] = False
+                data["gale_direction"] = None
+                data["gale_original_order_id"] = None
+                data["gale_parent_trade"] = None
             self.status = STATUS_WAITING_NEXT_CYCLE if self.enabled else STATUS_STOPPED
             self.next_cycle_at = now + timedelta(minutes=self.cycle_minutes) if self.enabled else None
             self.rejection_reason = None
@@ -269,7 +302,7 @@ class RobotState:
         if data["status"] == STATUS_WAITING_NEXT_CYCLE:
             display_countdown_label = "Entrada em"
             display_countdown_seconds = max(0, int(data["seconds_until_next_cycle"]))
-        elif data["status"] == STATUS_WAITING_NEXT_CANDLE_ENTRY:
+        elif data["status"] in {STATUS_WAITING_NEXT_CANDLE_ENTRY, STATUS_WAITING_GALE_ENTRY}:
             display_countdown_label = "Entrada no inicio da proxima vela em"
             display_countdown_seconds = max(0, int(data["seconds_until_entry_window"]))
         elif data["status"] in TEMPORARY_WAIT_STATUSES:
@@ -283,14 +316,14 @@ class RobotState:
         data["voice_message"] = None
         data["voice_event_id"] = None
         voice_signal = self.pending_signal or self.best_candidate
-        if self.status == STATUS_WAITING_NEXT_CANDLE_ENTRY and voice_signal:
+        if self.status in {STATUS_WAITING_NEXT_CANDLE_ENTRY, STATUS_WAITING_GALE_ENTRY} and voice_signal:
             data["status_message"] = "Sinal preparado"
             data["voice_message"] = "Entrada preparada. Vamos entrar no inicio da proxima vela."
             symbol = str(voice_signal.get("symbol") or "")
             direction = str(voice_signal.get("direction") or voice_signal.get("signal") or "")
             score = int(voice_signal.get("strategy_score") or voice_signal.get("score") or 0)
             data["voice_event_id"] = f"{self.cycle_id or ''}:{symbol}:{direction}:{score}:prepared"
-        if self.status == STATUS_SENDING_ORDER and voice_signal:
+        if self.status in {STATUS_SENDING_ORDER, STATUS_SENDING_GALE_ORDER} and voice_signal:
             symbol = str(voice_signal.get("symbol") or "")
             direction = str(voice_signal.get("direction") or voice_signal.get("signal") or "")
             score = int(voice_signal.get("strategy_score") or voice_signal.get("score") or 0)
@@ -435,16 +468,20 @@ class AutoTrader:
             setattr(state, key, value)
         if state.status == "WAITING_ENTRY_WINDOW":
             state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
+        if state.status == STATUS_PENDING_RESULT and state.gale_active:
+            state.status = STATUS_PENDING_GALE_RESULT
+        if state.status == STATUS_RESULT_RECEIVED and state.cycle_result in {"GALE_WIN", "GALE_LOSS"}:
+            state.status = STATUS_GALE_RESULT_RECEIVED
 
         result_visible = (
-            state.status == STATUS_RESULT_RECEIVED
+            state.status in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED}
             and state.result_display_until is not None
             and utc_now() < state.result_display_until
         )
         if result_visible:
             state.operation_in_progress = False
         elif state.enabled and state.pending_signal:
-            state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
+            state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_NEXT_CANDLE_ENTRY
             state.rejection_reason = None
         elif state.enabled and not state.operation_in_progress:
             state.status = STATUS_WAITING_NEXT_CYCLE
@@ -472,6 +509,8 @@ class AutoTrader:
     def update_config(self, user_id: str, update: RobotConfigUpdate) -> RobotState:
         state = self.get(user_id)
         changes = update.model_dump(exclude_none=True)
+        if "martingale_steps" in changes:
+            changes["martingale_steps"] = 1
         for key, value in changes.items():
             setattr(state, key, value)
 
@@ -515,6 +554,14 @@ class AutoTrader:
         state.analysis_started_at = None
         state.analysis_result = None
         state.operation_in_progress = False
+        state.gale_pending = False
+        state.gale_step = 0
+        state.gale_amount = 0.0
+        state.gale_active = False
+        state.gale_direction = None
+        state.gale_original_order_id = None
+        state.gale_parent_trade = None
+        state.cycle_result = None
         state.entry_window_open = False
         state.blocked_filters = []
         state.approved_filters = []
@@ -554,9 +601,11 @@ class AutoTrader:
                 return False, state
             state.status = STATUS_WAITING_NEXT_CYCLE
             state.rejection_reason = None
-        if state.status == STATUS_RESULT_RECEIVED and state.result_display_until is not None:
+        if state.status in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED} and state.result_display_until is not None:
             if now < state.result_display_until:
                 return False, state
+            if state.status == STATUS_GALE_RESULT_RECEIVED:
+                self._clear_gale_state(state)
             state.status = STATUS_WAITING_NEXT_CYCLE
             state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
             state.pending_signal = None
@@ -573,15 +622,15 @@ class AutoTrader:
             state.metrics = {}
         last_trade_result = str((state.last_trade or {}).get("result") or "").upper()
         result_waiting = (
-            state.status == STATUS_PENDING_RESULT
+            state.status in {STATUS_PENDING_RESULT, STATUS_PENDING_GALE_RESULT}
             and last_trade_result not in {"WIN", "LOSS", "TIMEOUT"}
         )
         if state.operation_in_progress or result_waiting:
             state.operation_in_progress = True
-            state.status = STATUS_PENDING_RESULT
+            state.status = STATUS_PENDING_GALE_RESULT if state.gale_active else STATUS_PENDING_RESULT
             return False, state
         if state.pending_signal:
-            state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
+            state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_NEXT_CANDLE_ENTRY
             return True, state
         if state.next_cycle_at is not None and now < state.next_cycle_at:
             state.status = STATUS_WAITING_NEXT_CYCLE
@@ -811,7 +860,7 @@ class AutoTrader:
         }
         state.last_signal = dict(pending_signal)
         state.pending_signal = pending_signal
-        state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
+        state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_NEXT_CANDLE_ENTRY
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.last_analysis_at = utc_now()
@@ -951,6 +1000,7 @@ class AutoTrader:
         state = self.get(user_id)
         state.pending_signal = None
         state.last_signal = None
+        self._clear_gale_state(state)
         state.status = STATUS_ANALYZING if analyze else (
             STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
         )
@@ -1054,9 +1104,14 @@ class AutoTrader:
 
     def start_sending_order(self, user_id: str) -> RobotState:
         state = self.get(user_id)
-        if state.status not in {STATUS_WAITING_NEXT_CANDLE_ENTRY, STATUS_SENDING_ORDER} or not state.pending_signal:
+        if state.status not in {
+            STATUS_WAITING_NEXT_CANDLE_ENTRY,
+            STATUS_WAITING_GALE_ENTRY,
+            STATUS_SENDING_ORDER,
+            STATUS_SENDING_GALE_ORDER,
+        } or not state.pending_signal:
             raise RuntimeError("INVALID_ORDER_STATE_TRANSITION")
-        state.status = STATUS_SENDING_ORDER
+        state.status = STATUS_SENDING_GALE_ORDER if state.gale_pending else STATUS_SENDING_ORDER
         state.rejection_reason = None
         state.rejected_at = None
         state.last_order_error = None
@@ -1083,6 +1138,7 @@ class AutoTrader:
         state.entry_window_open = False
         state.seconds_until_entry_window = 0
         state.last_analysis_result = STATUS_ORDER_REJECTED
+        self._clear_gale_state(state)
         return state
 
     def record_trade(self, user_id: str, trade: dict[str, Any]) -> RobotState:
@@ -1108,9 +1164,15 @@ class AutoTrader:
         state.result_received_at = None
         state.result_display_until = None
         state.operation_in_progress = True
-        state.status = STATUS_PENDING_RESULT
+        is_gale = bool(trade.get("is_gale"))
+        state.status = STATUS_PENDING_GALE_RESULT if is_gale else STATUS_PENDING_RESULT
         state.rejection_reason = None
         state.last_order_error = None
+        if is_gale:
+            state.gale_pending = False
+            state.gale_active = True
+            state.gale_step = int(trade.get("gale_step") or 1)
+            state.gale_amount = float(trade.get("gale_amount") or trade.get("amount") or 0)
         return state
 
     def lock_real(self, user_id: str, reason: str = "REAL_TRADING_LOCKED") -> RobotState:
@@ -1136,7 +1198,7 @@ class AutoTrader:
         state.entry_window_open = (
             bool(window["entry_window_open"])
             and not waiting_next_cycle
-            and state.status != STATUS_RESULT_RECEIVED
+            and state.status not in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED}
         )
         state.seconds_until_entry_window = int(window["seconds_until_entry_window"])
         state.current_candle_seconds = float(window["current_candle_seconds"])
@@ -1159,16 +1221,111 @@ class AutoTrader:
             and not state.operation_in_progress
             and state.pending_signal
         ):
-            state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
+            state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_NEXT_CANDLE_ENTRY
             state.rejection_reason = None
         elif (
             state.entry_window_open
-            and state.status == STATUS_WAITING_NEXT_CANDLE_ENTRY
+            and state.status in {STATUS_WAITING_NEXT_CANDLE_ENTRY, STATUS_WAITING_GALE_ENTRY}
             and not state.pending_signal
         ):
             state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
             state.rejection_reason = None
         return state
+
+    def _build_gale_signal(self, state: RobotState, trade: dict[str, Any], gale_amount: float) -> dict[str, Any]:
+        direction = str(trade.get("direction") or trade.get("signal") or "").upper()
+        return {
+            "symbol": str(trade.get("active") or ""),
+            "direction": direction,
+            "signal": direction,
+            "confidence": float(trade.get("confidence") or 0),
+            "payout": float(trade.get("payout") or 0),
+            "strategy_score": int(trade.get("strategy_score") or trade.get("score") or 0),
+            "score": int(trade.get("strategy_score") or trade.get("score") or 0),
+            "reason": trade.get("entry_reason") or trade.get("reason") or "GALE_1",
+            "entry_reason": trade.get("entry_reason") or trade.get("reason") or "GALE_1",
+            "candle_reading": trade.get("candle_reading"),
+            "block_reasons": list(trade.get("block_reasons") or []),
+            "metrics": dict(trade.get("metrics") or {}),
+            "strategy_name": trade.get("strategy_name") or "Martingale G1",
+            "strategy_reason": trade.get("strategy_reason") or trade.get("entry_reason") or "Martingale G1",
+            "used_strategies": list(trade.get("used_strategies") or []),
+            "timeframe": str(trade.get("timeframe") or trade.get("expiration") or state.timeframe),
+            "quality_score": int(trade.get("quality_score") or trade.get("strategy_score") or trade.get("score") or 0),
+            "blocked_filters": list(trade.get("blocked_filters") or []),
+            "approved_filters": list(trade.get("approved_filters") or []),
+            "strategy_mode": trade.get("strategy_mode", state.strategy_mode),
+            "cycle_id": state.cycle_id,
+            "created_at": utc_now().isoformat(),
+            "target_entry_second": state.buy_target_second,
+            "entry_window_start_second": state.entry_window_start_second,
+            "entry_window_end_second": state.entry_window_end_second,
+            "is_gale": True,
+            "gale_step": 1,
+            "gale_amount": gale_amount,
+            "parent_order_id": str(trade.get("order_id") or "").strip(),
+            "original_amount": float(trade.get("amount") or 0),
+        }
+
+    def trigger_gale(self, user_id: str, order_id: Any, profit: float) -> tuple[bool, RobotState]:
+        state = self.get(user_id)
+        normalized_order_id = str(order_id or "").strip()
+        completed = self._completed_order_ids.setdefault(user_id, set())
+        if not normalized_order_id or normalized_order_id in completed:
+            return False, state
+        if not state.operation_in_progress or not state.last_trade:
+            return False, state
+        if str(state.last_trade.get("order_id") or "").strip() != normalized_order_id:
+            return False, state
+
+        parent_trade = dict(state.last_trade)
+        amount = float(parent_trade.get("amount") or 0)
+        loss_profit = float(profit)
+        if loss_profit >= 0:
+            loss_profit = -amount
+        finished_at = utc_now()
+        parent_trade.update(
+            {
+                "result": "LOSS",
+                "profit": round(loss_profit, 2),
+                "finished_at": finished_at.isoformat(),
+                "final_result": "LOSS",
+                "cycle_result": None,
+            }
+        )
+        gale_amount = round(amount * float(state.martingale_multiplier or 2), 2)
+        completed.add(normalized_order_id)
+        state.last_trade = parent_trade
+        state.operation_in_progress = False
+        state.pending_signal = self._build_gale_signal(state, parent_trade, gale_amount)
+        state.last_signal = dict(state.pending_signal)
+        state.status = STATUS_WAITING_GALE_ENTRY
+        state.rejection_reason = None
+        state.last_rejection_reason = None
+        state.result_received_at = None
+        state.result_display_until = None
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        state.next_cycle_at = None
+        state.gale_pending = True
+        state.gale_active = True
+        state.gale_step = 1
+        state.gale_amount = gale_amount
+        state.gale_direction = str(parent_trade.get("direction") or "").upper() or None
+        state.gale_original_order_id = normalized_order_id
+        state.gale_parent_trade = dict(parent_trade)
+        state.cycle_result = None
+        return True, state
+
+    def _clear_gale_state(self, state: RobotState, *, preserve_context: bool = False) -> None:
+        state.gale_pending = False
+        state.gale_active = False
+        if not preserve_context:
+            state.gale_step = 0
+            state.gale_amount = 0.0
+            state.gale_direction = None
+            state.gale_original_order_id = None
+            state.gale_parent_trade = None
 
     def finish_trade(self, user_id: str, order_id: Any, result: str, profit: float) -> tuple[bool, RobotState]:
         state = self.get(user_id)
@@ -1186,15 +1343,31 @@ class AutoTrader:
             return False, state
 
         trade = dict(state.last_trade)
+        is_gale_trade = bool(trade.get("is_gale"))
+        should_trigger_gale = (
+            normalized_result == "LOSS"
+            and not is_gale_trade
+            and state.martingale_enabled
+            and int(state.martingale_steps or 1) >= 1
+            and not state.gale_active
+        )
+        if should_trigger_gale:
+            triggered, triggered_state = self.trigger_gale(user_id, normalized_order_id, profit)
+            if triggered:
+                return False, triggered_state
+            return False, state
+
         amount = float(trade.get("amount") or 0)
         trade_profit = float(profit)
         if normalized_result == "WIN":
             state.wins += 1
             state.profit += trade_profit
+            state.cycle_result = "GALE_WIN" if is_gale_trade else "WIN"
         else:
             state.losses += 1
             trade_profit = trade_profit if trade_profit < 0 else -amount
             state.profit += trade_profit
+            state.cycle_result = "GALE_LOSS" if is_gale_trade else "LOSS"
 
         finished_at = utc_now()
         trade.update(
@@ -1202,12 +1375,24 @@ class AutoTrader:
                 "result": normalized_result,
                 "profit": round(trade_profit, 2),
                 "finished_at": finished_at.isoformat(),
+                "cycle_result": state.cycle_result,
+                "final_result": normalized_result,
+                "is_gale": is_gale_trade,
+                "gale_step": int(trade.get("gale_step") or (1 if is_gale_trade else 0)),
+                "parent_order_id": trade.get("parent_order_id") or state.gale_original_order_id,
+                "original_amount": float(
+                    trade.get("original_amount")
+                    or (state.gale_parent_trade or {}).get("amount")
+                    or trade.get("amount")
+                    or 0
+                ),
+                "gale_amount": float(trade.get("gale_amount") or (trade.get("amount") if is_gale_trade else 0) or 0),
             }
         )
         completed.add(normalized_order_id)
         state.last_trade = trade
         state.operation_in_progress = False
-        state.status = STATUS_RESULT_RECEIVED
+        state.status = STATUS_GALE_RESULT_RECEIVED if is_gale_trade else STATUS_RESULT_RECEIVED
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.result_received_at = finished_at
@@ -1216,6 +1401,7 @@ class AutoTrader:
         state.seconds_until_entry_window = 0
         state.next_cycle_at = None
         state.profit = round(state.profit, 2)
+        self._clear_gale_state(state, preserve_context=True)
         history = self._histories.setdefault(user_id, [])
         history.append(dict(trade))
         del history[:-100]
@@ -1249,6 +1435,7 @@ class AutoTrader:
         state.last_rejection_reason = "TRADE_RESULT_TIMEOUT"
         state.entry_window_open = False
         state.seconds_until_entry_window = 0
+        self._clear_gale_state(state)
         self._schedule_next_cycle(state, finished_at)
         history = self._histories.setdefault(user_id, [])
         history.append(dict(trade))
