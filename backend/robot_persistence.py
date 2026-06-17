@@ -32,6 +32,9 @@ ROBOT_SETTING_FIELDS = (
     "martingale_enabled",
     "martingale_steps",
     "martingale_multiplier",
+    "ai_analysis_enabled",
+    "ai_confirmation_required",
+    "ai_min_confidence",
 )
 
 
@@ -146,8 +149,9 @@ class SQLiteRobotPersistence(RobotPersistence):
                     min_confidence, min_payout, strategy_mode, account_mode,
                     allow_real, confirm_real, max_entries_per_cycle,
                     martingale_enabled, martingale_steps, martingale_multiplier,
+                    ai_analysis_enabled, ai_confirmation_required, ai_min_confidence,
                     created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(user_id) do update set
                     entry_value = excluded.entry_value,
                     stop_win = excluded.stop_win,
@@ -163,6 +167,9 @@ class SQLiteRobotPersistence(RobotPersistence):
                     martingale_enabled = excluded.martingale_enabled,
                     martingale_steps = excluded.martingale_steps,
                     martingale_multiplier = excluded.martingale_multiplier,
+                    ai_analysis_enabled = excluded.ai_analysis_enabled,
+                    ai_confirmation_required = excluded.ai_confirmation_required,
+                    ai_min_confidence = excluded.ai_min_confidence,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -181,6 +188,9 @@ class SQLiteRobotPersistence(RobotPersistence):
                     int(bool(values.get("martingale_enabled", False))),
                     values.get("martingale_steps", 1),
                     values.get("martingale_multiplier", 2),
+                    int(bool(values.get("ai_analysis_enabled", False))),
+                    int(bool(values.get("ai_confirmation_required", True))),
+                    values.get("ai_min_confidence", 70),
                     now,
                     now,
                 ),
@@ -194,7 +204,8 @@ class SQLiteRobotPersistence(RobotPersistence):
                 select entry_value, stop_win, stop_loss, cycle_minutes,
                        min_confidence, min_payout, strategy_mode, account_mode,
                        allow_real, confirm_real, max_entries_per_cycle,
-                       martingale_enabled, martingale_steps, martingale_multiplier
+                       martingale_enabled, martingale_steps, martingale_multiplier,
+                       ai_analysis_enabled, ai_confirmation_required, ai_min_confidence
                 from robot_user_settings where user_id = ?
                 """,
                 (user_id,),
@@ -205,6 +216,8 @@ class SQLiteRobotPersistence(RobotPersistence):
         settings["allow_real"] = bool(settings["allow_real"])
         settings["confirm_real"] = bool(settings["confirm_real"])
         settings["martingale_enabled"] = bool(settings["martingale_enabled"])
+        settings["ai_analysis_enabled"] = bool(settings["ai_analysis_enabled"])
+        settings["ai_confirmation_required"] = bool(settings["ai_confirmation_required"])
         return settings
 
     def save_trade(self, user_id: str, trade: dict[str, Any]) -> None:
@@ -368,6 +381,9 @@ class SQLiteRobotPersistence(RobotPersistence):
                     martingale_enabled integer not null default 0,
                     martingale_steps integer not null default 1,
                     martingale_multiplier real not null default 2,
+                    ai_analysis_enabled integer not null default 0,
+                    ai_confirmation_required integer not null default 1,
+                    ai_min_confidence integer not null default 70,
                     created_at text not null,
                     updated_at text not null
                 );
@@ -417,6 +433,9 @@ class SQLiteRobotPersistence(RobotPersistence):
             self._ensure_column(connection, "robot_user_settings", "martingale_enabled", "integer not null default 0")
             self._ensure_column(connection, "robot_user_settings", "martingale_steps", "integer not null default 1")
             self._ensure_column(connection, "robot_user_settings", "martingale_multiplier", "real not null default 2")
+            self._ensure_column(connection, "robot_user_settings", "ai_analysis_enabled", "integer not null default 0")
+            self._ensure_column(connection, "robot_user_settings", "ai_confirmation_required", "integer not null default 1")
+            self._ensure_column(connection, "robot_user_settings", "ai_min_confidence", "integer not null default 70")
             self._ensure_column(connection, "robot_trade_history", "is_gale", "integer not null default 0")
             self._ensure_column(connection, "robot_trade_history", "gale_step", "integer not null default 0")
             self._ensure_column(connection, "robot_trade_history", "parent_order_id", "text")

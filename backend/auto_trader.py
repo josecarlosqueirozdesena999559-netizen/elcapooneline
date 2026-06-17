@@ -100,6 +100,9 @@ class RobotConfigUpdate(BaseModel):
     martingale_enabled: bool | None = Field(default=None, validation_alias=AliasChoices("martingale_enabled", "martingaleEnabled"))
     martingale_steps: int | None = Field(default=None, ge=1, le=1, validation_alias=AliasChoices("martingale_steps", "martingaleSteps"))
     martingale_multiplier: float | None = Field(default=None, gt=0, validation_alias=AliasChoices("martingale_multiplier", "martingaleMultiplier"))
+    ai_analysis_enabled: bool | None = Field(default=None, validation_alias=AliasChoices("ai_analysis_enabled", "aiAnalysisEnabled"))
+    ai_confirmation_required: bool | None = Field(default=None, validation_alias=AliasChoices("ai_confirmation_required", "aiConfirmationRequired"))
+    ai_min_confidence: int | None = Field(default=None, ge=0, le=100, validation_alias=AliasChoices("ai_min_confidence", "aiMinConfidence"))
 
 
 @dataclass
@@ -120,6 +123,9 @@ class RobotState:
     martingale_enabled: bool = False
     martingale_steps: int = 1
     martingale_multiplier: float = 2.0
+    ai_analysis_enabled: bool = False
+    ai_confirmation_required: bool = True
+    ai_min_confidence: int = 70
     wins: int = 0
     losses: int = 0
     profit: float = 0.0
@@ -187,6 +193,14 @@ class RobotState:
     entry_reason: str | None = None
     block_reasons: list[str] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
+    ai_approved: bool | None = None
+    ai_confidence: int | None = None
+    ai_risk_level: str | None = None
+    ai_entry_reason: str | None = None
+    ai_voice_text: str | None = None
+    ai_block_reason: str | None = None
+    ai_candle_reading: str | None = None
+    ai_strategy_alignment: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -261,6 +275,14 @@ class RobotState:
             self.entry_reason = None
             self.block_reasons = []
             self.metrics = {}
+            self.ai_approved = None
+            self.ai_confidence = None
+            self.ai_risk_level = None
+            self.ai_entry_reason = None
+            self.ai_voice_text = None
+            self.ai_block_reason = None
+            self.ai_candle_reading = None
+            self.ai_strategy_alignment = None
             data["status"] = self.status
             data["next_cycle_at"] = self.next_cycle_at.isoformat() if self.next_cycle_at is not None else None
             data["pending_signal"] = None
@@ -327,12 +349,17 @@ class RobotState:
             symbol = str(voice_signal.get("symbol") or "")
             direction = str(voice_signal.get("direction") or voice_signal.get("signal") or "")
             score = int(voice_signal.get("strategy_score") or voice_signal.get("score") or 0)
-            reason = str(voice_signal.get("strategy_reason") or voice_signal.get("reason") or "").strip()
-            reason_text = f" Motivo: {reason}." if reason else ""
-            data["voice_message"] = (
-                f"Entrada liberada agora. Ativo {symbol}. Direção {direction}. Score {score}."
-                f"{reason_text}"
-            )
+            ai_voice_text = str(voice_signal.get("ai_voice_text") or "").strip()
+            if ai_voice_text:
+                safe_symbol = symbol.replace("-", " ")
+                data["voice_message"] = f"Entrada em {safe_symbol}, direcao {direction}. Motivo: {ai_voice_text}"
+            else:
+                reason = str(voice_signal.get("strategy_reason") or voice_signal.get("reason") or "").strip()
+                reason_text = f" Motivo: {reason}." if reason else ""
+                data["voice_message"] = (
+                    f"Entrada liberada agora. Ativo {symbol}. Direção {direction}. Score {score}."
+                    f"{reason_text}"
+                )
             data["voice_event_id"] = f"{self.cycle_id or ''}:{symbol}:{direction}:{score}:sending"
         if self.status == STATUS_WAITING_NEXT_CYCLE and not self.operation_in_progress:
             data["best_candidate"] = None
@@ -437,6 +464,21 @@ class AutoTrader:
     @staticmethod
     def _new_cycle_id() -> str:
         return uuid.uuid4().hex
+
+    @staticmethod
+    def _clear_ai_fields(state: RobotState) -> None:
+        state.ai_approved = None
+        state.ai_confidence = None
+        state.ai_risk_level = None
+        state.ai_entry_reason = None
+        state.ai_voice_text = None
+        state.ai_block_reason = None
+        state.ai_candle_reading = None
+        state.ai_strategy_alignment = None
+
+    @staticmethod
+    def _candidate_ai_value(candidate: dict[str, Any] | None, key: str) -> Any:
+        return (candidate or {}).get(key)
 
     def restore(
         self,
@@ -577,6 +619,7 @@ class AutoTrader:
         state.entry_reason = None
         state.block_reasons = []
         state.metrics = {}
+        self._clear_ai_fields(state)
         state.analysis_message = None
         state.cycle_id = self._new_cycle_id()
         state.current_cycle_started_at = now
@@ -620,6 +663,7 @@ class AutoTrader:
             state.entry_reason = None
             state.block_reasons = []
             state.metrics = {}
+            self._clear_ai_fields(state)
         last_trade_result = str((state.last_trade or {}).get("result") or "").upper()
         result_waiting = (
             state.status in {STATUS_PENDING_RESULT, STATUS_PENDING_GALE_RESULT}
@@ -739,6 +783,7 @@ class AutoTrader:
         state.entry_reason = None
         state.block_reasons = []
         state.metrics = {}
+        self._clear_ai_fields(state)
         return state
 
     def recover_timed_out_analysis(self, user_id: str) -> tuple[bool, RobotState]:
@@ -787,6 +832,7 @@ class AutoTrader:
         state.entry_reason = None
         state.block_reasons = []
         state.metrics = {}
+        self._clear_ai_fields(state)
         state.analysis_message = None
         state.pending_signal = None
         state.last_signal = None
@@ -857,6 +903,14 @@ class AutoTrader:
             "target_entry_second": state.buy_target_second,
             "entry_window_start_second": state.entry_window_start_second,
             "entry_window_end_second": state.entry_window_end_second,
+            "ai_approved": signal.get("ai_approved"),
+            "ai_confidence": signal.get("ai_confidence"),
+            "ai_risk_level": signal.get("ai_risk_level"),
+            "ai_entry_reason": signal.get("ai_entry_reason"),
+            "ai_voice_text": signal.get("ai_voice_text"),
+            "ai_block_reason": signal.get("ai_block_reason"),
+            "ai_candle_reading": signal.get("ai_candle_reading"),
+            "ai_strategy_alignment": signal.get("ai_strategy_alignment"),
         }
         state.last_signal = dict(pending_signal)
         state.pending_signal = pending_signal
@@ -879,6 +933,14 @@ class AutoTrader:
         state.entry_reason = pending_signal["entry_reason"]
         state.block_reasons = list(pending_signal["block_reasons"])
         state.metrics = dict(pending_signal["metrics"])
+        state.ai_approved = pending_signal.get("ai_approved")
+        state.ai_confidence = pending_signal.get("ai_confidence")
+        state.ai_risk_level = pending_signal.get("ai_risk_level")
+        state.ai_entry_reason = pending_signal.get("ai_entry_reason")
+        state.ai_voice_text = pending_signal.get("ai_voice_text")
+        state.ai_block_reason = pending_signal.get("ai_block_reason")
+        state.ai_candle_reading = pending_signal.get("ai_candle_reading")
+        state.ai_strategy_alignment = pending_signal.get("ai_strategy_alignment")
         return state
 
     def set_order_attempt(self, user_id: str, candidate: dict[str, Any], attempt: int) -> RobotState:
@@ -990,6 +1052,14 @@ class AutoTrader:
             or []
         )
         state.metrics = dict((best_candidate or {}).get("metrics") or {})
+        state.ai_approved = self._candidate_ai_value(best_candidate, "ai_approved")
+        state.ai_confidence = self._candidate_ai_value(best_candidate, "ai_confidence")
+        state.ai_risk_level = self._candidate_ai_value(best_candidate, "ai_risk_level")
+        state.ai_entry_reason = self._candidate_ai_value(best_candidate, "ai_entry_reason")
+        state.ai_voice_text = self._candidate_ai_value(best_candidate, "ai_voice_text")
+        state.ai_block_reason = self._candidate_ai_value(best_candidate, "ai_block_reason")
+        state.ai_candle_reading = self._candidate_ai_value(best_candidate, "ai_candle_reading")
+        state.ai_strategy_alignment = self._candidate_ai_value(best_candidate, "ai_strategy_alignment")
         state.last_analysis_at = utc_now()
         state.last_analysis_result = "BEST_CANDIDATE_UPDATED" if best_candidate is not None else "NO_CANDIDATES"
         state.analysis_result = state.last_analysis_result
@@ -1019,6 +1089,7 @@ class AutoTrader:
         state.entry_reason = None
         state.block_reasons = []
         state.metrics = {}
+        self._clear_ai_fields(state)
         state.analysis_message = ANALYSIS_MESSAGE if analyze else None
         return state
 
@@ -1048,6 +1119,7 @@ class AutoTrader:
         state.entry_reason = None
         state.block_reasons = []
         state.metrics = {}
+        self._clear_ai_fields(state)
         return state
 
     def defer_cycle(
@@ -1139,6 +1211,26 @@ class AutoTrader:
         state.seconds_until_entry_window = 0
         state.last_analysis_result = STATUS_ORDER_REJECTED
         self._clear_gale_state(state)
+        return state
+
+    def block_ai_entry(self, user_id: str, reason: str) -> RobotState:
+        state = self.get(user_id)
+        now = utc_now()
+        state.pending_signal = None
+        state.last_signal = None
+        state.operation_in_progress = False
+        state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
+        state.rejection_reason = None
+        state.last_rejection_reason = reason
+        state.last_order_error = None
+        state.rejected_at = now
+        state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes) if state.enabled else None
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        state.last_analysis_at = now
+        state.last_analysis_result = "AI_ENTRY_BLOCKED"
+        state.analysis_result = "AI_ENTRY_BLOCKED"
+        state.analysis_message = None
         return state
 
     def record_trade(self, user_id: str, trade: dict[str, Any]) -> RobotState:

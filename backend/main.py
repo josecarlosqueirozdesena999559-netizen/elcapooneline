@@ -36,6 +36,7 @@ from backend.auto_trader import (
     parse_datetime,
     utc_now,
 )
+from backend.ai_candle_analyzer import analyze_candle_candidate
 from backend.openai_signal_reviewer import review_signal
 from backend.robot_persistence import (
     RobotPersistence,
@@ -73,6 +74,8 @@ CRITICAL_TRADE_BLOCKS = {
     "CANDLES_UNAVAILABLE",
 }
 ANALYSIS_DETAIL_FIELDS = (
+    "trend",
+    "strength",
     "ema9",
     "ema21",
     "rsi",
@@ -1590,6 +1593,8 @@ def candidate_pre_order_block_reason(candidate: dict[str, Any]) -> str | None:
         return "ACTIVE_CLOSED"
     active_status = str(candidate.get("active_status") or candidate.get("status") or "").upper()
     blocked_filters = set(str(item) for item in (candidate.get("blocked_filters") or []))
+    if "AI_ENTRY_BLOCKED" in blocked_filters:
+        return str(candidate.get("ai_block_reason") or "AI_ENTRY_BLOCKED")
     if candidate.get("suspended") or "SUSPEND" in active_status or "ACTIVE_SUSPENDED" in blocked_filters:
         return "ACTIVE_SUSPENDED"
     if candidate.get("is_open") is False or active_status in {"CLOSED", "INACTIVE"} or "ACTIVE_CLOSED" in blocked_filters:
@@ -1652,6 +1657,156 @@ def build_strategy_narration(candidate: dict[str, Any]) -> tuple[str, str, list[
         or "Maior score entre os ativos analisados."
     ).strip()
     return strategy_name, strategy_reason, used
+
+
+def build_ai_candle_payload(candidate: dict[str, Any], candles: list[dict[str, Any]], state: Any) -> dict[str, Any]:
+    metrics = dict(candidate.get("metrics") or {})
+    return {
+        "symbol": candidate.get("symbol"),
+        "timeframe": state.timeframe,
+        "candidate_direction": candidate.get("direction") or candidate.get("signal"),
+        "strategy_score": int(candidate.get("strategy_score") or candidate.get("score") or 0),
+        "confidence": int(candidate.get("confidence") or 0),
+        "payout": float(candidate.get("payout") or 0),
+        "used_strategies": list(candidate.get("used_strategies") or []),
+        "indicators": {
+            "ema9": candidate.get("ema9"),
+            "ema21": candidate.get("ema21"),
+            "rsi14": candidate.get("rsi14", candidate.get("rsi")),
+            "atr": candidate.get("atr", metrics.get("atr")),
+            "trend": candidate.get("trend", metrics.get("last_3_direction")),
+            "volatility": metrics.get("volatility"),
+        },
+        "candles": candles[-60:],
+        "ai_min_confidence": int(state.ai_min_confidence or 70),
+    }
+
+
+async def fetch_ai_candles(
+    user_id: str,
+    symbol: str,
+    timeframe: str,
+    *,
+    endtime: int | None = None,
+) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {
+        "active": symbol,
+        "interval": TIMEFRAME_SECONDS[timeframe],
+        "count": 60,
+    }
+    if endtime is not None:
+        params["endtime"] = endtime
+    status_code, payload = await call_bullex_service(
+        "GET",
+        "/candles",
+        user_id,
+        params=params,
+    )
+    mark_disconnected_from_payload(user_id, payload)
+    if status_code >= 400 or not payload.get("ok"):
+        return []
+    candles = []
+    for candle in extract_candles(payload):
+        if not isinstance(candle, dict):
+            continue
+        candles.append(
+            {
+                "time": candle.get("from") or candle.get("time"),
+                "open": candle.get("open"),
+                "high": candle.get("high", candle.get("max")),
+                "low": candle.get("low", candle.get("min")),
+                "close": candle.get("close"),
+            }
+        )
+    return candles
+
+
+def apply_ai_result_to_candidate(candidate: dict[str, Any], result: dict[str, Any], state: Any) -> dict[str, Any]:
+    updated = dict(candidate)
+    updated["ai_approved"] = bool(result.get("approved"))
+    updated["ai_confidence"] = int(result.get("confidence") or 0)
+    updated["ai_risk_level"] = result.get("risk_level")
+    updated["ai_entry_reason"] = result.get("entry_reason")
+    updated["ai_voice_text"] = result.get("voice_text")
+    updated["ai_block_reason"] = result.get("block_reason")
+    updated["ai_candle_reading"] = result.get("candle_reading")
+    updated["ai_strategy_alignment"] = result.get("strategy_alignment")
+    updated["ai_analysis_enabled"] = True
+
+    if updated["ai_approved"]:
+        logger.info(
+            "[AI_ENTRY_APPROVED] symbol=%s direction=%s confidence=%s risk=%s",
+            updated.get("symbol"),
+            updated.get("direction"),
+            updated.get("ai_confidence"),
+            updated.get("ai_risk_level"),
+        )
+        return updated
+
+    block_reason = str(updated.get("ai_block_reason") or "AI_ENTRY_BLOCKED")
+    if state.ai_confirmation_required:
+        updated["trade_allowed"] = False
+        updated["quality_reason"] = block_reason
+        updated["ai_block_reason"] = block_reason
+        if block_reason not in updated["blocked_filters"]:
+            updated["blocked_filters"] = [*updated.get("blocked_filters", []), block_reason]
+        if "AI_ENTRY_BLOCKED" not in updated["blocked_filters"]:
+            updated["blocked_filters"].append("AI_ENTRY_BLOCKED")
+        updated["block_reasons"] = list(dict.fromkeys(updated.get("blocked_filters") or []))
+    else:
+        penalty = max(10, 100 - int(updated.get("ai_confidence") or 0))
+        updated["strategy_score"] = max(0, int(updated.get("strategy_score") or 0) - penalty)
+        updated["quality_score"] = max(0, int(updated.get("quality_score") or 0) - penalty)
+        updated["score"] = updated["strategy_score"]
+        if block_reason not in updated["blocked_filters"]:
+            updated["blocked_filters"] = [*updated.get("blocked_filters", []), block_reason]
+        updated["block_reasons"] = list(dict.fromkeys(updated.get("blocked_filters") or []))
+
+    logger.info(
+        "[AI_ENTRY_BLOCKED] symbol=%s direction=%s confirmation_required=%s reason=%s",
+        updated.get("symbol"),
+        updated.get("direction"),
+        state.ai_confirmation_required,
+        updated.get("ai_block_reason"),
+    )
+    return updated
+
+
+async def maybe_analyze_best_candidate_with_ai(
+    user_id: str,
+    state: Any,
+    candidate: dict[str, Any] | None,
+    *,
+    endtime: int | None = None,
+) -> dict[str, Any] | None:
+    if candidate is None or not state.ai_analysis_enabled:
+        return candidate
+
+    symbol = str(candidate.get("symbol") or "")
+    logger.info("[AI_CANDLE_ANALYSIS_START] user_id=%s symbol=%s timeframe=%s", user_id, symbol, state.timeframe)
+    candles = await fetch_ai_candles(user_id, symbol, state.timeframe, endtime=endtime)
+    if not candles:
+        logger.warning("[AI_CANDLE_ANALYSIS_ERROR] user_id=%s symbol=%s error=NO_CANDLES", user_id, symbol)
+        logger.info("[AI_FALLBACK_LOCAL_ANALYSIS] user_id=%s symbol=%s reason=NO_CANDLES", user_id, symbol)
+        return candidate
+
+    ai_response = await analyze_candle_candidate(build_ai_candle_payload(candidate, candles, state))
+    if not ai_response.get("ok"):
+        reason = str(ai_response.get("reason") or "unknown")
+        if reason == "timeout":
+            logger.warning("[AI_CANDLE_ANALYSIS_TIMEOUT] user_id=%s symbol=%s", user_id, symbol)
+        else:
+            logger.warning("[AI_CANDLE_ANALYSIS_ERROR] user_id=%s symbol=%s error=%s", user_id, symbol, reason)
+        logger.info("[AI_FALLBACK_LOCAL_ANALYSIS] user_id=%s symbol=%s reason=%s", user_id, symbol, reason)
+        return candidate
+
+    result = dict(ai_response.get("result") or {})
+    if not result:
+        logger.warning("[AI_CANDLE_ANALYSIS_ERROR] user_id=%s symbol=%s error=EMPTY_RESULT", user_id, symbol)
+        logger.info("[AI_FALLBACK_LOCAL_ANALYSIS] user_id=%s symbol=%s reason=EMPTY_RESULT", user_id, symbol)
+        return candidate
+    logger.info("[AI_CANDLE_ANALYSIS_RESULT] user_id=%s symbol=%s result=%s", user_id, symbol, result)
+    return apply_ai_result_to_candidate(candidate, result, state)
 
 
 async def submit_bullex_order(
@@ -2129,6 +2284,20 @@ async def update_cycle_analysis(
         if selectable
         else None
     )
+    if selected is not None:
+        selected = await maybe_analyze_best_candidate_with_ai(
+            user_id,
+            state,
+            selected,
+            endtime=int(entry_window["server_timestamp"]),
+        )
+        if selected is not None:
+            for index, candidate in enumerate(candidates):
+                same_symbol = candidate.get("symbol") == selected.get("symbol")
+                same_direction = candidate.get("direction") == selected.get("direction")
+                if same_symbol and same_direction:
+                    candidates[index] = dict(selected)
+                    break
     previous_symbol = (state.best_candidate or {}).get("symbol") if state.best_candidate else None
     state = auto_trader.set_analysis_candidates(user_id, candidates, selected)
     if selected is not None and selected.get("symbol") != previous_symbol:
@@ -2658,6 +2827,24 @@ async def execute_robot_cycle(
                     selected.get("payout"),
                     selected.get("timeframe"),
                 )
+
+            if (
+                selected is not None
+                and state.ai_analysis_enabled
+                and state.ai_confirmation_required
+                and selected.get("ai_approved") is False
+            ):
+                block_reason = str(selected.get("ai_block_reason") or "AI_ENTRY_BLOCKED")
+                state = auto_trader.block_ai_entry(user_id, block_reason)
+                logger.info(
+                    "[AI_ENTRY_BLOCKED] user_id=%s symbol=%s direction=%s reason=%s",
+                    user_id,
+                    selected.get("symbol"),
+                    selected.get("direction"),
+                    block_reason,
+                )
+                persist_robot(user_id)
+                return 200, build_robot_payload(state)
 
             if selected is not None and not entry_window["entry_window_open"]:
                 if entry_window["missed_entry_window"]:
