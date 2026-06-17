@@ -32,9 +32,6 @@ ROBOT_SETTING_FIELDS = (
     "martingale_enabled",
     "martingale_steps",
     "martingale_multiplier",
-    "ai_analysis_enabled",
-    "ai_confirmation_required",
-    "ai_min_confidence",
 )
 
 

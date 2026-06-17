@@ -123,7 +123,7 @@ class RobotState:
     martingale_enabled: bool = False
     martingale_steps: int = 1
     martingale_multiplier: float = 2.0
-    ai_analysis_enabled: bool = False
+    ai_analysis_enabled: bool = True
     ai_confirmation_required: bool = True
     ai_min_confidence: int = 70
     wins: int = 0
@@ -438,6 +438,7 @@ class AutoTrader:
             state = RobotState()
             self._states[user_id] = state
             self._sources[user_id] = "default"
+        self._apply_internal_ai_defaults(state)
         return state
 
     def has_state(self, user_id: str) -> bool:
@@ -477,6 +478,12 @@ class AutoTrader:
         state.ai_strategy_alignment = None
 
     @staticmethod
+    def _apply_internal_ai_defaults(state: RobotState) -> None:
+        state.ai_analysis_enabled = True
+        state.ai_confirmation_required = True
+        state.ai_min_confidence = 70
+
+    @staticmethod
     def _candidate_ai_value(candidate: dict[str, Any] | None, key: str) -> Any:
         return (candidate or {}).get(key)
 
@@ -508,6 +515,7 @@ class AutoTrader:
             if key in datetime_fields and isinstance(value, str):
                 value = datetime.fromisoformat(value.replace("Z", "+00:00"))
             setattr(state, key, value)
+        self._apply_internal_ai_defaults(state)
         if state.status == "WAITING_ENTRY_WINDOW":
             state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
         if state.status == STATUS_PENDING_RESULT and state.gale_active:
@@ -574,6 +582,7 @@ class AutoTrader:
                 state.status = STATUS_STOPPED
         if changes:
             self._sources[user_id] = "memory"
+        self._apply_internal_ai_defaults(state)
         return state
 
     def start(self, user_id: str) -> RobotState:

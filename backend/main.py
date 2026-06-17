@@ -207,6 +207,11 @@ class BullexUserSessionCache:
 session_response_cache: dict[str, BullexUserSessionCache] = {}
 active_cooldowns: dict[str, dict[str, datetime]] = {}
 payout_cooldowns: dict[str, dict[str, datetime]] = {}
+PRIVATE_AI_CONFIG_FIELDS = {
+    "ai_analysis_enabled",
+    "ai_confirmation_required",
+    "ai_min_confidence",
+}
 
 
 def get_session_cache(user_id: str) -> BullexUserSessionCache:
@@ -1484,6 +1489,8 @@ def robot_stop_reason(state: Any) -> str | None:
 
 def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     data = state.to_dict()
+    for field in PRIVATE_AI_CONFIG_FIELDS:
+        data.pop(field, None)
     user_id = extra.pop("user_id", None)
     if user_id is not None:
         worker_task = robot_tasks.get(str(user_id))

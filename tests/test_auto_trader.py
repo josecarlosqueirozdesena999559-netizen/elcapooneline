@@ -68,6 +68,15 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertEqual(trader.get("user-b").entry_value, 2)
         self.assertEqual(trader.get("user-b").stop_loss, 12)
 
+    def test_ai_analysis_stays_enabled_without_public_config(self) -> None:
+        trader = AutoTrader()
+
+        state = trader.get("user-ai-default")
+
+        self.assertTrue(state.ai_analysis_enabled)
+        self.assertTrue(state.ai_confirmation_required)
+        self.assertEqual(state.ai_min_confidence, 70)
+
     def test_sending_order_never_falls_back_to_analyzing(self) -> None:
         trader = AutoTrader()
         trader.start("user-order-transition")
@@ -584,6 +593,9 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["source"], "memory")
         self.assertEqual(payload["settings"]["entry_value"], 15)
         self.assertEqual(payload["settings"]["min_confidence"], 97)
+        self.assertNotIn("ai_analysis_enabled", payload["settings"])
+        self.assertNotIn("ai_confirmation_required", payload["settings"])
+        self.assertNotIn("ai_min_confidence", payload["settings"])
         self.assertNotIn("enabled", payload["settings"])
 
         response = await main.debug_user_isolation({"user_id": "user-b"})
@@ -600,6 +612,20 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                 "source": "default",
             },
         )
+
+    async def test_robot_state_hides_private_ai_config_fields(self) -> None:
+        user_id = "user-hidden-ai-config"
+
+        with (
+            patch.object(main, "call_bullex_service", new=AsyncMock(return_value=(200, {"ok": True, "data": {}}))),
+            patch.object(main, "sync_user_store_from_payload"),
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertNotIn("ai_analysis_enabled", data)
+        self.assertNotIn("ai_confirmation_required", data)
+        self.assertNotIn("ai_min_confidence", data)
 
     async def test_robot_state_after_result_keeps_result_visible_for_five_seconds(self) -> None:
         user_id = "user-result-state"
