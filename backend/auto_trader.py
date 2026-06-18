@@ -636,6 +636,25 @@ class AutoTrader:
         state.enabled = False
         state.status = STATUS_STOPPED
         state.rejection_reason = None
+        state.last_rejection_reason = None
+        state.last_order_error = None
+        state.analysis_started_at = None
+        state.analysis_result = None
+        state.last_analysis_result = None
+        state.analysis_message = None
+        state.pending_signal = None
+        state.last_signal = None
+        state.next_cycle_at = None
+        state.operation_in_progress = False
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        state.analysis_window_open = False
+        state.seconds_until_analysis_window = 0
+        state.result_received_at = None
+        state.result_display_until = None
+        state.order_attempts = 0
+        state.fallback_candidate_used = False
+        self._clear_gale_state(state)
         return state
 
     def prepare_cycle(self, user_id: str) -> tuple[bool, RobotState]:
@@ -1140,9 +1159,9 @@ class AutoTrader:
         state.seconds_until_entry_window = 0
         state.order_attempts = 0
         state.fallback_candidate_used = False
-        state.current_cycle_started_at = now
+        state.current_cycle_started_at = None
         state.cycle_id = self._new_cycle_id()
-        state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
+        state.next_cycle_at = None
         state.blocked_filters = []
         state.approved_filters = []
         state.quality_score = 0
@@ -1164,10 +1183,8 @@ class AutoTrader:
         if reset_score:
             state.wins = 0
             state.losses = 0
-            state.profit = 0.0
             self._histories[user_id] = []
-            state.stop_reset_at = now
-        elif reset_daily_profit:
+        if reset_score or reset_daily_profit:
             state.profit = 0.0
             state.stop_reset_at = now
 
@@ -1258,6 +1275,8 @@ class AutoTrader:
 
     def start_sending_order(self, user_id: str) -> RobotState:
         state = self.get(user_id)
+        if not state.enabled:
+            raise RuntimeError("ROBOT_STOPPED")
         if state.status not in {
             STATUS_WAITING_NEXT_CANDLE_ENTRY,
             STATUS_WAITING_GALE_ENTRY,
@@ -1427,6 +1446,8 @@ class AutoTrader:
         completed = self._completed_order_ids.setdefault(user_id, set())
         if not normalized_order_id or normalized_order_id in completed:
             return False, state
+        if not state.enabled:
+            return False, state
         if not state.operation_in_progress or not state.last_trade:
             return False, state
         if str(state.last_trade.get("order_id") or "").strip() != normalized_order_id:
@@ -1490,9 +1511,12 @@ class AutoTrader:
         completed = self._completed_order_ids.setdefault(user_id, set())
         if not normalized_order_id or normalized_order_id in completed:
             return False, state
-        if not state.operation_in_progress or not state.last_trade:
+        if not state.last_trade:
             return False, state
         if str(state.last_trade.get("order_id") or "").strip() != normalized_order_id:
+            return False, state
+        trade_result = str((state.last_trade or {}).get("result") or "").strip().upper()
+        if not state.operation_in_progress and trade_result in {"WIN", "LOSS", "TIMEOUT"}:
             return False, state
 
         normalized_result = str(result or "").strip().upper()
@@ -1503,6 +1527,7 @@ class AutoTrader:
         is_gale_trade = bool(trade.get("is_gale"))
         should_trigger_gale = (
             normalized_result == "LOSS"
+            and state.enabled
             and not is_gale_trade
             and state.martingale_enabled
             and int(state.martingale_steps or 1) >= 1
@@ -1553,11 +1578,13 @@ class AutoTrader:
         completed.add(normalized_order_id)
         state.last_trade = trade
         state.operation_in_progress = False
-        state.status = STATUS_GALE_RESULT_RECEIVED if is_gale_trade else STATUS_RESULT_RECEIVED
+        state.status = (
+            STATUS_GALE_RESULT_RECEIVED if is_gale_trade else STATUS_RESULT_RECEIVED
+        ) if state.enabled else STATUS_STOPPED
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.result_received_at = finished_at
-        state.result_display_until = finished_at + timedelta(seconds=5)
+        state.result_display_until = finished_at + timedelta(seconds=5) if state.enabled else None
         state.entry_window_open = False
         state.seconds_until_entry_window = 0
         state.next_cycle_at = None
@@ -1574,9 +1601,12 @@ class AutoTrader:
         completed = self._completed_order_ids.setdefault(user_id, set())
         if not normalized_order_id or normalized_order_id in completed:
             return False, state
-        if not state.operation_in_progress or not state.last_trade:
+        if not state.last_trade:
             return False, state
         if str(state.last_trade.get("order_id") or "").strip() != normalized_order_id:
+            return False, state
+        trade_result = str((state.last_trade or {}).get("result") or "").strip().upper()
+        if not state.operation_in_progress and trade_result in {"WIN", "LOSS", "TIMEOUT"}:
             return False, state
 
         trade = dict(state.last_trade)

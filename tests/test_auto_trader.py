@@ -128,6 +128,72 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertFalse(can_run)
         self.assertEqual(state.status, STATUS_STOPPED)
 
+    def test_stop_clears_worker_and_gale_flags(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-stop")
+        state.operation_in_progress = True
+        state.pending_signal = {"symbol": "EURUSD-OTC"}
+        state.gale_pending = True
+        state.gale_active = True
+        state.analysis_result = "RUNNING"
+        state.last_analysis_result = "RUNNING"
+
+        stopped = trader.stop("user-stop")
+        payload = stopped.to_dict()
+
+        self.assertFalse(stopped.enabled)
+        self.assertEqual(stopped.status, STATUS_STOPPED)
+        self.assertFalse(stopped.operation_in_progress)
+        self.assertIsNone(stopped.pending_signal)
+        self.assertFalse(stopped.gale_pending)
+        self.assertFalse(stopped.gale_active)
+        self.assertFalse(payload["result_waiting"])
+
+    def test_disabled_robot_aborts_before_sending_order(self) -> None:
+        trader = AutoTrader()
+        trader.start("user-disabled-send")
+        trader.set_pending_signal(
+            "user-disabled-send",
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "confidence": 92,
+                "payout": 90,
+            },
+        )
+        trader.stop("user-disabled-send")
+
+        with self.assertRaisesRegex(RuntimeError, "ROBOT_STOPPED"):
+            trader.start_sending_order("user-disabled-send")
+
+    def test_stopped_robot_finishes_trade_without_triggering_gale(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-stop-finish")
+        state.martingale_enabled = True
+        trader.record_trade(
+            "user-stop-finish",
+            {
+                "order_id": "stop-order-1",
+                "active": "EURUSD-OTC",
+                "direction": "CALL",
+                "amount": 2,
+                "confidence": 90,
+                "payout": 88,
+                "result": "PENDING_RESULT",
+                "sent_at": "2026-06-18T12:00:00+00:00",
+            },
+        )
+
+        trader.stop("user-stop-finish")
+        finalized, stopped = trader.finish_trade("user-stop-finish", "stop-order-1", "LOSS", -2)
+
+        self.assertTrue(finalized)
+        self.assertFalse(stopped.enabled)
+        self.assertEqual(stopped.status, STATUS_STOPPED)
+        self.assertFalse(stopped.gale_pending)
+        self.assertFalse(stopped.gale_active)
+        self.assertIsNone(stopped.pending_signal)
+
     def test_cycle_is_reserved_for_five_minutes(self) -> None:
         trader = AutoTrader()
         trader.start("user-cycle")
@@ -598,6 +664,43 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("ai_analysis_enabled", data)
         self.assertNotIn("ai_confirmation_required", data)
         self.assertNotIn("ai_min_confidence", data)
+        persist.assert_called_once_with(user_id)
+
+    async def test_robot_config_ignores_non_basic_fields_and_does_not_touch_worker(self) -> None:
+        user_id = "user-basic-config-only"
+        state = main.auto_trader.get(user_id)
+        state.enabled = True
+        state.status = "WAITING_NEXT_CYCLE"
+        state.cycle_minutes = 5
+        state.strategy_mode = "conservative"
+
+        body = {
+            "entryValue": 11,
+            "stopWin": 55,
+            "cycleMinutes": 15,
+            "strategyMode": "balanced",
+            "enabled": False,
+            "randomField": "ignored",
+        }
+
+        with (
+            patch.object(main, "persist_robot") as persist,
+            patch.object(main, "ensure_robot_worker") as ensure_worker,
+            patch.object(main, "stop_robot_worker", new=AsyncMock()) as stop_worker,
+        ):
+            response = await main.robot_config(body, {"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        refreshed = main.auto_trader.get(user_id)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["entry_value"], 11)
+        self.assertEqual(data["stop_win"], 55)
+        self.assertEqual(refreshed.cycle_minutes, 5)
+        self.assertEqual(refreshed.strategy_mode, "conservative")
+        self.assertTrue(refreshed.enabled)
+        self.assertEqual(refreshed.status, "WAITING_NEXT_CYCLE")
+        ensure_worker.assert_not_called()
+        stop_worker.assert_not_awaited()
         persist.assert_called_once_with(user_id)
 
     async def test_user_isolation_debug_reports_current_user_only(self) -> None:

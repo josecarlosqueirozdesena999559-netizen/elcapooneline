@@ -168,6 +168,41 @@ def build_error(message: str) -> dict[str, Any]:
     return {"ok": False, "data": None, "error": message}
 
 
+ROBOT_BASIC_CONFIG_FIELDS = {
+    "stop_win",
+    "stop_loss",
+    "entry_value",
+    "account_mode",
+    "timeframe",
+    "min_confidence",
+    "min_payout",
+    "martingale_enabled",
+    "martingale_steps",
+    "martingale_multiplier",
+}
+ROBOT_BASIC_CONFIG_ALIASES = {
+    "stopWin",
+    "stopLoss",
+    "entryValue",
+    "accountMode",
+    "timeframe",
+    "minConfidence",
+    "minPayout",
+    "martingaleEnabled",
+    "martingaleSteps",
+    "martingaleMultiplier",
+}
+
+
+def ignored_ai_config_fields(payload: dict[str, Any]) -> list[str]:
+    ignored: list[str] = []
+    for key in payload:
+        normalized = str(key or "").strip().lower()
+        if normalized.startswith(("ai", "use_ai", "openai", "gemini")):
+            ignored.append(str(key))
+    return ignored
+
+
 def strip_ai_config_fields(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
@@ -181,22 +216,7 @@ def filter_robot_config_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in filtered.items()
-        if key in ROBOT_CONFIG_ALLOWED_FIELDS or key in {
-            "accountMode",
-            "strategyMode",
-            "entryValue",
-            "cycleMinutes",
-            "minConfidence",
-            "minPayout",
-            "stopWin",
-            "stopLoss",
-            "maxEntriesPerCycle",
-            "allowReal",
-            "confirmReal",
-            "martingaleEnabled",
-            "martingaleSteps",
-            "martingaleMultiplier",
-        }
+        if key in ROBOT_BASIC_CONFIG_FIELDS or key in ROBOT_BASIC_CONFIG_ALIASES
     }
 
 
@@ -2991,6 +3011,12 @@ async def execute_robot_cycle(
                 entry_window["entry_window_start_second"],
                 entry_window["entry_window_end_second"],
             )
+            if not state.enabled:
+                state.status = STATUS_STOPPED
+                state.pending_signal = None
+                state.gale_pending = False
+                state.gale_active = False
+                return 200, build_robot_payload(state)
             order_path = "/bullex/buy-demo"
             if state.account_mode == "REAL":
                 order_path = "/bullex/buy-real"
@@ -3002,6 +3028,12 @@ async def execute_robot_cycle(
             attempted_unavailable = False
             for candidate in order_attempt_candidates(state, selected):
                 is_gale_order = bool(state.gale_pending or candidate.get("is_gale"))
+                if not state.enabled:
+                    state.status = STATUS_STOPPED
+                    state.pending_signal = None
+                    state.gale_pending = False
+                    state.gale_active = False
+                    return 200, build_robot_payload(state)
                 if state.order_attempts >= MAX_ORDER_ATTEMPTS_PER_CYCLE:
                     break
                 validation_reason = candidate_pre_order_block_reason(candidate)
@@ -3371,6 +3403,8 @@ async def robot_worker(user_id: str) -> None:
             logger.info("[ROBOT_WORKER_TICK] user_id=%s", user_id)
             await execute_robot_cycle(user_id)
             state = auto_trader.get(user_id)
+            if not state.enabled:
+                break
             if state.operation_in_progress:
                 delay = 3
             elif state.status == STATUS_WAITING_ENTRY_WINDOW:
@@ -3396,7 +3430,7 @@ async def robot_worker(user_id: str) -> None:
         current = asyncio.current_task()
         if robot_tasks.get(user_id) is current:
             robot_tasks.pop(user_id, None)
-        logger.info("[ROBOT_WORKER_STOPPED] user_id=%s", user_id)
+        logger.info("[WORKER_STOPPED] user_id=%s", user_id)
 
 
 def ensure_robot_worker(user_id: str) -> None:
@@ -3426,8 +3460,13 @@ def schedule_robot_tick(user_id: str) -> None:
 
 async def stop_robot_worker(user_id: str) -> None:
     task = robot_tasks.pop(user_id, None)
-    if task is None or task.done() or task is asyncio.current_task():
+    if task is None or task.done():
+        logger.info("[WORKER_ALREADY_STOPPED] user_id=%s", user_id)
         return
+    if task is asyncio.current_task():
+        logger.info("[WORKER_STOPPED] user_id=%s", user_id)
+        return
+    logger.info("[WORKER_STOPPING] user_id=%s", user_id)
     task.cancel()
     with suppress(asyncio.CancelledError):
         await task
@@ -3854,31 +3893,31 @@ async def robot_config(
     user_id = auth["user_id"]
     raw_body = dict(body or {})
     logger.warning("[ROBOT_CONFIG_PAYLOAD] user_id=%s payload=%s", user_id, raw_body)
+    ignored_ai_fields = ignored_ai_config_fields(raw_body)
+    if ignored_ai_fields:
+        logger.info(
+            "[ROBOT_AI_FIELDS_IGNORED] user_id=%s fields=%s",
+            user_id,
+            ignored_ai_fields,
+        )
     filtered_body = filter_robot_config_payload(raw_body)
-    state = get_user_robot_state(user_id)
-    merged_payload = {**ROBOT_CONFIG_DEFAULTS, **current_robot_config_payload(state)}
     partial_update = RobotConfigUpdate.model_validate(filtered_body)
-    merged_payload.update(partial_update.model_dump(exclude_none=True))
     logger.warning(
         "[ROBOT_CONFIG_FILTERED_PAYLOAD] user_id=%s payload=%s",
         user_id,
-        merged_payload,
+        partial_update.model_dump(exclude_none=True),
     )
     state = auto_trader.update_config(
         user_id,
-        RobotConfigUpdate.model_validate(merged_payload),
-    )
-    logger.info(
-        "[CYCLE_CONFIG] user_id=%s cycle_minutes=%s source=robot_config",
-        user_id,
-        state.cycle_minutes,
+        partial_update,
     )
     persist_robot(user_id)
-    if state.enabled:
-        ensure_robot_worker(user_id)
-    else:
-        await stop_robot_worker(user_id)
-    return json_response(200, build_robot_payload(state))
+    logger.info(
+        "[ROBOT_CONFIG_SAVED] user_id=%s saved_fields=%s",
+        user_id,
+        sorted(partial_update.model_dump(exclude_none=True).keys()),
+    )
+    return json_response(200, build_robot_payload(state, user_id=user_id))
 
 
 @app.post("/robot/start")
@@ -3939,11 +3978,13 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
 
 @app.post("/robot/stop")
 async def robot_stop(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    state = auto_trader.stop(auth["user_id"])
-    persist_robot(auth["user_id"])
-    await stop_robot_worker(auth["user_id"])
-    logger.info("[ROBOT STOP] user_id=%s", auth["user_id"])
-    return json_response(200, build_robot_payload(state))
+    user_id = auth["user_id"]
+    logger.info("[ROBOT_STOP_REQUEST] user_id=%s", user_id)
+    state = auto_trader.stop(user_id)
+    persist_robot(user_id)
+    await stop_robot_worker(user_id)
+    logger.info("[ROBOT STOP] user_id=%s", user_id)
+    return json_response(200, build_robot_payload(state, user_id=user_id))
 
 
 @app.post("/robot/reset-cycle")
@@ -3951,22 +3992,24 @@ async def robot_reset_cycle(
     body: dict[str, Any] | None = Body(default=None),
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
-    payload = RobotResetCycleRequest.model_validate(body or {})
+    RobotResetCycleRequest.model_validate(body or {})
     user_id = auth["user_id"]
     async with auto_trader.lock(user_id):
-        state = auto_trader.reset_cycle(
-            user_id,
-            reset_score=payload.reset_score,
-            reset_daily_profit=payload.reset_daily_profit,
-        )
+        state = auto_trader.reset_cycle(user_id, reset_score=True, reset_daily_profit=True)
         persist_robot(user_id)
     await stop_robot_worker(user_id)
     logger.info(
-        "[ROBOT_RESET_CYCLE] user_id=%s cycle_id=%s reset_score=%s reset_daily_profit=%s",
+        "[ROBOT_RESET_SCORE] user_id=%s wins=%s losses=%s profit=%s",
+        user_id,
+        state.wins,
+        state.losses,
+        state.profit,
+    )
+    logger.info(
+        "[ROBOT_CYCLE_RESET] user_id=%s cycle_id=%s status=%s",
         user_id,
         state.cycle_id,
-        payload.reset_score,
-        payload.reset_daily_profit,
+        state.status,
     )
     return json_response(200, build_robot_payload(state, user_id=user_id))
 

@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import suppress
 import json
 import tempfile
 import unittest
@@ -56,12 +58,13 @@ class RobotResetCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(refreshed.last_rejection_reason)
         self.assertIsNone(refreshed.cycle_result)
         self.assertIsNone(refreshed.rejected_at)
-        self.assertEqual(refreshed.wins, 3)
-        self.assertEqual(refreshed.losses, 2)
+        self.assertEqual(refreshed.wins, 0)
+        self.assertEqual(refreshed.losses, 0)
         self.assertEqual(refreshed.profit, 0.0)
+        self.assertIsNone(refreshed.last_trade)
         self.assertNotEqual(refreshed.cycle_id, previous_cycle_id)
-        self.assertIsNotNone(refreshed.current_cycle_started_at)
-        self.assertIsNotNone(refreshed.next_cycle_at)
+        self.assertIsNone(refreshed.current_cycle_started_at)
+        self.assertIsNone(refreshed.next_cycle_at)
         self.assertEqual(payload["status"], "STOPPED")
         self.assertFalse(payload["worker_running"])
         stop_worker.assert_awaited_once_with(user_id)
@@ -98,3 +101,41 @@ class RobotResetCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed.losses, 0)
         self.assertEqual(refreshed.profit, 0.0)
         self.assertEqual(main.auto_trader.history(user_id)["trades"], [])
+
+    async def test_robot_stop_clears_state_and_worker_immediately(self) -> None:
+        user_id = "user-stop"
+        state = main.auto_trader.start(user_id)
+        state.operation_in_progress = True
+        state.pending_signal = {"symbol": "EURUSD-OTC"}
+        state.gale_pending = True
+        state.gale_active = True
+
+        async def idle_worker() -> None:
+            await asyncio.sleep(60)
+
+        task = asyncio.create_task(idle_worker())
+        main.robot_tasks[user_id] = task
+
+        try:
+            with patch.object(main, "persist_robot"):
+                response = await main.robot_stop({"user_id": user_id})
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+        payload = json.loads(response.body)["data"]
+        refreshed = main.auto_trader.get(user_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(refreshed.enabled)
+        self.assertEqual(refreshed.status, "STOPPED")
+        self.assertFalse(refreshed.operation_in_progress)
+        self.assertFalse(refreshed.gale_pending)
+        self.assertFalse(refreshed.gale_active)
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(payload["status"], "STOPPED")
+        self.assertFalse(payload["worker_running"])
+        self.assertFalse(payload["operation_in_progress"])
+        self.assertFalse(payload["result_waiting"])
