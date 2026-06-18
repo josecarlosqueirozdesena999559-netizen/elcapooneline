@@ -9,8 +9,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
+
 from backend.auto_trader import AutoTrader, STATUS_RESULT_RECEIVED
-from backend.robot_persistence import SQLiteRobotPersistence
+from backend.robot_persistence import (
+    SQLiteRobotPersistence,
+    SupabaseRobotPersistence,
+    extract_robot_settings,
+)
 from bullex_service import main as bullex_main
 from bullex_service.session_store import SessionStore
 
@@ -243,6 +249,79 @@ class _FakeContext:
 
 
 class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_extract_robot_settings_keeps_only_supabase_settings_columns(self) -> None:
+        settings = extract_robot_settings(
+            {
+                "user_id": "user-a",
+                "enabled": True,
+                "entry_value": "10.5",
+                "stop_win": "50",
+                "stop_loss": 30,
+                "cycle_minutes": "5",
+                "min_confidence": "94",
+                "min_payout": "88.5",
+                "strategy_mode": "balanced",
+                "account_mode": "DEMO",
+                "allow_real": "false",
+                "confirm_real": "true",
+                "max_entries_per_cycle": "2",
+                "martingale_enabled": True,
+                "martingale_steps": 2,
+                "martingale_multiplier": 2.5,
+                "wins": 9,
+                "losses": 1,
+                "profit": 20,
+                "status": "RUNNING",
+                "connected": True,
+                "active_mode": "PRACTICE",
+                "timeframe": "M1",
+            }
+        )
+
+        self.assertEqual(
+            settings,
+            {
+                "entry_value": 10.5,
+                "stop_win": 50.0,
+                "stop_loss": 30.0,
+                "cycle_minutes": 5,
+                "min_confidence": 94,
+                "min_payout": 88.5,
+                "strategy_mode": "balanced",
+                "account_mode": "DEMO",
+                "allow_real": False,
+                "confirm_real": True,
+                "max_entries_per_cycle": 2,
+            },
+        )
+
+    async def test_supabase_settings_400_is_not_retried_until_settings_change(self) -> None:
+        persistence = SupabaseRobotPersistence("https://example.supabase.co", "service-key")
+        request = httpx.Request(
+            "POST",
+            "https://example.supabase.co/rest/v1/robot_user_settings?on_conflict=user_id",
+        )
+        response = httpx.Response(400, request=request, text='{"message":"bad column"}')
+        error = httpx.HTTPStatusError("bad request", request=request, response=response)
+        persistence._ensure_user = Mock()
+        persistence._request = Mock(side_effect=error)
+        first_settings = {"entry_value": 10, "allow_real": False}
+
+        persistence.save_settings("user-a", first_settings)
+        persistence.save_settings("user-a", dict(first_settings))
+        persistence.save_settings("user-a", {"entry_value": 11, "allow_real": False})
+
+        self.assertEqual(persistence._ensure_user.call_count, 2)
+        self.assertEqual(persistence._request.call_count, 2)
+        self.assertEqual(
+            persistence._request.call_args_list[0].kwargs["json"],
+            {"user_id": "user-a", "entry_value": 10.0, "allow_real": False},
+        )
+        self.assertEqual(
+            persistence._request.call_args_list[1].kwargs["json"],
+            {"user_id": "user-a", "entry_value": 11.0, "allow_real": False},
+        )
+
     async def test_robot_user_settings_survive_restart_without_cross_user_leak(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = str(Path(directory) / "robot-settings.db")
