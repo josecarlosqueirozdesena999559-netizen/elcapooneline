@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 import sqlite3
 import tempfile
@@ -12,9 +11,6 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
-
-
-logger = logging.getLogger(__name__)
 
 
 def utc_iso() -> str:
@@ -33,37 +29,10 @@ ROBOT_SETTING_FIELDS = (
     "allow_real",
     "confirm_real",
     "max_entries_per_cycle",
-)
-
-SQLITE_ROBOT_SETTING_FIELDS = (
-    *ROBOT_SETTING_FIELDS,
     "martingale_enabled",
     "martingale_steps",
     "martingale_multiplier",
-    "ai_analysis_enabled",
-    "ai_confirmation_required",
-    "ai_min_confidence",
 )
-
-ROBOT_SETTING_DEFAULTS: dict[str, Any] = {
-    "entry_value": 2,
-    "stop_win": 50,
-    "stop_loss": 30,
-    "cycle_minutes": 5,
-    "min_confidence": 94,
-    "min_payout": 88,
-    "strategy_mode": "conservative",
-    "account_mode": "DEMO",
-    "allow_real": False,
-    "confirm_real": False,
-    "max_entries_per_cycle": 1,
-    "martingale_enabled": False,
-    "martingale_steps": 1,
-    "martingale_multiplier": 2,
-    "ai_analysis_enabled": False,
-    "ai_confirmation_required": True,
-    "ai_min_confidence": 70,
-}
 
 
 def require_user_id(user_id: str) -> str:
@@ -73,63 +42,8 @@ def require_user_id(user_id: str) -> str:
     return normalized
 
 
-def _numeric_setting(value: Any, fallback: float | int) -> float:
-    if value is None or value == "":
-        return float(fallback)
-    return float(value)
-
-
-def _integer_setting(value: Any, fallback: int) -> int:
-    if value is None or value == "":
-        return int(fallback)
-    return int(value)
-
-
-def _boolean_setting(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-    return bool(value)
-
-
-def extract_robot_settings(
-    state: dict[str, Any],
-    fields: tuple[str, ...] = ROBOT_SETTING_FIELDS,
-) -> dict[str, Any]:
-    settings: dict[str, Any] = {}
-    for field in fields:
-        if field not in state:
-            continue
-        value = state[field]
-        if field in {
-            "entry_value",
-            "stop_win",
-            "stop_loss",
-            "min_payout",
-            "martingale_multiplier",
-        }:
-            settings[field] = _numeric_setting(value, ROBOT_SETTING_DEFAULTS[field])
-        elif field in {
-            "cycle_minutes",
-            "min_confidence",
-            "max_entries_per_cycle",
-            "martingale_steps",
-            "ai_min_confidence",
-        }:
-            settings[field] = _integer_setting(value, ROBOT_SETTING_DEFAULTS[field])
-        elif field in {
-            "allow_real",
-            "confirm_real",
-            "martingale_enabled",
-            "ai_analysis_enabled",
-            "ai_confirmation_required",
-        }:
-            settings[field] = _boolean_setting(value)
-        elif field in {"strategy_mode", "account_mode"}:
-            fallback = ROBOT_SETTING_DEFAULTS[field]
-            settings[field] = str(value or fallback)
-    return settings
+def extract_robot_settings(state: dict[str, Any]) -> dict[str, Any]:
+    return {field: state[field] for field in ROBOT_SETTING_FIELDS if field in state}
 
 
 class RobotPersistence(ABC):
@@ -222,7 +136,7 @@ class SQLiteRobotPersistence(RobotPersistence):
 
     def save_settings(self, user_id: str, settings: dict[str, Any]) -> None:
         user_id = require_user_id(user_id)
-        values = extract_robot_settings(settings, SQLITE_ROBOT_SETTING_FIELDS)
+        values = extract_robot_settings(settings)
         now = utc_iso()
         with self._connect() as connection:
             connection.execute(
@@ -232,9 +146,8 @@ class SQLiteRobotPersistence(RobotPersistence):
                     min_confidence, min_payout, strategy_mode, account_mode,
                     allow_real, confirm_real, max_entries_per_cycle,
                     martingale_enabled, martingale_steps, martingale_multiplier,
-                    ai_analysis_enabled, ai_confirmation_required, ai_min_confidence,
                     created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(user_id) do update set
                     entry_value = excluded.entry_value,
                     stop_win = excluded.stop_win,
@@ -250,9 +163,6 @@ class SQLiteRobotPersistence(RobotPersistence):
                     martingale_enabled = excluded.martingale_enabled,
                     martingale_steps = excluded.martingale_steps,
                     martingale_multiplier = excluded.martingale_multiplier,
-                    ai_analysis_enabled = excluded.ai_analysis_enabled,
-                    ai_confirmation_required = excluded.ai_confirmation_required,
-                    ai_min_confidence = excluded.ai_min_confidence,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -271,9 +181,6 @@ class SQLiteRobotPersistence(RobotPersistence):
                     int(bool(values.get("martingale_enabled", False))),
                     values.get("martingale_steps", 1),
                     values.get("martingale_multiplier", 2),
-                    int(bool(values.get("ai_analysis_enabled", False))),
-                    int(bool(values.get("ai_confirmation_required", True))),
-                    values.get("ai_min_confidence", 70),
                     now,
                     now,
                 ),
@@ -287,8 +194,7 @@ class SQLiteRobotPersistence(RobotPersistence):
                 select entry_value, stop_win, stop_loss, cycle_minutes,
                        min_confidence, min_payout, strategy_mode, account_mode,
                        allow_real, confirm_real, max_entries_per_cycle,
-                       martingale_enabled, martingale_steps, martingale_multiplier,
-                       ai_analysis_enabled, ai_confirmation_required, ai_min_confidence
+                       martingale_enabled, martingale_steps, martingale_multiplier
                 from robot_user_settings where user_id = ?
                 """,
                 (user_id,),
@@ -299,8 +205,6 @@ class SQLiteRobotPersistence(RobotPersistence):
         settings["allow_real"] = bool(settings["allow_real"])
         settings["confirm_real"] = bool(settings["confirm_real"])
         settings["martingale_enabled"] = bool(settings["martingale_enabled"])
-        settings["ai_analysis_enabled"] = bool(settings["ai_analysis_enabled"])
-        settings["ai_confirmation_required"] = bool(settings["ai_confirmation_required"])
         return settings
 
     def save_trade(self, user_id: str, trade: dict[str, Any]) -> None:
@@ -464,9 +368,6 @@ class SQLiteRobotPersistence(RobotPersistence):
                     martingale_enabled integer not null default 0,
                     martingale_steps integer not null default 1,
                     martingale_multiplier real not null default 2,
-                    ai_analysis_enabled integer not null default 0,
-                    ai_confirmation_required integer not null default 1,
-                    ai_min_confidence integer not null default 70,
                     created_at text not null,
                     updated_at text not null
                 );
@@ -516,9 +417,6 @@ class SQLiteRobotPersistence(RobotPersistence):
             self._ensure_column(connection, "robot_user_settings", "martingale_enabled", "integer not null default 0")
             self._ensure_column(connection, "robot_user_settings", "martingale_steps", "integer not null default 1")
             self._ensure_column(connection, "robot_user_settings", "martingale_multiplier", "real not null default 2")
-            self._ensure_column(connection, "robot_user_settings", "ai_analysis_enabled", "integer not null default 0")
-            self._ensure_column(connection, "robot_user_settings", "ai_confirmation_required", "integer not null default 1")
-            self._ensure_column(connection, "robot_user_settings", "ai_min_confidence", "integer not null default 70")
             self._ensure_column(connection, "robot_trade_history", "is_gale", "integer not null default 0")
             self._ensure_column(connection, "robot_trade_history", "gale_step", "integer not null default 0")
             self._ensure_column(connection, "robot_trade_history", "parent_order_id", "text")
@@ -554,7 +452,6 @@ class SupabaseRobotPersistence(RobotPersistence):
             "Authorization": f"Bearer {service_role_key}",
             "Content-Type": "application/json",
         }
-        self._failed_settings_payloads: dict[str, str] = {}
 
     def save_state(self, user_id: str, state: dict[str, Any]) -> None:
         user_id = require_user_id(user_id)
@@ -599,33 +496,14 @@ class SupabaseRobotPersistence(RobotPersistence):
 
     def save_settings(self, user_id: str, settings: dict[str, Any]) -> None:
         user_id = require_user_id(user_id)
-        values = extract_robot_settings(settings)
-        body = {"user_id": user_id, **values}
-        payload_signature = json.dumps(values, sort_keys=True, separators=(",", ":"))
-        if self._failed_settings_payloads.get(user_id) == payload_signature:
-            logger.debug(
-                "[SUPABASE SETTINGS PERSISTENCE SKIPPED] user_id=%s reason=previous_400_until_settings_change",
-                user_id,
-            )
-            return
         self._ensure_user(user_id)
-        try:
-            self._request(
-                "POST",
-                "/robot_user_settings?on_conflict=user_id",
-                json=body,
-                extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
-            )
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 400:
-                self._failed_settings_payloads[user_id] = payload_signature
-                logger.error(
-                    "[SUPABASE SETTINGS PERSISTENCE DISABLED] user_id=%s reason=400_until_settings_change",
-                    user_id,
-                )
-                return
-            raise
-        self._failed_settings_payloads.pop(user_id, None)
+        body = {"user_id": user_id, **extract_robot_settings(settings)}
+        self._request(
+            "POST",
+            "/robot_user_settings?on_conflict=user_id",
+            json=body,
+            extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
 
     def load_settings(self, user_id: str) -> dict[str, Any] | None:
         user_id = require_user_id(user_id)
@@ -738,17 +616,7 @@ class SupabaseRobotPersistence(RobotPersistence):
             headers.update(extra_headers)
         with httpx.Client(timeout=20.0) as client:
             response = client.request(method, f"{self.rest_url}{path}", headers=headers, json=json)
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError:
-            logger.error(
-                "[SUPABASE REST ERROR] method=%s path=%s status_code=%s response_text=%s",
-                method,
-                path,
-                response.status_code,
-                response.text,
-            )
-            raise
+        response.raise_for_status()
         return response.json() if response.content else []
 
 

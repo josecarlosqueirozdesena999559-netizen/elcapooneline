@@ -115,9 +115,6 @@ create table if not exists public.robot_user_settings (
   martingale_enabled boolean not null default false,
   martingale_steps integer not null default 1,
   martingale_multiplier numeric not null default 2,
-  ai_analysis_enabled boolean not null default false,
-  ai_confirmation_required boolean not null default true,
-  ai_min_confidence integer not null default 70,
   created_at timestamptz not null default timezone('utc'::text, now()),
   updated_at timestamptz not null default timezone('utc'::text, now())
 );
@@ -137,9 +134,6 @@ alter table public.robot_user_settings
   add column if not exists martingale_enabled boolean not null default false,
   add column if not exists martingale_steps integer not null default 1,
   add column if not exists martingale_multiplier numeric not null default 2,
-  add column if not exists ai_analysis_enabled boolean not null default false,
-  add column if not exists ai_confirmation_required boolean not null default true,
-  add column if not exists ai_min_confidence integer not null default 70,
   add column if not exists created_at timestamptz not null default timezone('utc'::text, now()),
   add column if not exists updated_at timestamptz not null default timezone('utc'::text, now());
 
