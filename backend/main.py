@@ -2352,6 +2352,13 @@ async def finish_monitored_trade(user_id: str, order_id: str, result: str, profi
         finalized, state = auto_trader.finish_trade(user_id, order_id, result, profit)
         if not finalized and state.gale_pending:
             logger.info(
+                "[GALE_TRIGGERED] user_id=%s order_id=%s gale_amount=%s multiplier=%s",
+                user_id,
+                order_id,
+                state.gale_amount,
+                state.martingale_multiplier,
+            )
+            logger.info(
                 "[TRADE_LOSS_GALE_TRIGGERED] user_id=%s order_id=%s gale_amount=%s multiplier=%s",
                 user_id,
                 order_id,
@@ -2365,7 +2372,29 @@ async def finish_monitored_trade(user_id: str, order_id: str, result: str, profi
                 (state.pending_signal or {}).get("symbol"),
                 state.gale_direction,
             )
+            if state.last_trade:
+                try:
+                    robot_persistence.save_trade_history(user_id, state.last_trade)
+                    logger.info(
+                        "[HISTORY_SAVED] user_id=%s order_id=%s result=%s final_result=%s",
+                        user_id,
+                        order_id,
+                        state.last_trade.get("result"),
+                        state.last_trade.get("final_result"),
+                    )
+                except Exception:
+                    logger.exception(
+                        "[ROBOT HISTORY ERROR] user_id=%s order_id=%s",
+                        user_id,
+                        order_id,
+                    )
         if finalized and state.last_trade:
+            cycle_profit = float(state.last_trade.get("profit") or 0)
+            if state.last_trade.get("is_gale"):
+                cycle_profit = round(
+                    float((state.gale_parent_trade or {}).get("profit") or 0) + cycle_profit,
+                    2,
+                )
             logger.info(
                 "[RESULT_RECEIVED] user_id=%s order_id=%s result=%s profit=%s",
                 user_id,
@@ -2380,14 +2409,46 @@ async def finish_monitored_trade(user_id: str, order_id: str, result: str, profi
                 result,
                 state.last_trade.get("profit"),
             )
+            if state.last_trade.get("is_gale"):
+                logger.info(
+                    "[GALE_RESULT] user_id=%s order_id=%s parent_order_id=%s result=%s profit=%s",
+                    user_id,
+                    order_id,
+                    state.last_trade.get("parent_order_id"),
+                    result,
+                    state.last_trade.get("profit"),
+                )
             try:
                 robot_persistence.save_trade_history(user_id, state.last_trade)
+                logger.info(
+                    "[HISTORY_SAVED] user_id=%s order_id=%s result=%s final_result=%s",
+                    user_id,
+                    order_id,
+                    state.last_trade.get("result"),
+                    state.last_trade.get("final_result"),
+                )
             except Exception:
                 logger.exception(
                     "[ROBOT HISTORY ERROR] user_id=%s order_id=%s",
                     user_id,
                     order_id,
                 )
+            logger.info(
+                "[CYCLE_FINAL_RESULT] user_id=%s order_id=%s cycle_result=%s final_result=%s cycle_profit=%s",
+                user_id,
+                order_id,
+                state.cycle_result,
+                state.last_trade.get("final_result"),
+                cycle_profit,
+            )
+            logger.info(
+                "[SCORE_UPDATED] user_id=%s wins=%s losses=%s profit=%s cycle_result=%s",
+                user_id,
+                state.wins,
+                state.losses,
+                state.profit,
+                state.cycle_result,
+            )
             logger.info(
                 "[RESULT_DISPLAY_UNTIL] user_id=%s result_display_until=%s",
                 user_id,
@@ -3189,6 +3250,15 @@ async def execute_robot_cycle(
                     direction,
                     state.fallback_candidate_used,
                 )
+                if is_gale_order:
+                    logger.info(
+                        "[GALE_ORDER_SENT] user_id=%s cycle_id=%s order_id=%s parent_order_id=%s amount=%s",
+                        user_id,
+                        state.cycle_id,
+                        order_id,
+                        trade.get("parent_order_id"),
+                        order_amount,
+                    )
                 logger.info(
                     "[TRADE_EXECUTED] user_id=%s order_id=%s symbol=%s direction=%s amount=%s",
                     user_id,
@@ -3572,8 +3642,13 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
 
 
 def build_robot_stats(items: list[dict[str, Any]]) -> dict[str, Any]:
-    wins = sum(1 for item in items if item.get("result") == "WIN")
-    losses = sum(1 for item in items if item.get("result") == "LOSS")
+    final_results = [
+        str(item.get("final_result") or "").strip().upper()
+        for item in items
+        if str(item.get("final_result") or "").strip().upper() in {"WIN", "LOSS"}
+    ]
+    wins = sum(1 for result in final_results if result == "WIN")
+    losses = sum(1 for result in final_results if result == "LOSS")
     total_trades = wins + losses
     profit = round(sum(float(item.get("profit") or 0) for item in items), 2)
     gross_profit = sum(max(0.0, float(item.get("profit") or 0)) for item in items)
@@ -3582,10 +3657,10 @@ def build_robot_stats(items: list[dict[str, Any]]) -> dict[str, Any]:
 
     current_win_streak = 0
     current_loss_streak = 0
-    if items:
-        current_result = items[0].get("result")
-        for item in items:
-            if item.get("result") != current_result:
+    if final_results:
+        current_result = final_results[0]
+        for result in final_results:
+            if result != current_result:
                 break
             if current_result == "WIN":
                 current_win_streak += 1
@@ -3596,12 +3671,12 @@ def build_robot_stats(items: list[dict[str, Any]]) -> dict[str, Any]:
     best_loss_streak = 0
     win_streak = 0
     loss_streak = 0
-    for item in reversed(items):
-        if item.get("result") == "WIN":
+    for result in reversed(final_results):
+        if result == "WIN":
             win_streak += 1
             loss_streak = 0
             best_win_streak = max(best_win_streak, win_streak)
-        elif item.get("result") == "LOSS":
+        elif result == "LOSS":
             loss_streak += 1
             win_streak = 0
             best_loss_streak = max(best_loss_streak, loss_streak)

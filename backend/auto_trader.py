@@ -369,6 +369,15 @@ class RobotState:
                 f"{reason_text}"
             )
             data["voice_event_id"] = f"{self.cycle_id or ''}:{symbol}:{direction}:{score}:sending"
+        if self.status in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED} and self.last_trade is not None:
+            final_result = str(self.last_trade.get("final_result") or self.last_trade.get("result") or "").upper()
+            gale_step = int(self.last_trade.get("gale_step") or 0)
+            if final_result == "WIN":
+                data["operation_message"] = "WIN"
+                data["voice_message"] = "WIN no Gale 1" if gale_step == 1 else "WIN"
+            elif final_result == "LOSS":
+                data["operation_message"] = "LOSS no Gale 1" if gale_step == 1 else "LOSS"
+                data["voice_message"] = "LOSS no Gale 1" if gale_step == 1 else "LOSS"
         if self.status == STATUS_WAITING_NEXT_CYCLE and not self.operation_in_progress:
             data["strategy_reason"] = "Analisando mercado em silêncio. A entrada será revelada quando o contador zerar."
             data["used_strategies"] = []
@@ -507,7 +516,7 @@ class AutoTrader:
             state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
         if state.status == STATUS_PENDING_RESULT and state.gale_active:
             state.status = STATUS_PENDING_GALE_RESULT
-        if state.status == STATUS_RESULT_RECEIVED and state.cycle_result in {"GALE_WIN", "GALE_LOSS"}:
+        if state.status == STATUS_RESULT_RECEIVED and bool((state.last_trade or {}).get("is_gale")):
             state.status = STATUS_GALE_RESULT_RECEIVED
 
         result_visible = (
@@ -1434,7 +1443,7 @@ class AutoTrader:
                 "result": "LOSS",
                 "profit": round(loss_profit, 2),
                 "finished_at": finished_at.isoformat(),
-                "final_result": "LOSS",
+                "final_result": None,
                 "cycle_result": None,
             }
         )
@@ -1460,6 +1469,9 @@ class AutoTrader:
         state.gale_original_order_id = normalized_order_id
         state.gale_parent_trade = dict(parent_trade)
         state.cycle_result = None
+        history = self._histories.setdefault(user_id, [])
+        history.append(dict(parent_trade))
+        del history[:-100]
         return True, state
 
     def _clear_gale_state(self, state: RobotState, *, preserve_context: bool = False) -> None:
@@ -1505,14 +1517,18 @@ class AutoTrader:
         amount = float(trade.get("amount") or 0)
         trade_profit = float(profit)
         if normalized_result == "WIN":
+            trade_profit = trade_profit if trade_profit > 0 else amount
             state.wins += 1
-            state.profit += trade_profit
-            state.cycle_result = "GALE_WIN" if is_gale_trade else "WIN"
+            state.cycle_result = "WIN"
         else:
             state.losses += 1
             trade_profit = trade_profit if trade_profit < 0 else -amount
-            state.profit += trade_profit
-            state.cycle_result = "GALE_LOSS" if is_gale_trade else "LOSS"
+            state.cycle_result = "LOSS"
+
+        cycle_profit = trade_profit
+        if is_gale_trade:
+            cycle_profit = round(float((state.gale_parent_trade or {}).get("profit") or 0) + trade_profit, 2)
+        state.profit += cycle_profit
 
         finished_at = utc_now()
         trade.update(

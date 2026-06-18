@@ -99,7 +99,7 @@ class RobotHistoryPersistenceTests(unittest.TestCase):
                     is_gale=True,
                     gale_step=1,
                     parent_order_id="base-order",
-                    cycle_result="GALE_WIN",
+                    cycle_result="WIN",
                     final_result="WIN",
                     original_amount=2.0,
                     gale_amount=4.0,
@@ -110,7 +110,7 @@ class RobotHistoryPersistenceTests(unittest.TestCase):
 
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0]["parent_order_id"], "base-order")
-            self.assertEqual(items[0]["cycle_result"], "GALE_WIN")
+            self.assertEqual(items[0]["cycle_result"], "WIN")
             self.assertEqual(items[0]["final_result"], "WIN")
             self.assertEqual(items[0]["original_amount"], 2.0)
             self.assertEqual(items[0]["gale_amount"], 4.0)
@@ -285,6 +285,45 @@ class RobotHistoryEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["current_loss_streak"], 0)
         self.assertEqual(stats["best_win_streak"], 2)
         self.assertEqual(stats["best_loss_streak"], 2)
+
+    async def test_stats_count_only_final_cycle_result_when_history_has_entry_and_gale(self) -> None:
+        user_id = "user-gale-stats"
+        now = datetime.now(timezone.utc)
+        main.robot_persistence.save_trade_history(
+            user_id,
+            final_trade(
+                "base-1",
+                "LOSS",
+                -2,
+                finished_at=now - timedelta(minutes=2),
+                final_result=None,
+                cycle_result=None,
+            ),
+        )
+        main.robot_persistence.save_trade_history(
+            user_id,
+            final_trade(
+                "gale-1",
+                "LOSS",
+                -4,
+                finished_at=now - timedelta(minutes=1),
+                is_gale=True,
+                gale_step=1,
+                parent_order_id="base-1",
+                final_result="LOSS",
+                cycle_result="LOSS",
+                original_amount=2.0,
+                gale_amount=4.0,
+            ),
+        )
+
+        response = await main.robot_stats(7, {"user_id": user_id})
+        stats = json.loads(response.body)["data"]
+
+        self.assertEqual(stats["wins"], 0)
+        self.assertEqual(stats["losses"], 1)
+        self.assertEqual(stats["total_trades"], 1)
+        self.assertEqual(stats["profit"], -6.0)
 
     async def test_endpoints_never_mix_users(self) -> None:
         now = datetime.now(timezone.utc)

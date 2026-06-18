@@ -114,6 +114,8 @@ class AutoTraderResultTests(unittest.TestCase):
         self.assertEqual(payload["gale_direction"], "CALL")
         self.assertEqual(payload["gale_original_order_id"], "201")
         self.assertIsNotNone(payload["gale_parent_trade"])
+        self.assertEqual(trader.history("user-gale")["trades"][0]["result"], "LOSS")
+        self.assertIsNone(trader.history("user-gale")["trades"][0]["final_result"])
 
     def test_gale_win_counts_final_win_and_returns_result_status(self) -> None:
         trader = AutoTrader()
@@ -140,12 +142,13 @@ class AutoTraderResultTests(unittest.TestCase):
         self.assertEqual(state.status, STATUS_GALE_RESULT_RECEIVED)
         self.assertEqual(state.wins, 1)
         self.assertEqual(state.losses, 0)
-        self.assertEqual(state.cycle_result, "GALE_WIN")
+        self.assertEqual(state.cycle_result, "WIN")
         self.assertEqual(state.last_trade["parent_order_id"], "301")
         self.assertTrue(state.last_trade["is_gale"])
         self.assertEqual(state.last_trade["final_result"], "WIN")
         self.assertEqual(state.last_trade["original_amount"], 2.0)
         self.assertEqual(state.last_trade["gale_amount"], 4.0)
+        self.assertEqual(state.profit, 1.52)
 
     def test_gale_loss_counts_single_final_loss(self) -> None:
         trader = AutoTrader()
@@ -172,8 +175,10 @@ class AutoTraderResultTests(unittest.TestCase):
         self.assertTrue(finalized)
         self.assertEqual(state.losses, 1)
         self.assertEqual(state.wins, 0)
-        self.assertEqual(state.profit, -4.0)
-        self.assertEqual(state.cycle_result, "GALE_LOSS")
+        self.assertEqual(state.profit, -6.0)
+        self.assertEqual(state.cycle_result, "LOSS")
+        self.assertEqual(state.last_trade["final_result"], "LOSS")
+        self.assertEqual(state.last_trade["profit"], -4.0)
 
     def test_history_keeps_only_last_one_hundred_trades(self) -> None:
         trader = AutoTrader()

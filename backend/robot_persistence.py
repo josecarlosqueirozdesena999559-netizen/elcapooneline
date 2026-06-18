@@ -786,7 +786,11 @@ def build_trade_history_item(user_id: str, trade: dict[str, Any]) -> dict[str, A
         "gale_step": int(trade.get("gale_step") or 0),
         "parent_order_id": str(trade.get("parent_order_id") or "") or None,
         "cycle_result": str(trade.get("cycle_result") or "") or None,
-        "final_result": str(trade.get("final_result") or result),
+        "final_result": (
+            str(trade.get("final_result") or "").strip().upper() or None
+            if "final_result" in trade
+            else result
+        ),
         "original_amount": float(trade.get("original_amount") or trade.get("amount") or 0),
         "gale_amount": float(trade.get("gale_amount") or 0),
     }
