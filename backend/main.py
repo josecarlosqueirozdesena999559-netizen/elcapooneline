@@ -34,9 +34,9 @@ from backend.auto_trader import (
     STATUS_WAITING_NEXT_CYCLE,
     TEMPORARY_WAIT_STATUSES,
     parse_datetime,
+    strip_ai_fields,
     utc_now,
 )
-from backend.openai_signal_reviewer import review_signal
 from backend.robot_persistence import (
     RobotPersistence,
     create_robot_persistence,
@@ -140,6 +140,40 @@ def build_success(data: Any) -> dict[str, Any]:
 
 def build_error(message: str) -> dict[str, Any]:
     return {"ok": False, "data": None, "error": message}
+
+
+def strip_ai_config_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in payload.items()
+        if not str(key or "").startswith("ai")
+    }
+
+
+def build_local_signal_review(signal: dict[str, Any]) -> dict[str, Any]:
+    blocked_filters = [str(item) for item in (signal.get("blocked_filters") or [])]
+    confidence = int(signal.get("confidence") or 0)
+    payout = float(signal.get("payout") or 0)
+    approved = bool(signal.get("trade_allowed")) and str(signal.get("signal") or "").upper() in {"CALL", "PUT"}
+    if not approved:
+        risk = "HIGH"
+    elif confidence >= 90 and payout >= 85:
+        risk = "LOW"
+    elif confidence >= 75 and payout >= 80:
+        risk = "MEDIUM"
+    else:
+        risk = "HIGH"
+    recommendation = "VALID_SIGNAL" if approved else "REJECT_SIGNAL"
+    summary = str(signal.get("reason") or signal.get("entry_reason") or "Revisao local concluida.").strip()
+    return {
+        "approved": approved,
+        "risk": risk,
+        "quality": max(0, min(100, confidence)),
+        "summary": summary,
+        "warnings": blocked_filters,
+        "recommendation": recommendation,
+        "source": "local",
+    }
 
 
 def normalize_binary_active(active: str) -> str:
@@ -1480,14 +1514,14 @@ def robot_stop_reason(state: Any) -> str | None:
 
 
 def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
-    data = state.to_dict()
+    data = strip_ai_fields(state.to_dict())
     user_id = extra.pop("user_id", None)
     if user_id is not None:
         worker_task = robot_tasks.get(str(user_id))
         last_tick_at = robot_worker_last_tick_at.get(str(user_id))
         data["worker_running"] = bool(worker_task is not None and not worker_task.done())
         data["worker_last_tick_at"] = last_tick_at.isoformat() if last_tick_at is not None else None
-    data.update(extra)
+    data.update(strip_ai_fields(extra))
     if data.get("operation_in_progress"):
         logger.info(
             "[EXPIRATION_COUNTDOWN] status=%s order_id=%s expiration_seconds=%s result_waiting=%s",
@@ -1676,7 +1710,7 @@ def persist_robot(user_id: str) -> None:
     last_trade: dict[str, Any] | None = None
     try:
         state = auto_trader.get(user_id)
-        state_payload = state.to_dict()
+        state_payload = strip_ai_fields(state.to_dict())
         last_trade = state.last_trade
     except Exception:
         logger.warning("[ROBOT_PERSISTENCE_WARNING] user_id=%s step=read_state", user_id, exc_info=True)
@@ -3256,7 +3290,7 @@ async def signals_review(
         return json_response(status_code, payload)
 
     signal = payload["data"]
-    review = await review_signal(signal)
+    review = build_local_signal_review(signal)
     return json_response(200, build_success({"signal": signal, "review": review}))
 
 
@@ -3284,7 +3318,7 @@ async def signals_top_reviewed(auth: dict[str, str] = Depends(require_headers)) 
 
     reviewed = []
     for signal in payload["data"][:5]:
-        review = await review_signal(signal)
+        review = build_local_signal_review(signal)
         reviewed.append({"signal": signal, "review": review})
 
     reviewed.sort(
@@ -3501,10 +3535,18 @@ async def debug_robot_settings(
 
 @app.post("/robot/config")
 async def robot_config(
-    body: RobotConfigUpdate,
+    body: Any,
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
     user_id = auth["user_id"]
+    if isinstance(body, RobotConfigUpdate):
+        raw_body = body.model_dump(by_alias=False, exclude_none=True)
+    elif isinstance(body, dict):
+        raw_body = dict(body)
+    else:
+        raw_body = {}
+    sanitized_body = strip_ai_config_fields(raw_body)
+    body = RobotConfigUpdate.model_validate(sanitized_body)
     get_user_robot_state(user_id)
     state = auto_trader.update_config(user_id, body)
     logger.info(

@@ -7,6 +7,14 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
+AI_FIELD_PREFIX = "ai_"
+
+
+def is_ai_field_key(key: Any) -> bool:
+    text = str(key or "").strip()
+    normalized = text.lower()
+    return normalized.startswith(AI_FIELD_PREFIX) or text.startswith("ai")
+
 
 AccountMode = Literal["DEMO", "REAL"]
 Timeframe = Literal["M1", "M5", "M15", "M30"]
@@ -62,6 +70,18 @@ def format_mm_ss(seconds: int) -> str:
     return f"{minutes:02d}:{remaining_seconds:02d}"
 
 
+def strip_ai_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: strip_ai_fields(item)
+            for key, item in value.items()
+            if not is_ai_field_key(key)
+        }
+    if isinstance(value, list):
+        return [strip_ai_fields(item) for item in value]
+    return value
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -82,7 +102,7 @@ def parse_datetime(value: Any) -> datetime | None:
 
 
 class RobotConfigUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     enabled: bool | None = None
     account_mode: AccountMode | None = Field(default=None, validation_alias=AliasChoices("account_mode", "accountMode"))
@@ -189,7 +209,7 @@ class RobotState:
     metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
+        data = strip_ai_fields(asdict(self))
         for key in (
             "current_cycle_started_at",
             "next_cycle_at",
@@ -358,7 +378,7 @@ class RobotState:
         ):
             data.pop(deprecated_key, None)
         if self.last_trade is not None:
-            trade = dict(self.last_trade)
+            trade = strip_ai_fields(dict(self.last_trade))
             trade["result"] = trade.get("result") or STATUS_PENDING_RESULT
             data["last_trade"] = trade
             if self.operation_in_progress:
@@ -447,6 +467,7 @@ class AutoTrader:
         source: StateSource = "memory",
     ) -> RobotState:
         state = RobotState()
+        payload = strip_ai_fields(payload)
         datetime_fields = {
             "current_cycle_started_at",
             "next_cycle_at",
@@ -492,7 +513,7 @@ class AutoTrader:
         self._states[user_id] = state
         self._sources[user_id] = source
 
-        restored_trades = [dict(trade) for trade in (trades or [])]
+        restored_trades = [strip_ai_fields(dict(trade)) for trade in (trades or [])]
         self._histories[user_id] = [
             trade for trade in restored_trades if trade.get("result") in {"WIN", "LOSS", "TIMEOUT"}
         ][-100:]
@@ -827,6 +848,7 @@ class AutoTrader:
 
     def set_pending_signal(self, user_id: str, signal: dict[str, Any]) -> RobotState:
         state = self.get(user_id)
+        signal = strip_ai_fields(signal)
         pending_signal = {
             "symbol": signal["symbol"],
             "direction": signal.get("direction") or signal["signal"],
@@ -976,8 +998,8 @@ class AutoTrader:
     ) -> RobotState:
         state = self.get(user_id)
         state.candidates_count = len(candidates)
-        state.candidates = [dict(candidate) for candidate in candidates]
-        state.best_candidate = dict(best_candidate) if best_candidate is not None else None
+        state.candidates = [strip_ai_fields(dict(candidate)) for candidate in candidates]
+        state.best_candidate = strip_ai_fields(dict(best_candidate)) if best_candidate is not None else None
         state.strategy_score = int((best_candidate or {}).get("strategy_score") or 0)
         state.strategy_name = (best_candidate or {}).get("strategy_name")
         state.strategy_reason = (best_candidate or {}).get("strategy_reason")

@@ -68,14 +68,14 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertEqual(trader.get("user-b").entry_value, 2)
         self.assertEqual(trader.get("user-b").stop_loss, 12)
 
-    def test_ai_analysis_stays_enabled_without_public_config(self) -> None:
+    def test_new_users_do_not_expose_ai_state(self) -> None:
         trader = AutoTrader()
 
         state = trader.get("user-ai-default")
 
-        self.assertTrue(state.ai_analysis_enabled)
-        self.assertTrue(state.ai_confirmation_required)
-        self.assertEqual(state.ai_min_confidence, 70)
+        self.assertFalse(hasattr(state, "ai_analysis_enabled"))
+        self.assertFalse(hasattr(state, "ai_confirmation_required"))
+        self.assertFalse(hasattr(state, "ai_min_confidence"))
 
     def test_sending_order_never_falls_back_to_analyzing(self) -> None:
         trader = AutoTrader()
@@ -572,6 +572,34 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["martingale_multiplier"], 2.5)
         persist.assert_called_once_with(user_id)
 
+    async def test_robot_config_ignores_legacy_ai_fields(self) -> None:
+        user_id = "user-ignore-ai-fields"
+        body = {
+            "entryValue": 9,
+            "minConfidence": 92,
+            "ai_analysis_enabled": True,
+            "ai_confirmation_required": True,
+            "ai_min_confidence": 80,
+            "ai_voice_text": "legacy",
+            "aiVoiceText": "legacyCamel",
+        }
+
+        with (
+            patch.object(main, "persist_robot") as persist,
+            patch.object(main, "ensure_robot_worker"),
+            patch.object(main, "stop_robot_worker", new=AsyncMock()),
+        ):
+            response = await main.robot_config(body, {"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["entry_value"], 9)
+        self.assertEqual(data["min_confidence"], 92)
+        self.assertNotIn("ai_analysis_enabled", data)
+        self.assertNotIn("ai_confirmation_required", data)
+        self.assertNotIn("ai_min_confidence", data)
+        persist.assert_called_once_with(user_id)
+
     async def test_user_isolation_debug_reports_current_user_only(self) -> None:
         main.auto_trader.update_config(
             "user-a",
@@ -626,6 +654,33 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("ai_analysis_enabled", data)
         self.assertNotIn("ai_confirmation_required", data)
         self.assertNotIn("ai_min_confidence", data)
+
+    async def test_robot_state_strips_legacy_ai_fields_from_nested_signal_data(self) -> None:
+        user_id = "user-hidden-ai-nested"
+        state = main.auto_trader.start(user_id)
+        state.status = "WAITING_NEXT_CANDLE_ENTRY"
+        state.pending_signal = {
+            "symbol": "EURUSD-OTC",
+            "signal": "CALL",
+            "direction": "CALL",
+            "confidence": 91,
+            "payout": 88,
+            "ai_voice_text": "legacy",
+            "ai_confidence": 99,
+        }
+        state.best_candidate = dict(state.pending_signal)
+
+        with (
+            patch.object(main, "call_bullex_service", new=AsyncMock(return_value=(200, {"ok": True, "data": {}}))),
+            patch.object(main, "sync_user_store_from_payload"),
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertNotIn("ai_voice_text", data["pending_signal"])
+        self.assertNotIn("ai_confidence", data["pending_signal"])
+        self.assertNotIn("ai_voice_text", data["best_candidate"])
+        self.assertNotIn("ai_confidence", data["best_candidate"])
 
     async def test_robot_state_after_result_keeps_result_visible_for_five_seconds(self) -> None:
         user_id = "user-result-state"
