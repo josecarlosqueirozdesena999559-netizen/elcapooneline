@@ -82,6 +82,20 @@ def strip_ai_fields(value: Any) -> Any:
     return value
 
 
+def format_best_candidate_summary(candidate: dict[str, Any] | None) -> str | None:
+    if not isinstance(candidate, dict):
+        return None
+    symbol = str(candidate.get("symbol") or "").strip()
+    direction = str(candidate.get("direction") or candidate.get("signal") or "").strip().upper()
+    try:
+        confidence = int(candidate.get("confidence") or 0)
+    except (TypeError, ValueError):
+        confidence = 0
+    if not symbol or direction not in {"CALL", "PUT"}:
+        return None
+    return f"{symbol} {direction} confianca {confidence}"
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -200,6 +214,8 @@ class RobotState:
     candidates_count: int = 0
     candidates: list[dict[str, Any]] = field(default_factory=list)
     best_candidate: dict[str, Any] | None = None
+    cycle_best_candidate: dict[str, Any] | None = None
+    cycle_best_trade_candidate: dict[str, Any] | None = None
     strategy_name: str | None = None
     strategy_reason: str | None = None
     used_strategies: list[str] = field(default_factory=list)
@@ -284,17 +300,11 @@ class RobotState:
             data["status"] = self.status
             data["next_cycle_at"] = self.next_cycle_at.isoformat() if self.next_cycle_at is not None else None
             data["pending_signal"] = None
-            data["best_candidate"] = None
             data["candidates"] = []
             data["candidates_count"] = 0
             data["strategy_score"] = 0
             data["strategy_name"] = None
             data["strategy_reason"] = None
-            data["used_strategies"] = []
-            data["candle_reading"] = None
-            data["entry_reason"] = None
-            data["block_reasons"] = []
-            data["metrics"] = {}
         if self.status in {STATUS_SIGNAL_REJECTED, STATUS_ORDER_REJECTED} and self.rejected_at is not None:
             if (now - self.rejected_at).total_seconds() >= 5:
                 data["status"] = STATUS_WAITING_NEXT_CYCLE if self.enabled else STATUS_STOPPED
@@ -333,6 +343,9 @@ class RobotState:
         data["status_message"] = None
         data["entry_target"] = "NEXT_CANDLE_OPEN"
         data["seconds_until_entry"] = max(0, int(data["seconds_until_entry_window"]))
+        data["best_candidate_summary"] = format_best_candidate_summary(
+            strip_ai_fields(self.cycle_best_candidate or self.best_candidate)
+        )
         data["voice_message"] = None
         data["voice_event_id"] = None
         voice_signal = self.pending_signal or self.best_candidate
@@ -355,12 +368,6 @@ class RobotState:
             )
             data["voice_event_id"] = f"{self.cycle_id or ''}:{symbol}:{direction}:{score}:sending"
         if self.status == STATUS_WAITING_NEXT_CYCLE and not self.operation_in_progress:
-            data["best_candidate"] = None
-            data["candidates"] = []
-            data["candidates_count"] = 0
-            data["strategy_score"] = 0
-            data["quality_score"] = 0
-            data["strategy_name"] = None
             data["strategy_reason"] = "Analisando mercado em silêncio. A entrada será revelada quando o contador zerar."
             data["used_strategies"] = []
             data["candle_reading"] = None
@@ -370,6 +377,12 @@ class RobotState:
             data["last_signal"] = None
             data["pending_signal"] = None
             data["analysis_message"] = "Analisando mercado em silêncio..."
+            if data.get("analysis_result") == "NO_TRADE":
+                data["analysis_message"] = "Sem entrada neste ciclo"
+                data["status_message"] = "Sem entrada neste ciclo"
+            elif data.get("best_candidate_summary"):
+                data["analysis_message"] = ANALYSIS_MESSAGE
+                data["status_message"] = f"Melhor candidato: {data['best_candidate_summary']}"
         for deprecated_key in (
             "analysis_window_open",
             "seconds_until_analysis_window",
@@ -591,6 +604,8 @@ class AutoTrader:
         state.candidates_count = 0
         state.candidates = []
         state.best_candidate = None
+        state.cycle_best_candidate = None
+        state.cycle_best_trade_candidate = None
         state.strategy_name = None
         state.strategy_reason = None
         state.used_strategies = []
@@ -631,6 +646,8 @@ class AutoTrader:
             state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
             state.pending_signal = None
             state.best_candidate = None
+            state.cycle_best_candidate = None
+            state.cycle_best_trade_candidate = None
             state.candidates = []
             state.candidates_count = 0
             state.strategy_score = 0
@@ -753,6 +770,8 @@ class AutoTrader:
         state.candidates_count = 0
         state.candidates = []
         state.best_candidate = None
+        state.cycle_best_candidate = None
+        state.cycle_best_trade_candidate = None
         state.strategy_name = None
         state.strategy_reason = None
         state.used_strategies = []
@@ -801,6 +820,8 @@ class AutoTrader:
         state.candidates_count = 0
         state.candidates = []
         state.best_candidate = None
+        state.cycle_best_candidate = None
+        state.cycle_best_trade_candidate = None
         state.strategy_name = None
         state.strategy_reason = None
         state.used_strategies = []
@@ -894,6 +915,8 @@ class AutoTrader:
         state.quality_score = int(pending_signal["quality_score"] or 0)
         state.strategy_score = int(pending_signal["strategy_score"] or 0)
         state.best_candidate = dict(pending_signal)
+        state.cycle_best_candidate = dict(pending_signal)
+        state.cycle_best_trade_candidate = dict(pending_signal)
         state.strategy_name = pending_signal["strategy_name"]
         state.strategy_reason = pending_signal["strategy_reason"]
         state.used_strategies = list(pending_signal["used_strategies"])
@@ -1034,6 +1057,8 @@ class AutoTrader:
         state.quality_score = 0
         state.strategy_score = 0
         state.best_candidate = None
+        state.cycle_best_candidate = None
+        state.cycle_best_trade_candidate = None
         state.strategy_name = None
         state.strategy_reason = None
         state.used_strategies = []
@@ -1042,6 +1067,33 @@ class AutoTrader:
         state.block_reasons = []
         state.metrics = {}
         state.analysis_message = ANALYSIS_MESSAGE if analyze else None
+        return state
+
+    def complete_cycle_without_trade(self, user_id: str, reason: str = "NO_TRADE") -> RobotState:
+        state = self.get(user_id)
+        now = utc_now()
+        state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
+        state.rejection_reason = None
+        state.last_rejection_reason = reason
+        state.last_analysis_at = now
+        state.last_analysis_result = reason
+        state.analysis_result = reason
+        state.analysis_message = "Sem entrada neste ciclo"
+        state.pending_signal = None
+        state.last_signal = None
+        state.operation_in_progress = False
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        state.order_attempts = 0
+        state.fallback_candidate_used = False
+        state.current_cycle_started_at = now
+        state.cycle_id = self._new_cycle_id()
+        state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes) if state.enabled else None
+        state.candidates = []
+        state.candidates_count = 0
+        state.best_candidate = None
+        state.cycle_best_candidate = None
+        state.cycle_best_trade_candidate = None
         return state
 
     def disconnect_account(self, user_id: str) -> RobotState:
@@ -1066,6 +1118,8 @@ class AutoTrader:
         state.candidates_count = 0
         state.candidates = []
         state.best_candidate = None
+        state.cycle_best_candidate = None
+        state.cycle_best_trade_candidate = None
         state.candle_reading = None
         state.entry_reason = None
         state.block_reasons = []

@@ -1981,6 +1981,59 @@ def simple_candle_direction(candles: list[dict[str, Any]]) -> str:
     return "CALL" if prices[-1] >= prices[0] else "PUT"
 
 
+def candidate_rank(candidate: dict[str, Any] | None) -> tuple[int, int, float]:
+    if not isinstance(candidate, dict):
+        return (-1, -1, -1.0)
+    return (
+        int(candidate.get("strategy_score") or candidate.get("score") or 0),
+        int(candidate.get("confidence") or 0),
+        float(candidate.get("payout") or 0),
+    )
+
+
+def candidate_meets_cycle_threshold(
+    candidate: dict[str, Any] | None,
+    state: Any,
+    *,
+    minimum_confidence: int,
+) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    if str(candidate.get("direction") or candidate.get("signal") or "").upper() not in {"CALL", "PUT"}:
+        return False
+    if candidate_pre_order_block_reason(candidate) is not None:
+        return False
+    try:
+        payout = float(candidate.get("payout") or 0)
+        confidence = int(candidate.get("confidence") or 0)
+    except (TypeError, ValueError):
+        return False
+    return payout >= float(state.min_payout) and confidence >= minimum_confidence
+
+
+def choose_better_candidate(
+    current: dict[str, Any] | None,
+    incoming: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if incoming is None:
+        return current
+    if current is None:
+        return dict(incoming)
+    return dict(incoming) if candidate_rank(incoming) > candidate_rank(current) else current
+
+
+def resolve_cycle_entry_candidate(state: Any) -> dict[str, Any] | None:
+    strict = state.cycle_best_trade_candidate
+    if candidate_meets_cycle_threshold(strict, state, minimum_confidence=int(state.min_confidence)):
+        return dict(strict)
+    fallback = state.cycle_best_candidate
+    if candidate_meets_cycle_threshold(fallback, state, minimum_confidence=70):
+        candidate = dict(fallback)
+        candidate["fallback_candidate_used"] = True
+        return candidate
+    return None
+
+
 async def select_fallback_candidate(
     user_id: str,
     state: Any,
@@ -2050,10 +2103,10 @@ async def select_fallback_candidate(
             "symbol": symbol,
             "direction": direction,
             "signal": direction,
-            "strategy_score": 1,
-            "score": 1,
-            "quality_score": 1,
-            "confidence": 1,
+            "strategy_score": 70,
+            "score": 70,
+            "quality_score": 70,
+            "confidence": 70,
             "payout": payout,
             "reason": "Fallback operacional pelo movimento simples das ultimas velas.",
             "entry_reason": "Fallback operacional pelo movimento simples das ultimas velas.",
@@ -2106,7 +2159,7 @@ async def update_cycle_analysis(
             return state
 
     logger.info(
-        "[CYCLE_ANALYSIS_TICK] user_id=%s cycle_id=%s seconds_until_next_cycle=%s",
+        "[CYCLE_ANALYSIS] user_id=%s cycle_id=%s seconds_until_next_cycle=%s",
         user_id,
         state.cycle_id,
         state.to_dict()["seconds_until_next_cycle"],
@@ -2229,34 +2282,57 @@ async def update_cycle_analysis(
         )
         candidates.append(candidate)
 
-    selectable = [
+    strict_candidates = [
         candidate
         for candidate in candidates
-        if candidate.get("trade_allowed")
-        and candidate.get("direction") in {"CALL", "PUT"}
-        and candidate_pre_order_block_reason(candidate) is None
-    ]
-    selected = (
-        max(
-            selectable,
-            key=lambda item: (
-                int(item.get("strategy_score") or 0),
-                int(item.get("confidence") or 0),
-                float(item.get("payout") or 0),
-            ),
+        if candidate_meets_cycle_threshold(
+            candidate,
+            state,
+            minimum_confidence=int(state.min_confidence),
         )
-        if selectable
-        else None
+    ]
+    visible_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate_meets_cycle_threshold(candidate, state, minimum_confidence=70)
+    ] or candidates
+    current_best_candidate = max(visible_candidates, key=candidate_rank) if visible_candidates else None
+    current_best_trade_candidate = max(strict_candidates, key=candidate_rank) if strict_candidates else None
+    previous_symbol = (state.cycle_best_candidate or {}).get("symbol") if state.cycle_best_candidate else None
+    state = auto_trader.set_analysis_candidates(
+        user_id,
+        candidates,
+        current_best_candidate,
     )
-    previous_symbol = (state.best_candidate or {}).get("symbol") if state.best_candidate else None
-    state = auto_trader.set_analysis_candidates(user_id, candidates, selected)
-    if selected is not None and selected.get("symbol") != previous_symbol:
+    state.cycle_best_candidate = choose_better_candidate(state.cycle_best_candidate, current_best_candidate)
+    state.cycle_best_trade_candidate = choose_better_candidate(
+        state.cycle_best_trade_candidate,
+        current_best_trade_candidate,
+    )
+    state.best_candidate = dict(state.cycle_best_candidate) if state.cycle_best_candidate is not None else None
+    if state.cycle_best_candidate is not None:
+        state.strategy_score = int((state.cycle_best_candidate or {}).get("strategy_score") or 0)
+        state.strategy_name = (state.cycle_best_candidate or {}).get("strategy_name")
+        state.strategy_reason = (state.cycle_best_candidate or {}).get("strategy_reason")
+        state.used_strategies = list((state.cycle_best_candidate or {}).get("used_strategies") or [])
+        state.candle_reading = (state.cycle_best_candidate or {}).get("candle_reading")
+        state.entry_reason = (state.cycle_best_candidate or {}).get("entry_reason")
+        state.block_reasons = list(
+            (state.cycle_best_candidate or {}).get("block_reasons")
+            or (state.cycle_best_candidate or {}).get("blocked_filters")
+            or []
+        )
+        state.metrics = dict((state.cycle_best_candidate or {}).get("metrics") or {})
+    if state.cycle_best_candidate is not None and state.cycle_best_candidate.get("symbol") != previous_symbol:
         logger.info(
-            "[BEST_CANDIDATE_UPDATED] user_id=%s symbol=%s direction=%s strategy_score=%s",
+            "[BEST_CANDIDATE] user_id=%s cycle_id=%s symbol=%s direction=%s confidence=%s payout=%s fallback=%s",
             user_id,
-            selected.get("symbol"),
-            selected.get("direction"),
-            selected.get("strategy_score"),
+            state.cycle_id,
+            state.cycle_best_candidate.get("symbol"),
+            state.cycle_best_candidate.get("direction"),
+            state.cycle_best_candidate.get("confidence"),
+            state.cycle_best_candidate.get("payout"),
+            not bool(state.cycle_best_trade_candidate),
         )
     return state
 
@@ -2355,7 +2431,7 @@ async def execute_robot_cycle(
                     return 200, build_robot_payload(state)
             elif state.to_dict()["seconds_until_next_cycle"] <= 0:
                 logger.info(
-                    "[CYCLE_DUE] user_id=%s cycle_id=%s current_cycle_started_at=%s",
+                    "[CYCLE_START] user_id=%s cycle_id=%s current_cycle_started_at=%s",
                     user_id,
                     state.cycle_id,
                     state.current_cycle_started_at,
@@ -2442,38 +2518,53 @@ async def execute_robot_cycle(
                 if seconds_until_next_cycle > 0:
                     state = await update_cycle_analysis(user_id, state, entry_window)
                     logger.info(
-                        "[ROBOT WAITING NEXT CYCLE] user_id=%s next_cycle_at=%s",
+                        "[ENTRY_WINDOW] user_id=%s cycle_id=%s next_cycle_at=%s best_candidate=%s",
                         user_id,
+                        state.cycle_id,
                         state.next_cycle_at,
+                        (state.cycle_best_candidate or state.best_candidate or {}).get("symbol"),
                     )
                     return 200, build_robot_payload(state)
 
                 logger.info(
-                    "[CYCLE_ENTRY_DUE] user_id=%s cycle_id=%s",
+                    "[CYCLE_END] user_id=%s cycle_id=%s phase=selection",
                     user_id,
                     state.cycle_id,
                 )
-                if state.best_candidate is None:
+                if state.cycle_best_candidate is None and state.best_candidate is None:
                     state = await update_cycle_analysis(user_id, state, entry_window, force=True)
-                selected = dict(state.best_candidate) if state.best_candidate else None
+                selected = resolve_cycle_entry_candidate(state)
                 if selected is None:
-                    state = auto_trader.reject_order(
-                        user_id,
-                        "NO_AVAILABLE_ASSET",
-                        last_order_error=NO_AVAILABLE_ASSET_ERROR,
-                    )
-                    logger.error(
-                        "[ORDER_SEND_FAILED] user_id=%s active=%s error=%s",
-                        user_id,
-                        None,
-                        "NO_AVAILABLE_ASSET",
-                    )
                     logger.info(
-                        "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                        "[NO_TRADE] user_id=%s cycle_id=%s best_candidate=%s confidence=%s payout=%s",
                         user_id,
+                        state.cycle_id,
+                        (state.cycle_best_candidate or {}).get("symbol"),
+                        (state.cycle_best_candidate or {}).get("confidence"),
+                        (state.cycle_best_candidate or {}).get("payout"),
+                    )
+                    state = auto_trader.complete_cycle_without_trade(user_id, "NO_TRADE")
+                    logger.info(
+                        "[CYCLE_END] user_id=%s cycle_id=%s result=NO_TRADE next_cycle_at=%s",
+                        user_id,
+                        state.cycle_id,
                         state.next_cycle_at,
                     )
                     return 200, build_robot_payload(state)
+                logger.info(
+                    "[BEST_CANDIDATE] user_id=%s cycle_id=%s symbol=%s direction=%s confidence=%s payout=%s fallback=%s",
+                    user_id,
+                    state.cycle_id,
+                    selected.get("symbol"),
+                    selected.get("direction") or selected.get("signal"),
+                    selected.get("confidence"),
+                    selected.get("payout"),
+                    bool(selected.get("fallback_candidate_used")),
+                )
+                state = auto_trader.set_pending_signal(user_id, selected)
+                if selected.get("fallback_candidate_used"):
+                    state.fallback_candidate_used = True
+                selected = dict(state.pending_signal or {})
             if selected is None and False:
                 if not entry_window["analysis_window_open"]:
                     state = auto_trader.wait_analysis_window(user_id, entry_window)
@@ -2804,6 +2895,15 @@ async def execute_robot_cycle(
                     entry_window["entry_window_start_second"],
                     entry_window["entry_window_end_second"],
                 )
+                logger.info(
+                    "[ENTRY_WINDOW] user_id=%s cycle_id=%s symbol=%s seconds_until_entry=%s window_start=%s window_end=%s",
+                    user_id,
+                    state.cycle_id,
+                    selected.get("symbol"),
+                    entry_window["seconds_until_entry_window"],
+                    entry_window["entry_window_start_second"],
+                    entry_window["entry_window_end_second"],
+                )
                 return 200, build_robot_payload(state)
 
             logger.info(
@@ -2816,6 +2916,15 @@ async def execute_robot_cycle(
                 entry_window["entry_window_start_second"],
                 entry_window["entry_window_end_second"],
                 entry_window["buy_target_second"],
+            )
+            logger.info(
+                "[ENTRY_WINDOW] user_id=%s cycle_id=%s symbol=%s state=OPEN current_candle_seconds=%s window_start=%s window_end=%s",
+                user_id,
+                state.cycle_id,
+                selected.get("symbol") if isinstance(selected, dict) else None,
+                entry_window["current_candle_seconds"],
+                entry_window["entry_window_start_second"],
+                entry_window["entry_window_end_second"],
             )
             order_path = "/bullex/buy-demo"
             if state.account_mode == "REAL":
@@ -2867,15 +2976,16 @@ async def execute_robot_cycle(
                     direction,
                 )
                 logger.info(
-                    "[%s] user_id=%s path=%s active=%s direction=%s amount=%s expiration=%s attempt=%s",
-                    "GALE_ORDER_SEND_START" if is_gale_order else "ORDER_SEND_START",
+                    "[ORDER_ATTEMPT] user_id=%s cycle_id=%s path=%s active=%s direction=%s amount=%s expiration=%s attempt=%s gale=%s",
                     user_id,
+                    state.cycle_id,
                     order_path,
                     symbol,
                     direction,
                     order_amount,
                     entry_window["expiration_minutes"],
                     state.order_attempts,
+                    is_gale_order,
                 )
                 try:
                     order_status, order_payload = await submit_bullex_order(
@@ -3067,6 +3177,15 @@ async def execute_robot_cycle(
                     state.status,
                 )
                 logger.info(
+                    "[ORDER_SENT] user_id=%s cycle_id=%s order_id=%s symbol=%s direction=%s fallback=%s",
+                    user_id,
+                    state.cycle_id,
+                    order_id,
+                    symbol,
+                    direction,
+                    state.fallback_candidate_used,
+                )
+                logger.info(
                     "[TRADE_EXECUTED] user_id=%s order_id=%s symbol=%s direction=%s amount=%s",
                     user_id,
                     order_id,
@@ -3102,6 +3221,12 @@ async def execute_robot_cycle(
                         user_id,
                         trade.get("order_id"),
                     )
+                logger.info(
+                    "[CYCLE_END] user_id=%s cycle_id=%s result=ORDER_SENT order_id=%s",
+                    user_id,
+                    state.cycle_id,
+                    order_id,
+                )
                 trade_result_monitor.start(user_id, order_id, trade.get("expires_at"))
                 return 200, build_robot_payload(state)
 
@@ -3662,6 +3787,13 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
             return json_response(403, build_error(block_reason))
 
     state = auto_trader.start(user_id)
+    logger.info(
+        "[CYCLE_START] user_id=%s cycle_id=%s next_cycle_at=%s cycle_minutes=%s",
+        user_id,
+        state.cycle_id,
+        state.next_cycle_at,
+        state.cycle_minutes,
+    )
     logger.info(
         "[CYCLE_CONFIG] user_id=%s cycle_minutes=%s source=robot_start",
         user_id,
