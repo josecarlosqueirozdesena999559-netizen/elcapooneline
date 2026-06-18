@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sqlite3
 import tempfile
@@ -11,6 +12,8 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+
+logger = logging.getLogger("backend-gateway")
 
 
 def utc_iso() -> str:
@@ -34,6 +37,20 @@ ROBOT_SETTING_FIELDS = (
     "martingale_multiplier",
 )
 
+SUPABASE_ROBOT_SETTING_FIELDS = (
+    "entry_value",
+    "stop_win",
+    "stop_loss",
+    "cycle_minutes",
+    "min_confidence",
+    "min_payout",
+    "strategy_mode",
+    "account_mode",
+    "allow_real",
+    "confirm_real",
+    "max_entries_per_cycle",
+)
+
 
 def require_user_id(user_id: str) -> str:
     normalized = str(user_id or "").strip()
@@ -42,8 +59,68 @@ def require_user_id(user_id: str) -> str:
     return normalized
 
 
+def normalize_account_mode(value: Any) -> str:
+    normalized = str(value or "DEMO").strip().upper()
+    if normalized == "PRACTICE":
+        return "DEMO"
+    if normalized not in {"DEMO", "REAL"}:
+        return "DEMO"
+    return normalized
+
+
+def normalize_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    return bool(value)
+
+
+def normalize_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def normalize_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_robot_setting(field: str, value: Any) -> Any:
+    if field == "account_mode":
+        return normalize_account_mode(value)
+    if field in {"strategy_mode"}:
+        return str(value or "").strip() or "conservative"
+    if field in {"allow_real", "confirm_real", "martingale_enabled"}:
+        return normalize_bool(value)
+    if field in {"cycle_minutes", "min_confidence", "max_entries_per_cycle", "martingale_steps"}:
+        return normalize_int(value, 0)
+    if field in {"entry_value", "stop_win", "stop_loss", "min_payout", "martingale_multiplier"}:
+        return normalize_float(value, 0.0)
+    return value
+
+
 def extract_robot_settings(state: dict[str, Any]) -> dict[str, Any]:
-    return {field: state[field] for field in ROBOT_SETTING_FIELDS if field in state}
+    return {
+        field: _coerce_robot_setting(field, state[field])
+        for field in SUPABASE_ROBOT_SETTING_FIELDS
+        if field in state
+    }
+
+
+def extract_local_robot_settings(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        field: _coerce_robot_setting(field, state[field])
+        for field in ROBOT_SETTING_FIELDS
+        if field in state
+    }
 
 
 class RobotPersistence(ABC):
@@ -136,7 +213,7 @@ class SQLiteRobotPersistence(RobotPersistence):
 
     def save_settings(self, user_id: str, settings: dict[str, Any]) -> None:
         user_id = require_user_id(user_id)
-        values = extract_robot_settings(settings)
+        values = extract_local_robot_settings(settings)
         now = utc_iso()
         with self._connect() as connection:
             connection.execute(
@@ -452,6 +529,7 @@ class SupabaseRobotPersistence(RobotPersistence):
             "Authorization": f"Bearer {service_role_key}",
             "Content-Type": "application/json",
         }
+        self._settings_failure_signature_by_user: dict[str, str] = {}
 
     def save_state(self, user_id: str, state: dict[str, Any]) -> None:
         user_id = require_user_id(user_id)
@@ -496,18 +574,63 @@ class SupabaseRobotPersistence(RobotPersistence):
 
     def save_settings(self, user_id: str, settings: dict[str, Any]) -> None:
         user_id = require_user_id(user_id)
-        self._ensure_user(user_id)
         body = {"user_id": user_id, **extract_robot_settings(settings)}
-        self._request(
-            "POST",
-            "/robot_user_settings?on_conflict=user_id",
-            json=body,
-            extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        signature = json.dumps(body, sort_keys=True, ensure_ascii=True, default=str)
+        if self._settings_failure_signature_by_user.get(user_id) == signature:
+            logger.warning(
+                "[ROBOT_SETTINGS_SUPABASE_SKIPPED] user_id=%s reason=duplicate_failed_payload payload=%s",
+                user_id,
+                body,
+            )
+            return
+        self._ensure_user(user_id)
+        print("SUPABASE PAYLOAD", body)
+        logger.warning(
+            "[ROBOT_SETTINGS_SUPABASE_PAYLOAD] user_id=%s payload=%s",
+            user_id,
+            body,
         )
+        try:
+            response = self._request(
+                "POST",
+                "/robot_user_settings?on_conflict=user_id",
+                json=body,
+                extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+                return_response=True,
+            )
+            print("SUPABASE RESPONSE", response.text)
+            logger.warning(
+                "[ROBOT_SETTINGS_SUPABASE_RESPONSE] user_id=%s status=%s body=%s",
+                user_id,
+                response.status_code,
+                response.text,
+            )
+            self._settings_failure_signature_by_user.pop(user_id, None)
+        except httpx.HTTPStatusError as exc:
+            response = exc.response
+            print("SUPABASE RESPONSE", response.text)
+            self._settings_failure_signature_by_user[user_id] = signature
+            logger.warning(
+                "[ROBOT_SETTINGS_SUPABASE_HTTP_ERROR] user_id=%s status=%s headers=%s body=%s payload=%s",
+                user_id,
+                response.status_code,
+                dict(response.headers),
+                response.text,
+                body,
+            )
+            return
+        except Exception:
+            logger.warning(
+                "[ROBOT_SETTINGS_SUPABASE_REQUEST_ERROR] user_id=%s payload=%s",
+                user_id,
+                body,
+                exc_info=True,
+            )
+            return
 
     def load_settings(self, user_id: str) -> dict[str, Any] | None:
         user_id = require_user_id(user_id)
-        fields = ",".join(ROBOT_SETTING_FIELDS)
+        fields = ",".join(SUPABASE_ROBOT_SETTING_FIELDS)
         rows = self._request(
             "GET",
             f"/robot_user_settings?user_id=eq.{quote(user_id, safe='')}"
@@ -610,6 +733,7 @@ class SupabaseRobotPersistence(RobotPersistence):
         path: str,
         json: Any = None,
         extra_headers: dict[str, str] | None = None,
+        return_response: bool = False,
     ) -> Any:
         headers = dict(self.headers)
         if extra_headers:
@@ -617,6 +741,8 @@ class SupabaseRobotPersistence(RobotPersistence):
         with httpx.Client(timeout=20.0) as client:
             response = client.request(method, f"{self.rest_url}{path}", headers=headers, json=json)
         response.raise_for_status()
+        if return_response:
+            return response
         return response.json() if response.content else []
 
 

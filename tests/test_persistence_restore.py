@@ -322,6 +322,17 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             {"user_id": "user-a", "entry_value": 11.0, "allow_real": False},
         )
 
+    async def test_extract_robot_settings_normalizes_practice_account_mode(self) -> None:
+        settings = extract_robot_settings(
+            {
+                "entry_value": 2,
+                "account_mode": "PRACTICE",
+                "strategy_mode": "conservative",
+            }
+        )
+
+        self.assertEqual(settings["account_mode"], "DEMO")
+
     async def test_robot_user_settings_survive_restart_without_cross_user_leak(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = str(Path(directory) / "robot-settings.db")
@@ -415,6 +426,44 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 main.auto_trader = old_trader
                 main.robot_persistence = old_persistence
+
+    async def test_persist_robot_continues_when_save_settings_fails(self) -> None:
+        from backend import main
+
+        class _PersistenceStub:
+            def __init__(self) -> None:
+                self.saved_state = False
+                self.saved_trade = False
+                self.saved_settings_payload = None
+
+            def save_state(self, user_id: str, state: dict[str, object]) -> None:
+                self.saved_state = True
+
+            def save_settings(self, user_id: str, settings: dict[str, object]) -> None:
+                self.saved_settings_payload = settings
+                raise RuntimeError("settings boom")
+
+            def save_trade(self, user_id: str, trade: dict[str, object]) -> None:
+                self.saved_trade = True
+
+        old_trader = main.auto_trader
+        old_persistence = main.robot_persistence
+        main.auto_trader = AutoTrader()
+        stub = _PersistenceStub()
+        main.robot_persistence = stub
+        try:
+            state = main.auto_trader.start("user-save-settings-error")
+            state.last_trade = {"order_id": "order-1"}
+            with self.assertLogs("backend-gateway", level="WARNING") as logs:
+                main.persist_robot("user-save-settings-error")
+
+            self.assertTrue(stub.saved_state)
+            self.assertTrue(stub.saved_trade)
+            self.assertEqual(stub.saved_settings_payload["account_mode"], "DEMO")
+            self.assertIn("step=save_settings", "\n".join(logs.output))
+        finally:
+            main.auto_trader = old_trader
+            main.robot_persistence = old_persistence
 
     async def test_robot_settings_requires_user_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

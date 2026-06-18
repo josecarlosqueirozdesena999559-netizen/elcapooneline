@@ -1672,17 +1672,33 @@ async def submit_bullex_order(
 
 
 def persist_robot(user_id: str) -> None:
+    state_payload: dict[str, Any] | None = None
+    last_trade: dict[str, Any] | None = None
     try:
         state = auto_trader.get(user_id)
         state_payload = state.to_dict()
+        last_trade = state.last_trade
+    except Exception:
+        logger.warning("[ROBOT_PERSISTENCE_WARNING] user_id=%s step=read_state", user_id, exc_info=True)
+        return
+
+    try:
         robot_persistence.save_state(user_id, state_payload)
+    except Exception:
+        logger.warning("[ROBOT_PERSISTENCE_WARNING] user_id=%s step=save_state", user_id, exc_info=True)
+
+    try:
         save_settings = getattr(robot_persistence, "save_settings", None)
         if callable(save_settings):
-            save_settings(user_id, extract_robot_settings(state_payload))
-        if state.last_trade:
-            robot_persistence.save_trade(user_id, state.last_trade)
+            save_settings(user_id, state_payload)
     except Exception:
-        logger.exception("[ROBOT PERSISTENCE ERROR] user_id=%s", user_id)
+        logger.warning("[ROBOT_PERSISTENCE_WARNING] user_id=%s step=save_settings", user_id, exc_info=True)
+
+    if last_trade:
+        try:
+            robot_persistence.save_trade(user_id, last_trade)
+        except Exception:
+            logger.warning("[ROBOT_PERSISTENCE_WARNING] user_id=%s step=save_trade", user_id, exc_info=True)
 
 
 def robot_persistence_source() -> str:
