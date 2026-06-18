@@ -169,6 +169,7 @@ class RobotState:
     rejected_at: datetime | None = None
     result_received_at: datetime | None = None
     result_display_until: datetime | None = None
+    stop_reset_at: datetime | None = None
     operation_in_progress: bool = False
     last_signal: dict[str, Any] | None = None
     pending_signal: dict[str, Any] | None = None
@@ -235,6 +236,7 @@ class RobotState:
             "rejected_at",
             "result_received_at",
             "result_display_until",
+            "stop_reset_at",
             "connection_checked_at",
             "last_connected_at",
             "connection_grace_until",
@@ -490,6 +492,7 @@ class AutoTrader:
             "rejected_at",
             "result_received_at",
             "result_display_until",
+            "stop_reset_at",
             "connection_checked_at",
             "last_connected_at",
             "connection_grace_until",
@@ -1094,6 +1097,72 @@ class AutoTrader:
         state.best_candidate = None
         state.cycle_best_candidate = None
         state.cycle_best_trade_candidate = None
+        return state
+
+    def reset_cycle(
+        self,
+        user_id: str,
+        *,
+        reset_score: bool = False,
+        reset_daily_profit: bool = True,
+    ) -> RobotState:
+        state = self.get(user_id)
+        now = utc_now()
+        state.enabled = False
+        state.status = STATUS_STOPPED
+        state.rejection_reason = None
+        state.last_rejection_reason = None
+        state.cycle_result = None
+        state.rejected_at = None
+        state.result_received_at = None
+        state.result_display_until = None
+        state.last_trade = None
+        state.pending_signal = None
+        state.last_signal = None
+        state.analysis_started_at = None
+        state.analysis_result = None
+        state.last_analysis_result = None
+        state.analysis_message = None
+        state.last_order_error = None
+        state.operation_in_progress = False
+        state.analysis_window_open = False
+        state.seconds_until_analysis_window = 0
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        state.order_attempts = 0
+        state.fallback_candidate_used = False
+        state.current_cycle_started_at = now
+        state.cycle_id = self._new_cycle_id()
+        state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
+        state.blocked_filters = []
+        state.approved_filters = []
+        state.quality_score = 0
+        state.strategy_score = 0
+        state.candidates_count = 0
+        state.candidates = []
+        state.best_candidate = None
+        state.cycle_best_candidate = None
+        state.cycle_best_trade_candidate = None
+        state.strategy_name = None
+        state.strategy_reason = None
+        state.used_strategies = []
+        state.candle_reading = None
+        state.entry_reason = None
+        state.block_reasons = []
+        state.metrics = {}
+        self._clear_gale_state(state)
+
+        if reset_score:
+            state.wins = 0
+            state.losses = 0
+            state.profit = 0.0
+            self._histories[user_id] = []
+            state.stop_reset_at = now
+        elif reset_daily_profit:
+            state.profit = 0.0
+            state.stop_reset_at = now
+
+        self._sources[user_id] = "memory"
         return state
 
     def disconnect_account(self, user_id: str) -> RobotState:

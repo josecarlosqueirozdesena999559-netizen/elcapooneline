@@ -1,0 +1,100 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from backend import main
+from backend.auto_trader import AutoTrader, utc_now
+from backend.robot_persistence import SQLiteRobotPersistence
+
+
+class RobotResetCycleTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.old_persistence = main.robot_persistence
+        self.old_trader = main.auto_trader
+        main.robot_persistence = SQLiteRobotPersistence(
+            str(Path(self.directory.name) / "robot.db")
+        )
+        main.auto_trader = AutoTrader()
+
+    async def asyncTearDown(self) -> None:
+        main.robot_persistence = self.old_persistence
+        main.auto_trader = self.old_trader
+        self.directory.cleanup()
+
+    async def test_reset_cycle_clears_stop_block_and_stops_worker(self) -> None:
+        user_id = "user-reset"
+        state = main.auto_trader.start(user_id)
+        state.wins = 3
+        state.losses = 2
+        state.profit = 11.5
+        state.status = "SIGNAL_REJECTED"
+        state.rejection_reason = "STOP_WIN_HIT"
+        state.last_rejection_reason = "STOP_WIN_HIT"
+        state.cycle_result = "WIN"
+        state.rejected_at = utc_now()
+        previous_cycle_id = state.cycle_id
+
+        with (
+            patch.object(main, "stop_robot_worker") as stop_worker,
+            patch.object(main, "persist_robot"),
+        ):
+            response = await main.robot_reset_cycle(
+                {"reset_daily_profit": True},
+                {"user_id": user_id},
+            )
+
+        payload = json.loads(response.body)["data"]
+        refreshed = main.auto_trader.get(user_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(refreshed.enabled)
+        self.assertEqual(refreshed.status, "STOPPED")
+        self.assertIsNone(refreshed.rejection_reason)
+        self.assertIsNone(refreshed.last_rejection_reason)
+        self.assertIsNone(refreshed.cycle_result)
+        self.assertIsNone(refreshed.rejected_at)
+        self.assertEqual(refreshed.wins, 3)
+        self.assertEqual(refreshed.losses, 2)
+        self.assertEqual(refreshed.profit, 0.0)
+        self.assertNotEqual(refreshed.cycle_id, previous_cycle_id)
+        self.assertIsNotNone(refreshed.current_cycle_started_at)
+        self.assertIsNotNone(refreshed.next_cycle_at)
+        self.assertEqual(payload["status"], "STOPPED")
+        self.assertFalse(payload["worker_running"])
+        stop_worker.assert_awaited_once_with(user_id)
+
+    async def test_reset_cycle_with_reset_score_clears_score_and_history(self) -> None:
+        user_id = "user-reset-score"
+        main.auto_trader.start(user_id)
+        main.auto_trader.record_trade(
+            user_id,
+            {
+                "order_id": "reset-score-1",
+                "active": "EURUSD-OTC",
+                "direction": "CALL",
+                "amount": 2,
+                "confidence": 90,
+                "payout": 88,
+                "result": "PENDING_RESULT",
+                "sent_at": "2026-06-18T12:00:00+00:00",
+            },
+        )
+        main.auto_trader.finish_trade(user_id, "reset-score-1", "LOSS", -2)
+
+        with (
+            patch.object(main, "stop_robot_worker"),
+            patch.object(main, "persist_robot"),
+        ):
+            await main.robot_reset_cycle(
+                {"reset_score": True},
+                {"user_id": user_id},
+            )
+
+        refreshed = main.auto_trader.get(user_id)
+        self.assertEqual(refreshed.wins, 0)
+        self.assertEqual(refreshed.losses, 0)
+        self.assertEqual(refreshed.profit, 0.0)
+        self.assertEqual(main.auto_trader.history(user_id)["trades"], [])

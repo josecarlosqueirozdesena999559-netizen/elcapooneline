@@ -13,6 +13,7 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Reques
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
 
 from backend.auto_trader import (
     AutoTrader,
@@ -1383,11 +1384,14 @@ def extract_payout(payload: dict[str, Any], symbol: str) -> float | None:
 
 def daily_stop_reason(user_id: str, state: Any) -> str | None:
     today = datetime.now(timezone.utc).date()
+    reset_at = parse_datetime(getattr(state, "stop_reset_at", None))
     daily_profit = 0.0
     daily_loss = 0.0
     for trade in auto_trader.history(user_id).get("trades", []):
         finished_at = parse_datetime(trade.get("finished_at"))
         if finished_at is None or finished_at.date() != today:
+            continue
+        if reset_at is not None and finished_at < reset_at:
             continue
         trade_profit = float(trade.get("profit") or 0)
         daily_profit += trade_profit
@@ -3616,6 +3620,46 @@ def build_robot_stats(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def load_robot_history_items(user_id: str, days: int) -> list[dict[str, Any]]:
+    persisted_items = robot_persistence.load_trade_history(user_id, days)
+    items_by_order_id: dict[str, dict[str, Any]] = {}
+    ordered_items: list[dict[str, Any]] = []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))
+
+    for item in persisted_items:
+        order_id = str(item.get("order_id") or "").strip()
+        if not order_id:
+            continue
+        normalized = strip_ai_fields(dict(item))
+        items_by_order_id[order_id] = normalized
+        ordered_items.append(normalized)
+
+    for trade in auto_trader.history(user_id).get("trades", []):
+        order_id = str(trade.get("order_id") or "").strip()
+        result = str(trade.get("result") or "").strip().upper()
+        finished_at = parse_datetime(trade.get("finished_at"))
+        if not order_id or order_id in items_by_order_id:
+            continue
+        if result not in {"WIN", "LOSS"} or finished_at is None or finished_at < cutoff:
+            continue
+        normalized = strip_ai_fields(dict(trade))
+        ordered_items.append(normalized)
+        items_by_order_id[order_id] = normalized
+
+    return sorted(
+        ordered_items,
+        key=lambda item: parse_datetime(item.get("finished_at")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+
+
+class RobotResetCycleRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    reset_score: bool = False
+    reset_daily_profit: bool = True
+
+
 @app.get("/robot/history")
 async def robot_history(
     days: int = Query(default=30),
@@ -3623,8 +3667,8 @@ async def robot_history(
 ) -> JSONResponse:
     if days not in {1, 7, 30}:
         raise HTTPException(status_code=422, detail="days must be 1, 7, or 30")
-    items = robot_persistence.load_trade_history(auth["user_id"], days)
-    return json_response(200, build_success({"items": items}))
+    items = load_robot_history_items(auth["user_id"], days)
+    return json_response(200, build_success({"items": items, "trades": items}))
 
 
 @app.options("/robot/history")
@@ -3639,7 +3683,7 @@ async def robot_stats(
 ) -> JSONResponse:
     if days not in {1, 7, 30}:
         raise HTTPException(status_code=422, detail="days must be 1, 7, or 30")
-    items = robot_persistence.load_trade_history(auth["user_id"], days)
+    items = load_robot_history_items(auth["user_id"], days)
     return json_response(200, build_success(build_robot_stats(items)))
 
 
@@ -3825,6 +3869,36 @@ async def robot_stop(auth: dict[str, str] = Depends(require_headers)) -> JSONRes
     await stop_robot_worker(auth["user_id"])
     logger.info("[ROBOT STOP] user_id=%s", auth["user_id"])
     return json_response(200, build_robot_payload(state))
+
+
+@app.post("/robot/reset-cycle")
+async def robot_reset_cycle(
+    body: dict[str, Any] | None = Body(default=None),
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    payload = RobotResetCycleRequest.model_validate(body or {})
+    user_id = auth["user_id"]
+    async with auto_trader.lock(user_id):
+        state = auto_trader.reset_cycle(
+            user_id,
+            reset_score=payload.reset_score,
+            reset_daily_profit=payload.reset_daily_profit,
+        )
+        persist_robot(user_id)
+    await stop_robot_worker(user_id)
+    logger.info(
+        "[ROBOT_RESET_CYCLE] user_id=%s cycle_id=%s reset_score=%s reset_daily_profit=%s",
+        user_id,
+        state.cycle_id,
+        payload.reset_score,
+        payload.reset_daily_profit,
+    )
+    return json_response(200, build_robot_payload(state, user_id=user_id))
+
+
+@app.options("/robot/reset-cycle")
+async def robot_reset_cycle_options() -> JSONResponse:
+    return json_response(200, build_success({"preflight": True}))
 
 
 @app.post("/robot/tick")

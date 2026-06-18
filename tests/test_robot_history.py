@@ -172,13 +172,41 @@ class RobotHistoryEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[RESULT_RECEIVED]", output)
         self.assertIn("[RESULT_DISPLAY_UNTIL]", output)
 
+    async def test_history_returns_in_memory_finished_trade_when_persistence_is_empty(self) -> None:
+        user_id = "user-memory-history"
+        main.auto_trader.start(user_id)
+        main.auto_trader.record_trade(
+            user_id,
+            {
+                "order_id": "memory-1",
+                "mode": "DEMO",
+                "active": "EURUSD-OTC",
+                "direction": "CALL",
+                "amount": 2,
+                "confidence": 91,
+                "payout": 87,
+                "result": "PENDING_RESULT",
+                "sent_at": "2026-06-18T12:00:00+00:00",
+                "expiration": "M1",
+            },
+        )
+        main.auto_trader.finish_trade(user_id, "memory-1", "WIN", 1.7)
+
+        self.assertEqual(main.robot_persistence.load_trade_history(user_id, 30), [])
+        response = await main.robot_history(30, {"user_id": user_id})
+        payload = json.loads(response.body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["order_id"] for item in payload["data"]["items"]], ["memory-1"])
+        self.assertEqual(payload["data"]["trades"][0]["result"], "WIN")
+
     async def test_history_without_items_returns_empty_success_payload(self) -> None:
         response = await main.robot_history(1, {"user_id": "user-empty"})
         payload = json.loads(response.body)
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["data"], {"items": []})
+        self.assertEqual(payload["data"], {"items": [], "trades": []})
         self.assertIsNone(payload["error"])
 
     async def test_stats_without_items_returns_empty_success_payload(self) -> None:
