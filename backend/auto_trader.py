@@ -130,8 +130,8 @@ class RobotState:
     strategy_mode: StrategyMode = "conservative"
     entry_value: float = 2.0
     cycle_minutes: int = 5
-    min_confidence: int = 94
-    min_payout: float = 88.0
+    min_confidence: int = 80
+    min_payout: float = 80.0
     stop_win: float = 50.0
     stop_loss: float = 30.0
     max_entries_per_cycle: int = 1

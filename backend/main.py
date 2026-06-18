@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -56,7 +56,32 @@ CORS_ALLOWED_ORIGINS_DEFAULT = (
     "http://localhost:5174"
 )
 CORS_ALLOWED_METHODS = ["GET", "POST", "OPTIONS"]
-CORS_ALLOWED_HEADERS = ["x-api-key", "x-user-id", "content-type", "authorization"]
+CORS_ALLOWED_HEADERS = [
+    "Content-Type",
+    "Authorization",
+    "x-api-key",
+    "x-user-id",
+    "X-Api-Key",
+    "X-User-Id",
+]
+ROBOT_CONFIG_DEFAULTS = {
+    "account_mode": "DEMO",
+    "timeframe": "M1",
+    "strategy_mode": "conservative",
+    "entry_value": 2.0,
+    "cycle_minutes": 5,
+    "min_confidence": 80,
+    "min_payout": 80.0,
+    "stop_win": 50.0,
+    "stop_loss": 30.0,
+    "max_entries_per_cycle": 1,
+    "allow_real": False,
+    "confirm_real": False,
+    "martingale_enabled": False,
+    "martingale_steps": 1,
+    "martingale_multiplier": 2.0,
+}
+ROBOT_CONFIG_ALLOWED_FIELDS = set(ROBOT_CONFIG_DEFAULTS)
 
 ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
 SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
@@ -146,7 +171,51 @@ def strip_ai_config_fields(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in payload.items()
-        if not str(key or "").startswith("ai")
+        if not str(key or "").strip().lower().startswith(("ai", "use_ai", "openai", "gemini"))
+    }
+
+
+def filter_robot_config_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    filtered = strip_ai_config_fields(payload)
+    return {
+        key: value
+        for key, value in filtered.items()
+        if key in ROBOT_CONFIG_ALLOWED_FIELDS or key in {
+            "accountMode",
+            "strategyMode",
+            "entryValue",
+            "cycleMinutes",
+            "minConfidence",
+            "minPayout",
+            "stopWin",
+            "stopLoss",
+            "maxEntriesPerCycle",
+            "allowReal",
+            "confirmReal",
+            "martingaleEnabled",
+            "martingaleSteps",
+            "martingaleMultiplier",
+        }
+    }
+
+
+def current_robot_config_payload(state: Any) -> dict[str, Any]:
+    return {
+        "account_mode": str(getattr(state, "account_mode", ROBOT_CONFIG_DEFAULTS["account_mode"]) or ROBOT_CONFIG_DEFAULTS["account_mode"]),
+        "timeframe": str(getattr(state, "timeframe", ROBOT_CONFIG_DEFAULTS["timeframe"]) or ROBOT_CONFIG_DEFAULTS["timeframe"]),
+        "strategy_mode": str(getattr(state, "strategy_mode", ROBOT_CONFIG_DEFAULTS["strategy_mode"]) or ROBOT_CONFIG_DEFAULTS["strategy_mode"]),
+        "entry_value": float(getattr(state, "entry_value", ROBOT_CONFIG_DEFAULTS["entry_value"]) or ROBOT_CONFIG_DEFAULTS["entry_value"]),
+        "cycle_minutes": int(getattr(state, "cycle_minutes", ROBOT_CONFIG_DEFAULTS["cycle_minutes"]) or ROBOT_CONFIG_DEFAULTS["cycle_minutes"]),
+        "min_confidence": int(getattr(state, "min_confidence", ROBOT_CONFIG_DEFAULTS["min_confidence"]) or ROBOT_CONFIG_DEFAULTS["min_confidence"]),
+        "min_payout": float(getattr(state, "min_payout", ROBOT_CONFIG_DEFAULTS["min_payout"]) or ROBOT_CONFIG_DEFAULTS["min_payout"]),
+        "stop_win": float(getattr(state, "stop_win", ROBOT_CONFIG_DEFAULTS["stop_win"]) or ROBOT_CONFIG_DEFAULTS["stop_win"]),
+        "stop_loss": float(getattr(state, "stop_loss", ROBOT_CONFIG_DEFAULTS["stop_loss"]) or ROBOT_CONFIG_DEFAULTS["stop_loss"]),
+        "max_entries_per_cycle": int(getattr(state, "max_entries_per_cycle", ROBOT_CONFIG_DEFAULTS["max_entries_per_cycle"]) or ROBOT_CONFIG_DEFAULTS["max_entries_per_cycle"]),
+        "allow_real": bool(getattr(state, "allow_real", ROBOT_CONFIG_DEFAULTS["allow_real"])),
+        "confirm_real": bool(getattr(state, "confirm_real", ROBOT_CONFIG_DEFAULTS["confirm_real"])),
+        "martingale_enabled": bool(getattr(state, "martingale_enabled", ROBOT_CONFIG_DEFAULTS["martingale_enabled"])),
+        "martingale_steps": int(getattr(state, "martingale_steps", ROBOT_CONFIG_DEFAULTS["martingale_steps"]) or ROBOT_CONFIG_DEFAULTS["martingale_steps"]),
+        "martingale_multiplier": float(getattr(state, "martingale_multiplier", ROBOT_CONFIG_DEFAULTS["martingale_multiplier"]) or ROBOT_CONFIG_DEFAULTS["martingale_multiplier"]),
     }
 
 
@@ -3535,20 +3604,26 @@ async def debug_robot_settings(
 
 @app.post("/robot/config")
 async def robot_config(
-    body: Any,
+    body: dict[str, Any] | None = Body(default=None),
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
     user_id = auth["user_id"]
-    if isinstance(body, RobotConfigUpdate):
-        raw_body = body.model_dump(by_alias=False, exclude_none=True)
-    elif isinstance(body, dict):
-        raw_body = dict(body)
-    else:
-        raw_body = {}
-    sanitized_body = strip_ai_config_fields(raw_body)
-    body = RobotConfigUpdate.model_validate(sanitized_body)
-    get_user_robot_state(user_id)
-    state = auto_trader.update_config(user_id, body)
+    raw_body = dict(body or {})
+    logger.warning("[ROBOT_CONFIG_PAYLOAD] user_id=%s payload=%s", user_id, raw_body)
+    filtered_body = filter_robot_config_payload(raw_body)
+    state = get_user_robot_state(user_id)
+    merged_payload = {**ROBOT_CONFIG_DEFAULTS, **current_robot_config_payload(state)}
+    partial_update = RobotConfigUpdate.model_validate(filtered_body)
+    merged_payload.update(partial_update.model_dump(exclude_none=True))
+    logger.warning(
+        "[ROBOT_CONFIG_FILTERED_PAYLOAD] user_id=%s payload=%s",
+        user_id,
+        merged_payload,
+    )
+    state = auto_trader.update_config(
+        user_id,
+        RobotConfigUpdate.model_validate(merged_payload),
+    )
     logger.info(
         "[CYCLE_CONFIG] user_id=%s cycle_minutes=%s source=robot_config",
         user_id,

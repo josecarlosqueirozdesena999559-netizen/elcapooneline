@@ -421,8 +421,8 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(refreshed_b.stop_loss, 11)
                 self.assertEqual(new_user.entry_value, 2)
                 self.assertEqual(new_user.cycle_minutes, 5)
-                self.assertEqual(new_user.min_confidence, 94)
-                self.assertEqual(new_user.min_payout, 88)
+                self.assertEqual(new_user.min_confidence, 80)
+                self.assertEqual(new_user.min_payout, 80)
             finally:
                 main.auto_trader = old_trader
                 main.robot_persistence = old_persistence
@@ -543,8 +543,8 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(state.connected)
             self.assertEqual(state.connection_status_source, "bullex_service")
             self.assertEqual(state.entry_value, 2)
-            self.assertEqual(state.min_confidence, 94)
-            self.assertEqual(state.min_payout, 88)
+            self.assertEqual(state.min_confidence, 80)
+            self.assertEqual(state.min_payout, 80)
             self.assertEqual(main.auto_trader.source("user-restore"), "memory")
             ensure_worker.assert_called_once_with("user-restore")
             persistence.save_restore_status.assert_called_once_with(
