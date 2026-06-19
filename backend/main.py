@@ -1372,20 +1372,54 @@ async def refresh_entry_window(user_id: str, state: Any) -> tuple[int, dict[str,
     return status_code, payload, window
 
 
-def real_block_reason(state: Any, *, connected: bool, active_mode: str | None) -> str | None:
+def real_block_reason(
+    state: Any,
+    *,
+    connected: bool,
+    active_mode: str | None,
+    user_id: str | None = None,
+) -> str | None:
     if state.account_mode != "REAL":
         return "ACCOUNT_MODE_NOT_REAL"
+    if state.operation_in_progress:
+        return "OPERATION_IN_PROGRESS"
     if not connected:
         return "BULLEX_NOT_CONNECTED"
     if active_mode != "REAL":
         return "BULLEX_ACTIVE_MODE_NOT_REAL"
-    if not state.allow_real:
-        return "ALLOW_REAL_REQUIRED"
     if not state.confirm_real:
         return "CONFIRM_REAL_REQUIRED"
+    if state.entry_value <= 0:
+        return "AMOUNT_MUST_BE_POSITIVE"
+    stop_reason = (daily_stop_reason(user_id, state) if user_id is not None else None) or robot_stop_reason(state)
+    if stop_reason is not None:
+        return stop_reason
     if state.entry_value > config.robot_real_max_entry:
         return "REAL_ENTRY_VALUE_EXCEEDS_MAX"
     return None
+
+
+def validate_real_buy_gateway_payload(body: dict[str, Any]) -> str | None:
+    if body.get("confirm_real") is not True:
+        return "CONFIRM_REAL_REQUIRED"
+    try:
+        amount = float(body.get("amount"))
+    except (TypeError, ValueError):
+        return "AMOUNT_MUST_BE_POSITIVE"
+    if amount <= 0:
+        return "AMOUNT_MUST_BE_POSITIVE"
+    return None
+
+
+def real_buy_gateway_block_reason(user_id: str, state: Any, body: dict[str, Any]) -> str | None:
+    if state.account_mode != "REAL":
+        return "ACCOUNT_MODE_NOT_REAL"
+    payload_reason = validate_real_buy_gateway_payload(body)
+    if payload_reason is not None:
+        return payload_reason
+    if state.operation_in_progress:
+        return "OPERATION_IN_PROGRESS"
+    return daily_stop_reason(user_id, state) or robot_stop_reason(state)
 
 
 def extract_payout(payload: dict[str, Any], symbol: str) -> float | None:
@@ -2543,7 +2577,14 @@ async def execute_robot_cycle(
             )
             if state.account_mode == "REAL":
                 logger.info(
-                    "[REAL_TRADE_ATTEMPT] user_id=%s entry_value=%s",
+                    "[REAL MODE DETECTED] user_id=%s active_mode=%s connected=%s confirm_real=%s",
+                    user_id,
+                    active_mode,
+                    connected,
+                    state.confirm_real,
+                )
+                logger.info(
+                    "[REAL BUY ATTEMPT] user_id=%s entry_value=%s",
                     user_id,
                     state.entry_value,
                 )
@@ -2551,13 +2592,15 @@ async def execute_robot_cycle(
                     state,
                     connected=connected,
                     active_mode=active_mode,
+                    user_id=user_id,
                 )
                 if block_reason is not None:
                     auto_trader.lock_real(user_id, block_reason)
+                    persist_robot(user_id)
                     logger.warning(
-                        "[REAL_TRADE_BLOCKED] user_id=%s reason=%s",
-                        user_id,
+                        "[REAL BUY BLOCKED reason=%s] user_id=%s",
                         block_reason,
+                        user_id,
                     )
                     return 403, build_error(block_reason)
 
@@ -3063,6 +3106,14 @@ async def execute_robot_cycle(
                 }
                 if state.account_mode == "REAL":
                     order_body["confirm_real"] = True
+                    logger.info(
+                        "[REAL BUY ATTEMPT] user_id=%s active=%s direction=%s amount=%s expiration=%s",
+                        user_id,
+                        symbol,
+                        direction,
+                        order_amount,
+                        entry_window["expiration_minutes"],
+                    )
 
                 state = auto_trader.start_sending_order(user_id)
                 logger.info(
@@ -3131,6 +3182,10 @@ async def execute_robot_cycle(
                         user_id,
                         state.next_cycle_at,
                     )
+                    if state.account_mode == "REAL":
+                        persist_robot(user_id)
+                        logger.warning("[REAL BUY BLOCKED reason=%s] user_id=%s", reason, user_id)
+                        return 502, build_error(reason)
                     return 502, build_robot_payload(state)
                 mark_disconnected_from_payload(user_id, order_payload)
                 if not order_payload.get("ok"):
@@ -3174,6 +3229,10 @@ async def execute_robot_cycle(
                         user_id,
                         state.next_cycle_at,
                     )
+                    if state.account_mode == "REAL":
+                        persist_robot(user_id)
+                        logger.warning("[REAL BUY BLOCKED reason=%s] user_id=%s", reason, user_id)
+                        return order_status, build_error(reason)
                     return order_status, build_robot_payload(state)
 
                 order_data = order_payload.get("data") if isinstance(order_payload.get("data"), dict) else {}
@@ -3195,7 +3254,13 @@ async def execute_robot_cycle(
                         user_id,
                         state.next_cycle_at,
                     )
+                    if state.account_mode == "REAL":
+                        persist_robot(user_id)
+                        logger.warning("[REAL BUY BLOCKED reason=ORDER_ID_MISSING] user_id=%s", user_id)
+                        return 502, build_error("ORDER_ID_MISSING")
                     return 502, build_robot_payload(state)
+                if state.account_mode == "REAL":
+                    logger.info("[REAL BUY SUCCESS order_id=%s] user_id=%s", order_id, user_id)
 
                 sent_at = datetime.now(timezone.utc)
                 expiration_window = entry_window
@@ -3662,7 +3727,7 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
         window,
     )
     state = auto_trader.get(user_id)
-    block_reason = real_block_reason(state, connected=connected, active_mode=active_mode)
+    block_reason = real_block_reason(state, connected=connected, active_mode=active_mode, user_id=user_id)
     return json_response(
         200,
         build_robot_payload(
@@ -3927,20 +3992,26 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     if state.status == STATUS_ACCOUNT_DISCONNECTED or state.connection_failure_count > 0:
         _, _, state, _, _, _ = await fetch_and_sync_robot_connection(user_id)
     if state.account_mode == "REAL":
+        logger.info(
+            "[REAL MODE DETECTED] user_id=%s active_mode=%s confirm_real=%s",
+            user_id,
+            state.active_mode,
+            state.confirm_real,
+        )
         if fresh_robot_connection(state):
             connected = True
             active_mode = state.active_mode
         else:
             _, session_payload, state, connected, active_mode, _ = await fetch_and_sync_robot_connection(user_id)
             mark_disconnected_from_payload(user_id, session_payload)
-        block_reason = real_block_reason(state, connected=connected, active_mode=active_mode)
+        block_reason = real_block_reason(state, connected=connected, active_mode=active_mode, user_id=user_id)
         if block_reason is not None:
             auto_trader.lock_real(user_id, block_reason)
             persist_robot(user_id)
             logger.warning(
-                "[REAL_TRADE_BLOCKED] user_id=%s reason=%s",
-                user_id,
+                "[REAL BUY BLOCKED reason=%s] user_id=%s",
                 block_reason,
+                user_id,
             )
             return json_response(403, build_error(block_reason))
 
@@ -4031,7 +4102,7 @@ async def robot_sync_connection(auth: dict[str, str] = Depends(require_headers))
     get_user_robot_state(user_id)
     status_code, _, state, connected, active_mode, source = await fetch_and_sync_robot_connection(user_id)
     persist_robot(user_id)
-    block_reason = real_block_reason(state, connected=connected, active_mode=active_mode)
+    block_reason = real_block_reason(state, connected=connected, active_mode=active_mode, user_id=user_id)
     return json_response(
         200 if status_code < 500 else status_code,
         build_robot_payload(
@@ -4371,12 +4442,40 @@ async def bullex_buy_real(
     body: dict[str, Any],
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
+    user_id = auth["user_id"]
+    state = get_user_robot_state(user_id)
+    logger.info(
+        "[REAL MODE DETECTED] user_id=%s account_mode=%s confirm_real=%s",
+        user_id,
+        state.account_mode,
+        body.get("confirm_real"),
+    )
+    logger.info(
+        "[REAL BUY ATTEMPT] user_id=%s active=%s amount=%s",
+        user_id,
+        body.get("active"),
+        body.get("amount"),
+    )
+    block_reason = real_buy_gateway_block_reason(user_id, state, body)
+    if block_reason is not None:
+        logger.warning("[REAL BUY BLOCKED reason=%s] user_id=%s", block_reason, user_id)
+        return json_response(403, build_error(block_reason))
+
     status_code, payload = await call_bullex_service(
         "POST",
         "/orders/buy-real",
-        auth["user_id"],
+        user_id,
         json_body=body,
     )
+    if payload.get("ok"):
+        order_data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        logger.info("[REAL BUY SUCCESS order_id=%s] user_id=%s", order_data.get("order_id"), user_id)
+    else:
+        logger.warning(
+            "[REAL BUY BLOCKED reason=%s] user_id=%s",
+            payload.get("error") or "ORDER_FAILED",
+            user_id,
+        )
     return json_response(status_code, payload)
 
 

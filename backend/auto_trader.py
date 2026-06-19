@@ -1353,6 +1353,14 @@ class AutoTrader:
         state.status = STATUS_REAL_TRADING_LOCKED
         state.rejection_reason = reason
         state.last_rejection_reason = reason
+        state.analysis_result = None
+        state.last_analysis_result = reason
+        state.analysis_message = None
+        state.pending_signal = None
+        state.operation_in_progress = False
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        state.last_order_error = reason
         return state
 
     def update_entry_window(self, user_id: str, window: dict[str, Any]) -> RobotState:

@@ -2314,7 +2314,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"], "ALLOW_REAL_REQUIRED")
+        self.assertEqual(payload["error"], "CONFIRM_REAL_REQUIRED")
         service_call.assert_awaited_once()
 
     async def test_real_without_confirm_real_is_blocked(self) -> None:

@@ -945,15 +945,47 @@ def buy_demo(payload: BuyOrderRequest, x_user_id: str | None = Header(default=No
 def buy_real(payload: BuyOrderRequest, x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
     payload.action = normalize_action(payload.action)
+    logger.info(
+        "[REAL MODE DETECTED] user_id=%s confirm_real=%s",
+        user_id,
+        payload.confirm_real,
+    )
+    logger.info(
+        "[REAL BUY ATTEMPT] user_id=%s active=%s action=%s amount=%s expiration=%s",
+        user_id,
+        payload.active,
+        payload.action,
+        payload.amount,
+        payload.expiration,
+    )
     if not payload.confirm_real:
-        raise ServiceError("operacao REAL bloqueada sem confirm_real=true", 403)
+        reason = "CONFIRM_REAL_REQUIRED"
+        logger.warning("[REAL BUY BLOCKED reason=%s] user_id=%s", reason, user_id)
+        raise ServiceError(reason, 403)
+    if payload.amount <= 0:
+        reason = "AMOUNT_MUST_BE_POSITIVE"
+        logger.warning("[REAL BUY BLOCKED reason=%s] user_id=%s", reason, user_id)
+        raise ServiceError(reason, 403)
 
     def operation(session: ManagedSession) -> dict[str, Any]:
         ensure_session_ready(session)
-        ensure_mode_matches(session.client, "REAL")
+        try:
+            ensure_mode_matches(session.client, "REAL")
+        except ServiceError as exc:
+            reason = "ACCOUNT_MODE_NOT_REAL"
+            logger.warning(
+                "[REAL BUY BLOCKED reason=%s] user_id=%s detail=%s",
+                reason,
+                user_id,
+                exc.message,
+            )
+            raise ServiceError(reason, 403) from exc
         ok, order_id = session.client.buy(payload.amount, payload.active, payload.action, payload.expiration)
         if not ok:
-            raise ServiceError(f"falha ao criar ordem real: {order_id}", 409)
+            reason = f"falha ao criar ordem real: {order_id}"
+            logger.warning("[REAL BUY BLOCKED reason=%s] user_id=%s", reason, user_id)
+            raise ServiceError(reason, 409)
+        logger.info("[REAL BUY SUCCESS order_id=%s] user_id=%s", order_id, user_id)
         return {
             "mode": "REAL",
             "order_id": order_id,
