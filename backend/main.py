@@ -173,6 +173,8 @@ ROBOT_BASIC_CONFIG_FIELDS = {
     "stop_loss",
     "entry_value",
     "account_mode",
+    "allow_real",
+    "confirm_real",
     "timeframe",
     "min_confidence",
     "min_payout",
@@ -185,6 +187,8 @@ ROBOT_BASIC_CONFIG_ALIASES = {
     "stopLoss",
     "entryValue",
     "accountMode",
+    "allowReal",
+    "confirmReal",
     "timeframe",
     "minConfidence",
     "minPayout",
@@ -1379,24 +1383,36 @@ def real_block_reason(
     active_mode: str | None,
     user_id: str | None = None,
 ) -> str | None:
+    reason: str | None = None
     if state.account_mode != "REAL":
-        return "ACCOUNT_MODE_NOT_REAL"
-    if state.operation_in_progress:
-        return "OPERATION_IN_PROGRESS"
-    if not connected:
-        return "BULLEX_NOT_CONNECTED"
-    if active_mode != "REAL":
-        return "BULLEX_ACTIVE_MODE_NOT_REAL"
-    if not state.confirm_real:
-        return "CONFIRM_REAL_REQUIRED"
-    if state.entry_value <= 0:
-        return "AMOUNT_MUST_BE_POSITIVE"
-    stop_reason = (daily_stop_reason(user_id, state) if user_id is not None else None) or robot_stop_reason(state)
-    if stop_reason is not None:
-        return stop_reason
-    if state.entry_value > config.robot_real_max_entry:
-        return "REAL_ENTRY_VALUE_EXCEEDS_MAX"
-    return None
+        reason = "ACCOUNT_MODE_NOT_REAL"
+    elif state.operation_in_progress:
+        reason = "OPERATION_IN_PROGRESS"
+    elif not connected:
+        reason = "BULLEX_NOT_CONNECTED"
+    elif active_mode != "REAL":
+        reason = "BULLEX_ACTIVE_MODE_NOT_REAL"
+    elif not state.allow_real or not state.confirm_real:
+        reason = "CONFIRM_REAL_REQUIRED"
+    elif state.entry_value <= 0:
+        reason = "AMOUNT_MUST_BE_POSITIVE"
+    else:
+        stop_reason = (daily_stop_reason(user_id, state) if user_id is not None else None) or robot_stop_reason(state)
+        if stop_reason is not None:
+            reason = stop_reason
+        elif state.entry_value > config.robot_real_max_entry:
+            reason = "REAL_ENTRY_VALUE_EXCEEDS_MAX"
+    logger.info(
+        "[REAL_READY_CHECK] user_id=%s account_mode=%s active_mode=%s connected=%s allow_real=%s confirm_real=%s reason=%s",
+        user_id,
+        getattr(state, "account_mode", None),
+        active_mode,
+        connected,
+        getattr(state, "allow_real", None),
+        getattr(state, "confirm_real", None),
+        reason,
+    )
+    return reason
 
 
 def validate_real_buy_gateway_payload(body: dict[str, Any]) -> str | None:
@@ -1663,6 +1679,23 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
                 (data.get("last_trade") or {}).get("order_id"),
             )
     return build_success(data)
+
+
+def get_real_balance_warning(user_id: str | None, state: Any, active_mode: str | None) -> str | None:
+    if user_id is None or getattr(state, "account_mode", None) != "REAL" or active_mode != "REAL":
+        return None
+    try:
+        record = user_store.get_user(str(user_id))
+    except Exception:
+        logger.warning("[REAL_BALANCE_WARNING_LOOKUP_FAILED] user_id=%s", user_id, exc_info=True)
+        return None
+    if record is None or record.last_balance is None:
+        return None
+    try:
+        balance = float(record.last_balance)
+    except (TypeError, ValueError):
+        return None
+    return "BALANCE_ZERO" if balance == 0 else None
 
 
 def recover_timed_out_analysis_if_needed(user_id: str) -> Any:
@@ -3728,6 +3761,7 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     )
     state = auto_trader.get(user_id)
     block_reason = real_block_reason(state, connected=connected, active_mode=active_mode, user_id=user_id)
+    real_balance_warning = get_real_balance_warning(user_id, state, active_mode)
     return json_response(
         200,
         build_robot_payload(
@@ -3741,6 +3775,7 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
             connection_status_source=source,
             real_ready=block_reason is None,
             real_block_reason=block_reason,
+            real_balance_warning=real_balance_warning,
         ),
     )
 
@@ -3958,6 +3993,7 @@ async def robot_config(
     user_id = auth["user_id"]
     raw_body = dict(body or {})
     logger.warning("[ROBOT_CONFIG_PAYLOAD] user_id=%s payload=%s", user_id, raw_body)
+    logger.info("[REAL_CONFIG_RECEIVED] user_id=%s payload=%s", user_id, raw_body)
     ignored_ai_fields = ignored_ai_config_fields(raw_body)
     if ignored_ai_fields:
         logger.info(
@@ -3976,12 +4012,28 @@ async def robot_config(
         user_id,
         partial_update,
     )
+    saved_fields = partial_update.model_dump(exclude_none=True)
     persist_robot(user_id)
     logger.info(
         "[ROBOT_CONFIG_SAVED] user_id=%s saved_fields=%s",
         user_id,
-        sorted(partial_update.model_dump(exclude_none=True).keys()),
+        sorted(saved_fields.keys()),
     )
+    logger.info(
+        "[REAL_CONFIG_SAVED] user_id=%s account_mode=%s allow_real=%s confirm_real=%s",
+        user_id,
+        state.account_mode,
+        state.allow_real,
+        state.confirm_real,
+    )
+    if {"account_mode", "allow_real", "confirm_real"}.intersection(saved_fields):
+        logger.info(
+            "[REAL_CONFIRMATION_UPDATED] user_id=%s account_mode=%s allow_real=%s confirm_real=%s",
+            user_id,
+            state.account_mode,
+            state.allow_real,
+            state.confirm_real,
+        )
     return json_response(200, build_robot_payload(state, user_id=user_id))
 
 
@@ -4103,10 +4155,12 @@ async def robot_sync_connection(auth: dict[str, str] = Depends(require_headers))
     status_code, _, state, connected, active_mode, source = await fetch_and_sync_robot_connection(user_id)
     persist_robot(user_id)
     block_reason = real_block_reason(state, connected=connected, active_mode=active_mode, user_id=user_id)
+    real_balance_warning = get_real_balance_warning(user_id, state, active_mode)
     return json_response(
         200 if status_code < 500 else status_code,
         build_robot_payload(
             state,
+            user_id=user_id,
             connected=connected,
             active_mode=active_mode,
             connection_checked_at=state.connection_checked_at.isoformat()
@@ -4115,6 +4169,7 @@ async def robot_sync_connection(auth: dict[str, str] = Depends(require_headers))
             connection_status_source=source,
             real_ready=block_reason is None,
             real_block_reason=block_reason,
+            real_balance_warning=real_balance_warning,
         ),
     )
 

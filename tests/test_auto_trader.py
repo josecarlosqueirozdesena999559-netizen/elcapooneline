@@ -537,6 +537,7 @@ class AutoTraderStateTests(unittest.TestCase):
 class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         main.auto_trader = AutoTrader()
+        main.user_store = main.create_user_store()
 
     async def test_robot_config_and_state_are_isolated_by_user_id(self) -> None:
         with (
@@ -636,6 +637,58 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["martingale_enabled"])
         self.assertEqual(data["martingale_steps"], 1)
         self.assertEqual(data["martingale_multiplier"], 2.5)
+        persist.assert_called_once_with(user_id)
+
+    async def test_robot_config_persists_real_confirmation_fields(self) -> None:
+        user_id = "user-real-config"
+        body = {
+            "account_mode": "REAL",
+            "allow_real": True,
+            "confirm_real": True,
+        }
+
+        with (
+            patch.object(main, "persist_robot") as persist,
+            patch.object(main, "ensure_robot_worker"),
+            patch.object(main, "stop_robot_worker", new=AsyncMock()),
+        ):
+            response = await main.robot_config(body, {"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        state = main.auto_trader.get(user_id)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["account_mode"], "REAL")
+        self.assertTrue(data["allow_real"])
+        self.assertTrue(data["confirm_real"])
+        self.assertEqual(state.account_mode, "REAL")
+        self.assertTrue(state.allow_real)
+        self.assertTrue(state.confirm_real)
+        persist.assert_called_once_with(user_id)
+
+    async def test_robot_config_preserves_real_confirmation_when_updating_other_fields(self) -> None:
+        user_id = "user-real-preserve"
+        main.auto_trader.update_config(
+            user_id,
+            main.RobotConfigUpdate(account_mode="REAL", allow_real=True, confirm_real=True),
+        )
+
+        with (
+            patch.object(main, "persist_robot") as persist,
+            patch.object(main, "ensure_robot_worker"),
+            patch.object(main, "stop_robot_worker", new=AsyncMock()),
+        ):
+            response = await main.robot_config({"entryValue": 9}, {"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        state = main.auto_trader.get(user_id)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["entry_value"], 9)
+        self.assertTrue(data["allow_real"])
+        self.assertTrue(data["confirm_real"])
+        self.assertEqual(data["account_mode"], "REAL")
+        self.assertTrue(state.allow_real)
+        self.assertTrue(state.confirm_real)
+        self.assertEqual(state.account_mode, "REAL")
         persist.assert_called_once_with(user_id)
 
     async def test_robot_config_ignores_legacy_ai_fields(self) -> None:
@@ -2451,6 +2504,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         state.account_mode = "REAL"
         state.allow_real = True
         state.confirm_real = True
+        main.user_store.save_connection(user_id, {"connected": True, "account_mode": "REAL", "last_balance": 0})
 
         with (
             patch.object(
@@ -2474,6 +2528,33 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["active_mode"], "REAL")
         self.assertTrue(data["real_ready"])
         self.assertIsNone(data["real_block_reason"])
+        self.assertEqual(data["real_balance_warning"], "BALANCE_ZERO")
+
+    async def test_robot_state_requires_allow_real_for_real_readiness(self) -> None:
+        user_id = "user-real-allow-required"
+        state = main.auto_trader.get(user_id)
+        state.account_mode = "REAL"
+        state.allow_real = False
+        state.confirm_real = True
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success({"connected": True, "active_mode": "REAL"}),
+                    )
+                ),
+            ),
+            patch.object(main, "sync_user_store_from_payload"),
+        ):
+            response = await main.robot_state({"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        self.assertFalse(data["real_ready"])
+        self.assertEqual(data["real_block_reason"], "CONFIRM_REAL_REQUIRED")
 
     async def test_confirmed_real_sends_at_most_one_order_per_cycle(self) -> None:
         user_id = "user-real"
