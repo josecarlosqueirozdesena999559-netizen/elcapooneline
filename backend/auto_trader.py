@@ -39,7 +39,7 @@ STATUS_REAL_TRADING_LOCKED = "REAL_TRADING_LOCKED"
 STATUS_WAITING_NEXT_CANDLE_ENTRY = "WAITING_NEXT_CANDLE_ENTRY"
 STATUS_WAITING_ENTRY_WINDOW = STATUS_WAITING_NEXT_CANDLE_ENTRY
 STATUS_WAITING_ANALYSIS_WINDOW = "WAITING_ANALYSIS_WINDOW"
-STATUS_ACCOUNT_DISCONNECTED = "ACCOUNT_DISCONNECTED"
+STATUS_ACCOUNT_DISCONNECTED = "DISCONNECTED"
 STATUS_ANALYSIS_TIMEOUT = "ANALYSIS_TIMEOUT"
 STATUS_ANALYSIS_ERROR = "ANALYSIS_ERROR"
 STATUS_NO_CANDIDATES = "NO_CANDIDATES"
@@ -59,6 +59,7 @@ TEMPORARY_WAIT_STATUSES = {
 TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
 RESULT_WAITING_MESSAGE = "Aguardando resultado..."
 ANALYSIS_MESSAGE = "Analisando mercado..."
+DISCONNECTED_MESSAGE = "Conta BullEx desconectada"
 ANALYSIS_TIMEOUT_SECONDS = 10
 ANALYSIS_TIMEOUT_MESSAGE = "Análise demorou demais, aguardando próxima vela."
 NO_MINIMUM_SCORE_MESSAGE = "Nenhum ativo atingiu score mínimo."
@@ -325,6 +326,21 @@ class RobotState:
         data["operation_message"] = None
         data["expiration_display"] = None
         data["show_expiration_countdown"] = False
+        if self.status == STATUS_ACCOUNT_DISCONNECTED:
+            data["enabled"] = False
+            data["connected"] = False
+            data["active_mode"] = None
+            data["operation_in_progress"] = False
+            data["result_waiting"] = False
+            data["operation_message"] = DISCONNECTED_MESSAGE
+            data["analysis_message"] = None
+            data["status_message"] = None
+            data["display_countdown_label"] = None
+            data["display_countdown_seconds"] = 0
+            data["best_candidate_summary"] = None
+            data["pending_signal"] = None
+            data["last_signal"] = None
+            data["last_trade"] = None
         if self.status == STATUS_ANALYZING:
             data["last_analysis_result"] = "RUNNING"
             data["analysis_result"] = "RUNNING"
@@ -1193,7 +1209,9 @@ class AutoTrader:
 
     def disconnect_account(self, user_id: str) -> RobotState:
         state = self.get(user_id)
+        state.enabled = False
         state.connected = False
+        state.active_mode = None
         state.connection_status_source = "disconnected"
         state.connection_checked_at = utc_now()
         state.connection_grace_until = None
@@ -1203,9 +1221,16 @@ class AutoTrader:
         state.entry_window_open = False
         state.seconds_until_entry_window = 0
         state.next_cycle_at = None
+        state.current_cycle_started_at = None
         state.status = STATUS_ACCOUNT_DISCONNECTED
         state.rejection_reason = STATUS_ACCOUNT_DISCONNECTED
         state.last_rejection_reason = STATUS_ACCOUNT_DISCONNECTED
+        state.last_trade = None
+        state.last_analysis_at = None
+        state.last_analysis_result = None
+        state.analysis_started_at = None
+        state.analysis_result = None
+        state.analysis_message = None
         state.blocked_filters = []
         state.approved_filters = []
         state.quality_score = 0

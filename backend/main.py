@@ -91,7 +91,7 @@ LOW_QUALITY_SIGNAL = "Sinal bloqueado por baixa qualidade"
 MAX_ORDER_ATTEMPTS_PER_CYCLE = 3
 NO_AVAILABLE_ASSET_ERROR = "Nenhum ativo disponível no momento da compra."
 CRITICAL_TRADE_BLOCKS = {
-    "ACCOUNT_DISCONNECTED",
+    STATUS_ACCOUNT_DISCONNECTED,
     "STOP_WIN_HIT",
     "STOP_LOSS_HIT",
     "ACTIVE_CLOSED",
@@ -1455,7 +1455,7 @@ def real_block_reason(
         reason = "ACCOUNT_MODE_NOT_REAL"
     elif state.operation_in_progress:
         reason = "OPERATION_IN_PROGRESS"
-    elif not connected:
+    elif robot_connection_unavailable(connected, active_mode):
         reason = "BULLEX_NOT_CONNECTED"
     elif active_mode != "REAL":
         reason = "BULLEX_ACTIVE_MODE_NOT_REAL"
@@ -1723,6 +1723,10 @@ def robot_stop_reason(state: Any) -> str | None:
     return None
 
 
+def robot_connection_unavailable(connected: bool, active_mode: str | None) -> bool:
+    return not connected or active_mode is None
+
+
 def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     data = strip_ai_fields(state.to_dict())
     user_id = extra.pop("user_id", None)
@@ -1732,6 +1736,21 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         data["worker_running"] = bool(worker_task is not None and not worker_task.done())
         data["worker_last_tick_at"] = last_tick_at.isoformat() if last_tick_at is not None else None
     data.update(strip_ai_fields(extra))
+    if data.get("status") == STATUS_ACCOUNT_DISCONNECTED:
+        data["connected"] = False
+        data["enabled"] = False
+        data["active_mode"] = None
+        data["worker_running"] = False
+        data["operation_in_progress"] = False
+        data["result_waiting"] = False
+        data["operation_message"] = "Conta BullEx desconectada"
+        data["analysis_message"] = None
+        data["display_countdown_label"] = None
+        data["display_countdown_seconds"] = 0
+        data["best_candidate_summary"] = None
+        data["pending_signal"] = None
+        data["last_signal"] = None
+        data["last_trade"] = None
     if data.get("operation_in_progress"):
         logger.info(
             "[EXPIRATION_COUNTDOWN] status=%s order_id=%s expiration_seconds=%s result_waiting=%s",
@@ -2675,6 +2694,18 @@ async def execute_robot_cycle(
                 user_id,
                 account_payload,
             )
+            if robot_connection_unavailable(connected, active_mode):
+                state = auto_trader.disconnect_account(user_id)
+                logger.warning("[ROBOT_BLOCKED_ACCOUNT_DISCONNECTED] user_id=%s", user_id)
+                return 200, build_robot_payload(
+                    state,
+                    connected=False,
+                    active_mode=None,
+                    connection_checked_at=state.connection_checked_at.isoformat()
+                    if state.connection_checked_at is not None
+                    else None,
+                    connection_status_source="disconnected",
+                )
             if state.account_mode == "REAL":
                 logger.info(
                     "[REAL MODE DETECTED] user_id=%s active_mode=%s connected=%s confirm_real=%s",
@@ -2705,19 +2736,6 @@ async def execute_robot_cycle(
                     return 403, build_error(block_reason)
 
             expected_bullex_mode = "PRACTICE" if state.account_mode == "DEMO" else "REAL"
-            if not connected:
-                if state.status == STATUS_ACCOUNT_DISCONNECTED:
-                    mark_disconnected_from_payload(user_id, account_payload)
-                    logger.warning("[ROBOT_BLOCKED_ACCOUNT_DISCONNECTED] user_id=%s", user_id)
-                return 200, build_robot_payload(
-                    state,
-                    connected=False,
-                    active_mode=active_mode,
-                    connection_checked_at=state.connection_checked_at.isoformat()
-                    if state.connection_checked_at is not None
-                    else None,
-                    connection_status_source=connection_source,
-                )
             if active_mode != expected_bullex_mode:
                 state = auto_trader.reject(user_id, f"ACCOUNT_MODE_MUST_BE_{expected_bullex_mode}")
                 logger.info(
@@ -3037,7 +3055,7 @@ async def execute_robot_cycle(
                         for reason in (
                             "ACTIVE_CLOSED",
                             "CANDLES_UNAVAILABLE",
-                            "ACCOUNT_DISCONNECTED",
+                            STATUS_ACCOUNT_DISCONNECTED,
                             "STOP_WIN_HIT",
                             "STOP_LOSS_HIT",
                             "OPERATION_IN_PROGRESS",
@@ -3537,6 +3555,7 @@ async def run_analysis_now(user_id: str) -> tuple[int, dict[str, Any]]:
     if (
         not state.enabled
         or not state.connected
+        or state.active_mode is None
         or state.operation_in_progress
         or state.pending_signal is not None
     ):
@@ -3599,6 +3618,10 @@ async def robot_worker(user_id: str) -> None:
 
 
 def ensure_robot_worker(user_id: str) -> None:
+    state = auto_trader.get(user_id)
+    if robot_connection_unavailable(bool(state.connected), state.active_mode):
+        logger.warning("[ROBOT_WORKER_BLOCKED_DISCONNECTED] user_id=%s", user_id)
+        return
     guard = connection_guard_reason(user_id)
     if guard is not None:
         reason, remaining = guard
@@ -3814,9 +3837,14 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
         active_mode = state.active_mode
         source = "offline_cache" if reason == "offline" else "backoff_active"
     else:
-        connected = bool(state.connected)
-        active_mode = state.active_mode
-        source = state.connection_status_source
+        _, _, state, connected, active_mode, source = await fetch_and_sync_robot_connection(user_id)
+        if robot_connection_unavailable(connected, active_mode):
+            state = auto_trader.disconnect_account(user_id)
+            await stop_robot_worker(user_id)
+            persist_robot(user_id)
+            connected = False
+            active_mode = None
+            source = "disconnected"
     window = get_entry_window(
         state.timeframe,
         utc_now().timestamp(),
@@ -4108,8 +4136,16 @@ async def robot_config(
 async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     user_id = auth["user_id"]
     state = get_user_robot_state(user_id)
-    if state.status == STATUS_ACCOUNT_DISCONNECTED or state.connection_failure_count > 0:
-        _, _, state, _, _, _ = await fetch_and_sync_robot_connection(user_id)
+    if fresh_robot_connection(state) and state.connected and state.active_mode is not None:
+        connected = True
+        active_mode = state.active_mode
+    else:
+        _, _, state, connected, active_mode, _ = await fetch_and_sync_robot_connection(user_id)
+    if robot_connection_unavailable(connected, active_mode):
+        state = auto_trader.disconnect_account(user_id)
+        persist_robot(user_id)
+        await stop_robot_worker(user_id)
+        return json_response(409, build_error("BULLEX_NOT_CONNECTED"))
     if state.account_mode == "REAL":
         logger.info(
             "[REAL MODE DETECTED] user_id=%s active_mode=%s confirm_real=%s",
@@ -4117,12 +4153,6 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
             state.active_mode,
             state.confirm_real,
         )
-        if fresh_robot_connection(state):
-            connected = True
-            active_mode = state.active_mode
-        else:
-            _, session_payload, state, connected, active_mode, _ = await fetch_and_sync_robot_connection(user_id)
-            mark_disconnected_from_payload(user_id, session_payload)
         block_reason = real_block_reason(state, connected=connected, active_mode=active_mode, user_id=user_id)
         if block_reason is not None:
             auto_trader.lock_real(user_id, block_reason)
