@@ -96,6 +96,22 @@ class RobotProdStabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(refreshed.account_detected)
         self.assertIsNone(refreshed.sync_started_at)
 
+    async def test_watchdog_throttles_reconnect_attempts_to_once_per_minute(self) -> None:
+        main = self.get_main()
+        main.auto_trader = AutoTrader()
+        user_id = "user-watchdog-throttle"
+        state = main.auto_trader.start(user_id)
+        state.connected = True
+        state.ws_connected = False
+        state.account_detected = False
+        state.sync_started_at = utc_now() - timedelta(seconds=31)
+        state.last_reconnect_attempt_at = utc_now()
+
+        with patch.object(main, "call_bullex_service", new=AsyncMock()) as service_call:
+            await main.run_robot_watchdog(user_id)
+
+        service_call.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()
