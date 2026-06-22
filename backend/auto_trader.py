@@ -49,6 +49,20 @@ STATUS_WAITING_RECOVERY = "WAITING_RECOVERY"
 STATUS_ACTIVE_COOLDOWN = "ACTIVE_COOLDOWN"
 STATUS_PAYOUT_COOLDOWN = "PAYOUT_COOLDOWN"
 
+PUBLIC_STATUS_OFFLINE = "OFFLINE"
+PUBLIC_STATUS_CONNECTING = "CONECTANDO"
+PUBLIC_STATUS_SYNCING = "SINCRONIZANDO"
+PUBLIC_STATUS_RECONNECTING = "SINCRONIZANDO_RECONECTANDO"
+PUBLIC_STATUS_ANALYZING = "ANALISANDO"
+PUBLIC_STATUS_SIGNAL_FOUND = "SINAL_ENCONTRADO"
+PUBLIC_STATUS_OPERATING = "OPERANDO"
+PUBLIC_STATUS_WAITING_RESULT = "AGUARDANDO_RESULTADO"
+PUBLIC_STATUS_WIN = "WIN"
+PUBLIC_STATUS_LOSS = "LOSS"
+PUBLIC_STATUS_CYCLE_LIMIT = "LIMITE_CICLO_ATINGIDO"
+PUBLIC_STATUS_DISCONNECTED = "DESCONECTADO_BULLEX"
+PUBLIC_STATUS_ERROR = "ERRO"
+
 TEMPORARY_WAIT_STATUSES = {
     STATUS_CONNECTION_BACKOFF,
     STATUS_WAITING_RECOVERY,
@@ -116,6 +130,43 @@ def parse_datetime(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def resolve_public_status(data: dict[str, Any]) -> str:
+    internal = str(data.get("status") or "")
+    connected = bool(data.get("connected"))
+    enabled = bool(data.get("enabled"))
+    if internal == STATUS_STOPPED:
+        return PUBLIC_STATUS_OFFLINE
+    if internal == STATUS_ACCOUNT_DISCONNECTED or (enabled and not connected):
+        return PUBLIC_STATUS_DISCONNECTED
+    if internal in {STATUS_CONNECTION_BACKOFF, STATUS_WAITING_RECOVERY, STATUS_ACTIVE_COOLDOWN, STATUS_PAYOUT_COOLDOWN}:
+        return PUBLIC_STATUS_RECONNECTING
+    if data.get("rejection_reason") == PUBLIC_STATUS_CYCLE_LIMIT or data.get("last_rejection_reason") == PUBLIC_STATUS_CYCLE_LIMIT:
+        return PUBLIC_STATUS_CYCLE_LIMIT
+    if internal in {STATUS_SENDING_ORDER, STATUS_SENDING_GALE_ORDER}:
+        return PUBLIC_STATUS_OPERATING
+    if internal in {STATUS_PENDING_RESULT, STATUS_PENDING_GALE_RESULT}:
+        return PUBLIC_STATUS_WAITING_RESULT
+    if internal in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED}:
+        result = str(
+            data.get("last_result")
+            or ((data.get("last_trade") or {}).get("final_result") or (data.get("last_trade") or {}).get("result") or "")
+        ).upper()
+        if result == "WIN":
+            return PUBLIC_STATUS_WIN
+        if result == "LOSS":
+            return PUBLIC_STATUS_LOSS
+        return PUBLIC_STATUS_WAITING_RESULT
+    if internal in {STATUS_WAITING_NEXT_CANDLE_ENTRY, STATUS_WAITING_GALE_ENTRY} or data.get("pending_signal"):
+        return PUBLIC_STATUS_SIGNAL_FOUND
+    if internal in {STATUS_ERROR, STATUS_REAL_TRADING_LOCKED}:
+        return PUBLIC_STATUS_ERROR
+    if internal == STATUS_ANALYZING and (not data.get("candles_fresh") or not data.get("payouts_fresh")):
+        return PUBLIC_STATUS_SYNCING
+    if enabled:
+        return PUBLIC_STATUS_ANALYZING
+    return PUBLIC_STATUS_OFFLINE
+
+
 class RobotConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -129,11 +180,11 @@ class RobotConfigUpdate(BaseModel):
     min_payout: float | None = Field(default=None, ge=0, le=100, validation_alias=AliasChoices("min_payout", "minPayout"))
     stop_win: float | None = Field(default=None, ge=0, validation_alias=AliasChoices("stop_win", "stopWin"))
     stop_loss: float | None = Field(default=None, ge=0, validation_alias=AliasChoices("stop_loss", "stopLoss"))
-    max_entries_per_cycle: int | None = Field(default=None, ge=1, le=1, validation_alias=AliasChoices("max_entries_per_cycle", "maxEntriesPerCycle"))
+    max_entries_per_cycle: int | None = Field(default=None, ge=1, le=1000, validation_alias=AliasChoices("max_entries_per_cycle", "maxEntriesPerCycle"))
     allow_real: bool | None = Field(default=None, validation_alias=AliasChoices("allow_real", "allowReal"))
     confirm_real: bool | None = Field(default=None, validation_alias=AliasChoices("confirm_real", "confirmReal"))
     martingale_enabled: bool | None = Field(default=None, validation_alias=AliasChoices("martingale_enabled", "martingaleEnabled"))
-    martingale_steps: int | None = Field(default=None, ge=1, le=1, validation_alias=AliasChoices("martingale_steps", "martingaleSteps"))
+    martingale_steps: int | None = Field(default=None, ge=1, le=20, validation_alias=AliasChoices("martingale_steps", "martingaleSteps"))
     martingale_multiplier: float | None = Field(default=None, gt=0, validation_alias=AliasChoices("martingale_multiplier", "martingaleMultiplier"))
 
 
@@ -155,6 +206,7 @@ class RobotState:
     martingale_enabled: bool = False
     martingale_steps: int = 1
     martingale_multiplier: float = 2.0
+    entries_used_in_cycle: int = 0
     wins: int = 0
     losses: int = 0
     profit: float = 0.0
@@ -170,6 +222,8 @@ class RobotState:
     rejected_at: datetime | None = None
     result_received_at: datetime | None = None
     result_display_until: datetime | None = None
+    status_started_at: datetime | None = None
+    sync_started_at: datetime | None = None
     stop_reset_at: datetime | None = None
     operation_in_progress: bool = False
     last_signal: dict[str, Any] | None = None
@@ -186,6 +240,13 @@ class RobotState:
     connection_grace_until: datetime | None = None
     connection_status_source: str = "cached"
     connection_failure_count: int = 0
+    ws_connected: bool = False
+    candles_fresh: bool = False
+    payouts_fresh: bool = False
+    account_detected: bool = False
+    last_candle_at: datetime | None = None
+    last_payout_at: datetime | None = None
+    last_sync_at: datetime | None = None
     analysis_window_open: bool = False
     seconds_until_analysis_window: int = 0
     analysis_window_start_second: int = 5
@@ -218,6 +279,11 @@ class RobotState:
     best_candidate: dict[str, Any] | None = None
     cycle_best_candidate: dict[str, Any] | None = None
     cycle_best_trade_candidate: dict[str, Any] | None = None
+    current_asset: str | None = None
+    current_direction: str | None = None
+    current_payout: float | None = None
+    last_result: str | None = None
+    last_error: str | None = None
     strategy_name: str | None = None
     strategy_reason: str | None = None
     used_strategies: list[str] = field(default_factory=list)
@@ -237,10 +303,15 @@ class RobotState:
             "rejected_at",
             "result_received_at",
             "result_display_until",
+            "status_started_at",
+            "sync_started_at",
             "stop_reset_at",
             "connection_checked_at",
             "last_connected_at",
             "connection_grace_until",
+            "last_candle_at",
+            "last_payout_at",
+            "last_sync_at",
         ):
             value = data[key]
             data[key] = value.isoformat() if value is not None else None
@@ -287,6 +358,7 @@ class RobotState:
                 data["gale_parent_trade"] = None
             self.status = STATUS_WAITING_NEXT_CYCLE if self.enabled else STATUS_STOPPED
             self.next_cycle_at = now + timedelta(minutes=self.cycle_minutes) if self.enabled else None
+            self.entries_used_in_cycle = 0
             self.rejection_reason = None
             self.pending_signal = None
             self.best_candidate = None
@@ -302,6 +374,7 @@ class RobotState:
             self.metrics = {}
             data["status"] = self.status
             data["next_cycle_at"] = self.next_cycle_at.isoformat() if self.next_cycle_at is not None else None
+            data["entries_used_in_cycle"] = 0
             data["pending_signal"] = None
             data["candidates"] = []
             data["candidates_count"] = 0
@@ -312,6 +385,13 @@ class RobotState:
             if (now - self.rejected_at).total_seconds() >= 5:
                 data["status"] = STATUS_WAITING_NEXT_CYCLE if self.enabled else STATUS_STOPPED
                 data["rejection_reason"] = None
+        candles_age = (now - self.last_candle_at).total_seconds() if self.last_candle_at is not None else None
+        payouts_age = (now - self.last_payout_at).total_seconds() if self.last_payout_at is not None else None
+        data["candles_fresh"] = bool(self.candles_fresh and candles_age is not None and candles_age <= 30)
+        data["payouts_fresh"] = bool(self.payouts_fresh and payouts_age is not None and payouts_age <= 30)
+        data["ws_connected"] = bool(self.ws_connected)
+        data["account_detected"] = bool(self.account_detected)
+        data["entries_used_in_cycle"] = int(self.entries_used_in_cycle)
         data["seconds_until_next_cycle"] = (
             max(0, int((self.next_cycle_at - now).total_seconds()))
             if self.next_cycle_at is not None
@@ -454,6 +534,9 @@ class RobotState:
                         data["show_expiration_countdown"] = True
         total = self.wins + self.losses
         data["accuracy"] = round((self.wins / total) * 100, 2) if total else 0.0
+        data["last_result"] = self.last_result or ((self.last_trade or {}).get("final_result") or (self.last_trade or {}).get("result"))
+        data["status"] = resolve_public_status(data)
+        data["updated_at"] = now.isoformat()
         return data
 
 
@@ -497,6 +580,10 @@ class AutoTrader:
     @staticmethod
     def _new_cycle_id() -> str:
         return uuid.uuid4().hex
+
+    @staticmethod
+    def _mark_status_started(state: RobotState, when: datetime | None = None) -> None:
+        state.status_started_at = when or utc_now()
 
     def restore(
         self,
@@ -552,6 +639,8 @@ class AutoTrader:
                 self._schedule_next_cycle(state)
             state.entry_window_open = False
         self._states[user_id] = state
+        if state.status_started_at is None:
+            self._mark_status_started(state)
         self._sources[user_id] = source
 
         restored_trades = [strip_ai_fields(dict(trade)) for trade in (trades or [])]
@@ -571,8 +660,6 @@ class AutoTrader:
     def update_config(self, user_id: str, update: RobotConfigUpdate) -> RobotState:
         state = self.get(user_id)
         changes = update.model_dump(exclude_none=True)
-        if "martingale_steps" in changes:
-            changes["martingale_steps"] = 1
         for key, value in changes.items():
             setattr(state, key, value)
 
@@ -583,15 +670,18 @@ class AutoTrader:
         if changes.get("account_mode") == "REAL":
             state.enabled = False
             state.status = STATUS_STOPPED
+            self._mark_status_started(state)
             state.next_cycle_at = None
 
         if "enabled" in changes:
             if state.enabled and state.account_mode == "DEMO":
                 state.status = STATUS_WAITING_NEXT_CYCLE
+                self._mark_status_started(state)
                 state.next_cycle_at = utc_now()
             else:
                 state.enabled = False
                 state.status = STATUS_STOPPED
+                self._mark_status_started(state)
         if changes:
             self._sources[user_id] = "memory"
         return state
@@ -601,12 +691,15 @@ class AutoTrader:
         now = utc_now()
         state.enabled = True
         state.status = STATUS_WAITING_NEXT_CYCLE
+        self._mark_status_started(state, now)
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.last_order_error = None
         state.result_received_at = None
         state.result_display_until = None
+        state.sync_started_at = now
         state.order_attempts = 0
+        state.entries_used_in_cycle = 0
         state.fallback_candidate_used = False
         state.rejected_at = None
         state.pending_signal = None
@@ -642,6 +735,15 @@ class AutoTrader:
         state.block_reasons = []
         state.metrics = {}
         state.analysis_message = None
+        state.ws_connected = bool(state.connected)
+        state.account_detected = bool(state.active_mode)
+        state.candles_fresh = False
+        state.payouts_fresh = False
+        state.current_asset = None
+        state.current_direction = None
+        state.current_payout = None
+        state.last_result = None
+        state.last_error = None
         state.cycle_id = self._new_cycle_id()
         state.current_cycle_started_at = now
         state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
@@ -651,6 +753,7 @@ class AutoTrader:
         state = self.get(user_id)
         state.enabled = False
         state.status = STATUS_STOPPED
+        self._mark_status_started(state)
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.last_order_error = None
@@ -676,8 +779,15 @@ class AutoTrader:
     def prepare_cycle(self, user_id: str) -> tuple[bool, RobotState]:
         state = self.get(user_id)
         now = utc_now()
+        if state.entries_used_in_cycle >= max(1, int(state.max_entries_per_cycle or 1)) and not state.operation_in_progress:
+            state.status = STATUS_WAITING_NEXT_CYCLE
+            self._mark_status_started(state, now)
+            state.rejection_reason = PUBLIC_STATUS_CYCLE_LIMIT
+            state.last_rejection_reason = PUBLIC_STATUS_CYCLE_LIMIT
+            return False, state
         if not state.enabled:
             state.status = STATUS_STOPPED
+            self._mark_status_started(state, now)
             return False, state
         if state.status in TEMPORARY_WAIT_STATUSES:
             if state.next_cycle_at is not None and now < state.next_cycle_at:
@@ -720,14 +830,21 @@ class AutoTrader:
         if state.next_cycle_at is not None and now < state.next_cycle_at:
             state.status = STATUS_WAITING_NEXT_CYCLE
             return False, state
+        if state.next_cycle_at is not None and now >= state.next_cycle_at and not state.operation_in_progress:
+            state.current_cycle_started_at = now
+            state.cycle_id = self._new_cycle_id()
+            state.entries_used_in_cycle = 0
 
         if state.next_cycle_at is None:
             state.current_cycle_started_at = now
             state.cycle_id = self._new_cycle_id()
+            state.entries_used_in_cycle = 0
             state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
             state.status = STATUS_WAITING_NEXT_CYCLE
+            self._mark_status_started(state, now)
             return False, state
         state.status = STATUS_WAITING_NEXT_CYCLE
+        self._mark_status_started(state, now)
         state.rejection_reason = None
         state.analysis_message = None
         state.order_attempts = 0
@@ -746,6 +863,8 @@ class AutoTrader:
             return state
         now = utc_now()
         state.status = STATUS_ANALYZING
+        self._mark_status_started(state, now)
+        state.sync_started_at = now
         state.rejection_reason = None
         state.last_analysis_at = now
         state.last_analysis_result = "RUNNING"
@@ -765,6 +884,7 @@ class AutoTrader:
         state = self.get(user_id)
         rejected_at = utc_now()
         state.status = STATUS_SIGNAL_REJECTED
+        self._mark_status_started(state, rejected_at)
         state.rejection_reason = reason
         state.last_rejection_reason = last_rejection_reason
         state.last_order_error = last_order_error
@@ -842,6 +962,7 @@ class AutoTrader:
     def reject(self, user_id: str, reason: str) -> RobotState:
         state = self.get(user_id)
         state.status = STATUS_SIGNAL_REJECTED
+        self._mark_status_started(state)
         state.rejection_reason = reason
         state.last_rejection_reason = reason
         state.rejected_at = utc_now()
@@ -908,10 +1029,12 @@ class AutoTrader:
     def fail(self, user_id: str, reason: str) -> RobotState:
         state = self.get(user_id)
         state.status = STATUS_ERROR
+        self._mark_status_started(state)
         state.rejection_reason = reason
         state.last_rejection_reason = reason
         state.last_analysis_result = reason
         state.analysis_result = reason
+        state.last_error = reason
         return state
 
     def set_pending_signal(self, user_id: str, signal: dict[str, Any]) -> RobotState:
@@ -951,6 +1074,7 @@ class AutoTrader:
         state.last_signal = dict(pending_signal)
         state.pending_signal = pending_signal
         state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_NEXT_CANDLE_ENTRY
+        self._mark_status_started(state)
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.last_analysis_at = utc_now()
@@ -1000,6 +1124,7 @@ class AutoTrader:
             state.candidates_count = 0
             state.candidates = []
         state.status = STATUS_WAITING_ANALYSIS_WINDOW
+        self._mark_status_started(state)
         state.rejection_reason = rejection_reason
         state.last_rejection_reason = last_rejection_reason or "WAITING_NEXT_ANALYSIS_WINDOW"
         state.analysis_result = analysis_result
@@ -1096,6 +1221,7 @@ class AutoTrader:
         state.status = STATUS_ANALYZING if analyze else (
             STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
         )
+        self._mark_status_started(state)
         if analyze:
             state.next_cycle_at = utc_now()
         state.rejection_reason = None
@@ -1120,6 +1246,7 @@ class AutoTrader:
         state = self.get(user_id)
         now = utc_now()
         state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
+        self._mark_status_started(state, now)
         state.rejection_reason = None
         state.last_rejection_reason = reason
         state.last_analysis_at = now
@@ -1135,6 +1262,7 @@ class AutoTrader:
         state.fallback_candidate_used = False
         state.current_cycle_started_at = now
         state.cycle_id = self._new_cycle_id()
+        state.entries_used_in_cycle = 0
         state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes) if state.enabled else None
         state.candidates = []
         state.candidates_count = 0
@@ -1154,6 +1282,7 @@ class AutoTrader:
         now = utc_now()
         state.enabled = False
         state.status = STATUS_STOPPED
+        self._mark_status_started(state, now)
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.cycle_result = None
@@ -1177,6 +1306,7 @@ class AutoTrader:
         state.fallback_candidate_used = False
         state.current_cycle_started_at = None
         state.cycle_id = self._new_cycle_id()
+        state.entries_used_in_cycle = 0
         state.next_cycle_at = None
         state.blocked_filters = []
         state.approved_filters = []
@@ -1211,6 +1341,10 @@ class AutoTrader:
         state = self.get(user_id)
         state.enabled = False
         state.connected = False
+        state.ws_connected = False
+        state.candles_fresh = False
+        state.payouts_fresh = False
+        state.account_detected = False
         state.active_mode = None
         state.connection_status_source = "disconnected"
         state.connection_checked_at = utc_now()
@@ -1223,6 +1357,7 @@ class AutoTrader:
         state.next_cycle_at = None
         state.current_cycle_started_at = None
         state.status = STATUS_ACCOUNT_DISCONNECTED
+        self._mark_status_started(state)
         state.rejection_reason = STATUS_ACCOUNT_DISCONNECTED
         state.last_rejection_reason = STATUS_ACCOUNT_DISCONNECTED
         state.last_trade = None
@@ -1259,6 +1394,7 @@ class AutoTrader:
         state = self.get(user_id)
         now = utc_now()
         state.status = status
+        self._mark_status_started(state, now)
         state.rejection_reason = rejection_reason or status
         state.last_rejection_reason = last_rejection_reason or state.rejection_reason
         state.last_order_error = last_order_error
@@ -1282,7 +1418,9 @@ class AutoTrader:
         state = self.get(user_id)
         now = checked_at or utc_now()
         state.connected = connected
+        state.ws_connected = connected
         state.active_mode = active_mode
+        state.account_detected = active_mode is not None
         state.connection_checked_at = now
         state.connection_status_source = source
         if connected:
@@ -1294,6 +1432,7 @@ class AutoTrader:
                 state.last_rejection_reason = None
             if align_status and not state.operation_in_progress:
                 state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
+                self._mark_status_started(state, now)
         else:
             state.connection_failure_count += 1
         return state
@@ -1310,6 +1449,7 @@ class AutoTrader:
         } or not state.pending_signal:
             raise RuntimeError("INVALID_ORDER_STATE_TRANSITION")
         state.status = STATUS_SENDING_GALE_ORDER if state.gale_pending else STATUS_SENDING_ORDER
+        self._mark_status_started(state)
         state.rejection_reason = None
         state.rejected_at = None
         state.last_order_error = None
@@ -1328,6 +1468,7 @@ class AutoTrader:
         state.operation_in_progress = False
         state.order_attempts = max(1, state.order_attempts)
         state.status = STATUS_ORDER_REJECTED
+        self._mark_status_started(state, rejected_at)
         state.rejection_reason = reason
         state.last_rejection_reason = reason
         state.last_order_error = last_order_error or reason
@@ -1359,13 +1500,18 @@ class AutoTrader:
         trade.setdefault("expires_at", trade["expected_expire_at"])
         state.last_trade = trade
         state.last_entry_at = sent_at
+        state.entries_used_in_cycle += 1
         state.result_received_at = None
         state.result_display_until = None
         state.operation_in_progress = True
         is_gale = bool(trade.get("is_gale"))
         state.status = STATUS_PENDING_GALE_RESULT if is_gale else STATUS_PENDING_RESULT
+        self._mark_status_started(state, sent_at)
         state.rejection_reason = None
         state.last_order_error = None
+        state.current_asset = str(trade.get("active") or trade.get("symbol") or "").strip() or None
+        state.current_direction = str(trade.get("direction") or trade.get("signal") or "").upper().strip() or None
+        state.current_payout = float(trade.get("payout")) if trade.get("payout") is not None else state.current_payout
         if is_gale:
             state.gale_pending = False
             state.gale_active = True
@@ -1376,6 +1522,7 @@ class AutoTrader:
     def lock_real(self, user_id: str, reason: str = "REAL_TRADING_LOCKED") -> RobotState:
         state = self.get(user_id)
         state.status = STATUS_REAL_TRADING_LOCKED
+        self._mark_status_started(state)
         state.rejection_reason = reason
         state.last_rejection_reason = reason
         state.analysis_result = None
@@ -1508,6 +1655,7 @@ class AutoTrader:
         state.pending_signal = self._build_gale_signal(state, parent_trade, gale_amount)
         state.last_signal = dict(state.pending_signal)
         state.status = STATUS_WAITING_GALE_ENTRY
+        self._mark_status_started(state)
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.result_received_at = None
@@ -1611,13 +1759,15 @@ class AutoTrader:
         completed.add(normalized_order_id)
         state.last_trade = trade
         state.operation_in_progress = False
+        state.last_result = normalized_result
         state.status = (
             STATUS_GALE_RESULT_RECEIVED if is_gale_trade else STATUS_RESULT_RECEIVED
         ) if state.enabled else STATUS_STOPPED
+        self._mark_status_started(state, finished_at)
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.result_received_at = finished_at
-        state.result_display_until = finished_at + timedelta(seconds=5) if state.enabled else None
+        state.result_display_until = finished_at + timedelta(seconds=8) if state.enabled else None
         state.entry_window_open = False
         state.seconds_until_entry_window = 0
         state.next_cycle_at = None
@@ -1655,6 +1805,7 @@ class AutoTrader:
         state.last_trade = trade
         state.operation_in_progress = False
         state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
+        self._mark_status_started(state, finished_at)
         state.rejection_reason = "TRADE_RESULT_TIMEOUT"
         state.last_rejection_reason = "TRADE_RESULT_TIMEOUT"
         state.entry_window_open = False
@@ -1665,6 +1816,36 @@ class AutoTrader:
         history.append(dict(trade))
         del history[:-100]
         return True, state
+
+    def mark_market_sync(
+        self,
+        user_id: str,
+        *,
+        candles_ok: bool | None = None,
+        payouts_ok: bool | None = None,
+        ws_connected: bool | None = None,
+        account_detected: bool | None = None,
+    ) -> RobotState:
+        state = self.get(user_id)
+        now = utc_now()
+        if candles_ok is not None:
+            state.candles_fresh = bool(candles_ok)
+            if candles_ok:
+                state.last_candle_at = now
+        if payouts_ok is not None:
+            state.payouts_fresh = bool(payouts_ok)
+            if payouts_ok:
+                state.last_payout_at = now
+        if ws_connected is not None:
+            state.ws_connected = bool(ws_connected)
+        if account_detected is not None:
+            state.account_detected = bool(account_detected)
+        if state.ws_connected and state.candles_fresh and state.payouts_fresh and state.account_detected:
+            state.last_sync_at = now
+            state.sync_started_at = None
+        elif state.sync_started_at is None:
+            state.sync_started_at = now
+        return state
 
     def history(self, user_id: str) -> dict[str, Any]:
         state = self.get(user_id)

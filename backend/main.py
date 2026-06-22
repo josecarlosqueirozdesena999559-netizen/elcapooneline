@@ -75,7 +75,7 @@ ROBOT_CONFIG_DEFAULTS = {
     "min_payout": 80.0,
     "stop_win": 50.0,
     "stop_loss": 30.0,
-    "max_entries_per_cycle": 1,
+    "max_entries_per_cycle": 10,
     "allow_real": False,
     "confirm_real": False,
     "martingale_enabled": False,
@@ -913,12 +913,39 @@ async def call_bullex_service(
         if payload.get("ok") and payload_connected_state(payload) is True:
             clear_session_backoff(user_id)
             cache_bullex_response(user_id, path, response.status_code, payload)
+            if path == "/sessions/status":
+                logger.info("[SESSION_VALID] user_id=%s", user_id)
+                data = payload.get("data") or {}
+                auto_trader.mark_market_sync(
+                    user_id,
+                    ws_connected=True,
+                    account_detected=data.get("active_mode") is not None,
+                )
         elif payload_indicates_offline(response.status_code, payload):
             mark_session_failure(user_id, offline=True)
+            if path == "/sessions/status":
+                logger.warning("[SESSION_INVALID] user_id=%s reason=offline", user_id)
+                auto_trader.mark_market_sync(
+                    user_id,
+                    ws_connected=False,
+                    account_detected=False,
+                )
         else:
             mark_session_failure(user_id)
+            if path == "/sessions/status":
+                logger.warning("[SESSION_INVALID] user_id=%s reason=service_error", user_id)
+                auto_trader.mark_market_sync(
+                    user_id,
+                    ws_connected=False,
+                )
 
     if method == "GET" and path in {"/candles", "/payouts"}:
+        if path == "/candles":
+            auto_trader.mark_market_sync(user_id, candles_ok=bool(payload.get("ok")))
+            logger.info("[CANDLES_%s] user_id=%s", "OK" if payload.get("ok") else "STALE", user_id)
+        if path == "/payouts":
+            auto_trader.mark_market_sync(user_id, payouts_ok=bool(payload.get("ok")))
+            logger.info("[PAYOUT_%s] user_id=%s", "OK" if payload.get("ok") else "ERROR", user_id)
         symbol = normalize_binary_active(str((params or {}).get("active") or ""))
         error_text = str(payload.get("error") or "").strip().lower()
         if symbol and (
@@ -3182,6 +3209,22 @@ async def execute_robot_cycle(
             if state.account_mode == "REAL":
                 order_path = "/bullex/buy-real"
 
+            if int(state.entries_used_in_cycle or 0) >= max(1, int(state.max_entries_per_cycle or 1)):
+                state = auto_trader.defer_cycle(
+                    user_id,
+                    STATUS_WAITING_NEXT_CYCLE,
+                    wait_seconds=max(1, int(state.cycle_minutes) * 60),
+                    rejection_reason="LIMITE_CICLO_ATINGIDO",
+                    last_rejection_reason="LIMITE_CICLO_ATINGIDO",
+                )
+                logger.info(
+                    "[CYCLE_LIMIT_REACHED] user_id=%s entries_used=%s max_entries=%s",
+                    user_id,
+                    state.entries_used_in_cycle,
+                    state.max_entries_per_cycle,
+                )
+                return 200, build_robot_payload(state)
+
             skipped_candidates = 0
             last_order_status = 409
             last_order_reason = "NO_AVAILABLE_ASSET"
@@ -3569,6 +3612,60 @@ async def run_analysis_now(user_id: str) -> tuple[int, dict[str, Any]]:
     return await execute_robot_cycle(user_id)
 
 
+async def run_robot_watchdog(user_id: str) -> None:
+    state = auto_trader.get(user_id)
+    if not state.enabled:
+        return
+    now = utc_now()
+    sync_started_at = parse_datetime(getattr(state, "sync_started_at", None))
+    candle_stale = state.last_candle_at is None or (now - state.last_candle_at).total_seconds() > 30
+    payout_stale = state.last_payout_at is None or (now - state.last_payout_at).total_seconds() > 30
+    sync_stale = sync_started_at is not None and (now - sync_started_at).total_seconds() > 30
+    health_failed = (
+        not state.connected
+        or not state.ws_connected
+        or not state.account_detected
+        or candle_stale
+        or payout_stale
+        or sync_stale
+    )
+    if not health_failed:
+        return
+
+    auto_trader.defer_cycle(
+        user_id,
+        STATUS_WAITING_RECOVERY,
+        wait_seconds=10,
+        rejection_reason="WATCHDOG_RECOVERING",
+        last_rejection_reason="WATCHDOG_RECOVERING",
+        last_order_error="WATCHDOG_RECOVERING",
+    )
+    logger.warning("[WS_RECONNECTING] user_id=%s", user_id)
+    logger.warning("[STATE_CHANGE] user_id=%s status=SINCRONIZANDO_RECONECTANDO", user_id)
+    try:
+        status_code, payload = await call_bullex_service("POST", "/sessions/reconnect", user_id)
+        sync_user_store_from_payload(user_id, payload)
+        if status_code >= 400 or not payload.get("ok"):
+            auto_trader.mark_market_sync(user_id, ws_connected=False, account_detected=False)
+            logger.warning("[WS_DISCONNECTED] user_id=%s status_code=%s", user_id, status_code)
+            return
+        logger.info("[WS_RECONNECTED] user_id=%s", user_id)
+        _, _, state, connected, active_mode, _ = await fetch_and_sync_robot_connection(user_id)
+        auto_trader.mark_market_sync(
+            user_id,
+            ws_connected=bool(connected),
+            account_detected=active_mode is not None,
+        )
+        if connected and active_mode is not None and state.enabled and not state.operation_in_progress:
+            state.status = STATUS_WAITING_NEXT_CYCLE
+            state.rejection_reason = None
+            state.last_rejection_reason = None
+            state.sync_started_at = None
+            logger.info("[ERROR_RECOVERED] user_id=%s source=watchdog", user_id)
+    except Exception:
+        logger.exception("[WS_DISCONNECTED] user_id=%s source=watchdog", user_id)
+
+
 async def robot_worker(user_id: str) -> None:
     try:
         while auto_trader.get(user_id).enabled:
@@ -3584,6 +3681,7 @@ async def robot_worker(user_id: str) -> None:
                 logger.warning("[CPU_LOOP_PROTECTION] user_id=%s reason=%s", user_id, reason)
                 await asyncio.sleep(max(1, remaining))
                 continue
+            await run_robot_watchdog(user_id)
             logger.info("[ROBOT_WORKER_TICK] user_id=%s", user_id)
             await execute_robot_cycle(user_id)
             state = auto_trader.get(user_id)
@@ -3875,6 +3973,13 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     )
 
 
+@app.get("/robot/settings")
+async def robot_settings(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    user_id = auth["user_id"]
+    state = get_user_robot_state(user_id)
+    return json_response(200, build_success(current_robot_config_payload(state)))
+
+
 def build_robot_stats(items: list[dict[str, Any]]) -> dict[str, Any]:
     final_results = [
         str(item.get("final_result") or "").strip().upper()
@@ -4080,6 +4185,24 @@ async def debug_robot_settings(
     )
 
 
+@app.get("/robot/diagnostic")
+async def robot_diagnostic(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    user_id = auth["user_id"]
+    state = get_user_robot_state(user_id)
+    payload = build_robot_payload(state, user_id=user_id)
+    return json_response(
+        200,
+        build_success(
+            {
+                "user_id": user_id,
+                "source": auto_trader.source(user_id),
+                "settings": current_robot_config_payload(state),
+                "state": payload["data"],
+            }
+        ),
+    )
+
+
 @app.post("/robot/config")
 async def robot_config(
     body: dict[str, Any] | None = Body(default=None),
@@ -4192,7 +4315,7 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
         state.next_cycle_at,
         state.cycle_minutes,
     )
-    logger.info("[ROBOT START] user_id=%s", user_id)
+    logger.info("[ROBOT_START] user_id=%s", user_id)
     return json_response(200, build_robot_payload(state))
 
 
@@ -4203,7 +4326,7 @@ async def robot_stop(auth: dict[str, str] = Depends(require_headers)) -> JSONRes
     state = auto_trader.stop(user_id)
     persist_robot(user_id)
     await stop_robot_worker(user_id)
-    logger.info("[ROBOT STOP] user_id=%s", user_id)
+    logger.info("[ROBOT_STOP] user_id=%s", user_id)
     return json_response(200, build_robot_payload(state, user_id=user_id))
 
 
@@ -4232,6 +4355,14 @@ async def robot_reset_cycle(
         state.status,
     )
     return json_response(200, build_robot_payload(state, user_id=user_id))
+
+
+@app.post("/robot/settings")
+async def robot_settings_update(
+    body: dict[str, Any] | None = Body(default=None),
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    return await robot_config(body, auth)
 
 
 @app.options("/robot/reset-cycle")

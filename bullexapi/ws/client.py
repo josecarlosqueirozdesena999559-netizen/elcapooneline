@@ -182,11 +182,19 @@ class WebsocketClient(object):
         logger.debug("Websocket client connected.")
         global_value.check_websocket_if_connect = 1
 
-    def on_close(self, close_status_code=None, close_msg=None):
+    def on_close(self, ws=None, close_status_code=None, close_msg=None, *args):
         """Called when websocket connection is closed.
         
+        :param ws: websocket instance when provided by websocket-client.
         :param close_status_code: Status code for close connection.
         :param close_msg: Message explaining why connection was closed.
         """
         logging.debug("WebSocketClient closed connection.")
         self.connected = False
+        global_value.check_websocket_if_connect = 0
+        if close_msg is not None:
+            global_value.websocket_error_reason = str(close_msg)
+        elif close_status_code is not None:
+            global_value.websocket_error_reason = str(close_status_code)
+        if args:
+            logging.debug("WebSocketClient extra close args: %s", args)
