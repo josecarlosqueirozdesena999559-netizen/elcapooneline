@@ -2023,12 +2023,6 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_disconnected_account_does_not_scan_or_order(self) -> None:
         user_id = "user-disconnected"
         state = main.auto_trader.start(user_id)
-        state = main.auto_trader.sync_connection(
-            user_id,
-            connected=True,
-            active_mode="PRACTICE",
-            source="bullex_service",
-        )
         make_cycle_due(user_id)
         main.auto_trader.set_pending_signal(
             user_id,
@@ -2055,8 +2049,16 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(main, "scan_local_signals", new=AsyncMock()) as scan,
         ):
+            first_status, first_payload = await main.execute_robot_cycle(user_id)
+            second_status, second_payload = await main.execute_robot_cycle(user_id)
             status_code, payload = await main.execute_robot_cycle(user_id)
 
+        self.assertEqual(first_status, 200)
+        self.assertNotEqual(first_payload["data"]["status"], STATUS_ACCOUNT_DISCONNECTED)
+        self.assertEqual(first_payload["data"]["connection_failure_count"], 1)
+        self.assertEqual(second_status, 200)
+        self.assertNotEqual(second_payload["data"]["status"], STATUS_ACCOUNT_DISCONNECTED)
+        self.assertEqual(second_payload["data"]["connection_failure_count"], 2)
         self.assertEqual(status_code, 200)
         self.assertEqual(payload["data"]["status"], STATUS_ACCOUNT_DISCONNECTED)
         self.assertEqual(payload["data"]["rejection_reason"], STATUS_ACCOUNT_DISCONNECTED)
@@ -2069,7 +2071,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["data"]["entry_window_open"])
         self.assertEqual(payload["data"]["blocked_filters"], [])
         self.assertEqual(payload["data"]["quality_score"], 0)
-        self.assertEqual(payload["data"]["connection_failure_count"], 1)
+        self.assertEqual(payload["data"]["connection_failure_count"], 3)
         self.assertEqual(payload["data"]["connection_status_source"], "disconnected")
         scan.assert_not_awaited()
 
@@ -2150,7 +2152,6 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(main, "call_bullex_service", side_effect=fake_bullex),
-            patch.object(main, "schedule_auto_reconnect"),
             patch.object(main, "sync_user_store_from_payload"),
             self.assertLogs("backend-gateway", level="WARNING") as logs,
         ):
@@ -2161,12 +2162,10 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["connected"])
         self.assertEqual(payload["connection_failure_count"], 1)
         self.assertEqual(payload["connection_status_source"], "cached_grace")
-        self.assertEqual(payload["connection_warning"], "Reconectando BullEx...")
-        self.assertIsNone(payload["operation_message"])
         self.assertIsNotNone(payload["last_connected_at"])
         self.assertIsNotNone(payload["connection_grace_until"])
         self.assertNotEqual(payload["status"], STATUS_ACCOUNT_DISCONNECTED)
-        self.assertIn("[BULLEX_STATUS_GRACE_ACTIVE]", "\n".join(logs.output))
+        self.assertIn("[CONNECTION_GRACE_ACTIVE]", "\n".join(logs.output))
 
     async def test_robot_state_confirms_disconnected_only_after_grace_and_three_failures(self) -> None:
         user_id = "user-state-grace-expired"
@@ -2177,10 +2176,10 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             active_mode="PRACTICE",
             source="bullex_service",
         )
-        old_connected_at = utc_now() - timedelta(seconds=65)
+        old_connected_at = utc_now() - timedelta(seconds=35)
         state.connection_checked_at = utc_now() - timedelta(seconds=5)
         state.last_connected_at = old_connected_at
-        state.connection_grace_until = old_connected_at + timedelta(seconds=60)
+        state.connection_grace_until = old_connected_at + timedelta(seconds=30)
         state.connection_failure_count = 2
 
         async def fake_bullex(method: str, path: str, user_id_arg: str, **kwargs: Any) -> tuple[int, dict[str, Any]]:
@@ -2201,7 +2200,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["connection_failure_count"], 3)
         self.assertEqual(payload["status"], STATUS_ACCOUNT_DISCONNECTED)
         self.assertEqual(payload["connection_status_source"], "disconnected")
-        self.assertIn("[ROBOT_CONNECTION_CHECK_FAILED]", "\n".join(logs.output))
+        self.assertIn("[CONNECTION_CONFIRMED_DISCONNECTED]", "\n".join(logs.output))
 
     async def test_robot_state_ignores_session_false_negative_when_account_connected(self) -> None:
         user_id = "user-state-account-connected"

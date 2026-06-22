@@ -238,7 +238,6 @@ class RobotState:
     connection_checked_at: datetime | None = None
     last_connected_at: datetime | None = None
     connection_grace_until: datetime | None = None
-    last_reconnect_attempt_at: datetime | None = None
     connection_status_source: str = "cached"
     connection_failure_count: int = 0
     ws_connected: bool = False
@@ -310,7 +309,6 @@ class RobotState:
             "connection_checked_at",
             "last_connected_at",
             "connection_grace_until",
-            "last_reconnect_attempt_at",
             "last_candle_at",
             "last_payout_at",
             "last_sync_at",
@@ -610,7 +608,6 @@ class AutoTrader:
             "connection_checked_at",
             "last_connected_at",
             "connection_grace_until",
-            "last_reconnect_attempt_at",
         }
         for key, value in payload.items():
             if not hasattr(state, key) or key in {"accuracy", "seconds_until_next_cycle"}:
@@ -1429,7 +1426,7 @@ class AutoTrader:
         if connected:
             state.connection_failure_count = 0
             state.last_connected_at = now
-            state.connection_grace_until = now + timedelta(seconds=60)
+            state.connection_grace_until = now + timedelta(seconds=30)
             if align_status or state.status == STATUS_ACCOUNT_DISCONNECTED:
                 state.rejection_reason = None
                 state.last_rejection_reason = None

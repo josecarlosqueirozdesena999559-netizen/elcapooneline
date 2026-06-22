@@ -152,7 +152,6 @@ SESSION_CACHE_TTL_SECONDS = 15
 SESSION_STATUS_THROTTLE_SECONDS = 5
 ROBOT_SESSION_REFRESH_SECONDS = 15
 SESSION_OFFLINE_TTL_SECONDS = 60
-SESSION_RECONNECT_INTERVAL_SECONDS = 60
 SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
 SESSION_CACHEABLE_PATHS = {"/sessions/status", "/account"}
 ACCOUNT_CACHE_TTL_SECONDS = 15
@@ -355,22 +354,6 @@ def payload_connected_state(payload: dict[str, Any]) -> bool | None:
     return bool(data.get("connected"))
 
 
-def has_prior_valid_connection(state: Any) -> bool:
-    return parse_datetime(getattr(state, "last_connected_at", None)) is not None
-
-
-def reconnect_attempt_due(state: Any, *, now: datetime | None = None) -> bool:
-    checked_at = now or utc_now()
-    last_attempt = parse_datetime(getattr(state, "last_reconnect_attempt_at", None))
-    if last_attempt is None:
-        return True
-    return (checked_at - last_attempt).total_seconds() >= SESSION_RECONNECT_INTERVAL_SECONDS
-
-
-def remember_reconnect_attempt(state: Any, *, now: datetime | None = None) -> None:
-    state.last_reconnect_attempt_at = now or utc_now()
-
-
 def disconnected_cache_payload(*, source: str) -> dict[str, Any]:
     return build_success({"connected": False, "connection_status_source": source})
 
@@ -426,6 +409,13 @@ def mark_session_failure(user_id: str, *, offline: bool = False) -> None:
         return
 
     cache.next_retry_at = now + timedelta(seconds=session_backoff_seconds(cache.failure_count))
+    for path in SESSION_CACHEABLE_PATHS:
+        cache_bullex_response(
+            user_id,
+            path,
+            200,
+            disconnected_cache_payload(source="backoff_active"),
+        )
 
 
 def connection_guard_reason(user_id: str) -> tuple[str, float] | None:
@@ -560,8 +550,7 @@ auto_trader = AutoTrader()
 robot_persistence: RobotPersistence = create_robot_persistence()
 robot_tasks: dict[str, asyncio.Task[None]] = {}
 robot_worker_last_tick_at: dict[str, datetime] = {}
-reconnect_tasks: dict[str, asyncio.Task[Any]] = {}
-CONNECTION_GRACE_SECONDS = 60
+CONNECTION_GRACE_SECONDS = 30
 
 
 def normalize_ws_value(value: Any) -> str:
@@ -715,7 +704,8 @@ def is_session_disconnected(payload: dict[str, Any]) -> bool:
 
 
 def payload_indicates_offline(status_code: int, payload: dict[str, Any]) -> bool:
-    return status_code == 404 or is_session_disconnected(payload)
+    connected = payload_connected_state(payload)
+    return status_code == 404 or is_session_disconnected(payload) or connected is False
 
 
 async def close_market_websocket(websocket: WebSocket, payload: dict[str, Any]) -> None:
@@ -890,8 +880,6 @@ async def call_bullex_service(
     except httpx.HTTPError:
         if method == "GET" and path in SESSION_CACHEABLE_PATHS:
             mark_session_failure(user_id)
-            if path == "/sessions/status":
-                schedule_auto_reconnect(user_id, source="status_http_error")
         elif method == "GET" and path == "/payouts":
             symbol = normalize_binary_active(str((params or {}).get("active") or ""))
             if symbol:
@@ -914,7 +902,7 @@ async def call_bullex_service(
     if not isinstance(payload, dict) or "ok" not in payload or "data" not in payload or "error" not in payload:
         payload = build_success(payload) if response.is_success else build_error("INVALID_BULLEX_RESPONSE")
 
-    if method == "GET" and ttl_seconds is not None and response.is_success and path not in SESSION_CACHEABLE_PATHS:
+    if method == "GET" and ttl_seconds is not None and response.is_success:
         get_session_cache(user_id).responses[cache_key] = BullexResponseCacheEntry(
             status_code=response.status_code,
             payload=payload,
@@ -935,12 +923,6 @@ async def call_bullex_service(
                 )
         elif payload_indicates_offline(response.status_code, payload):
             mark_session_failure(user_id, offline=True)
-            cache_bullex_response(
-                user_id,
-                path,
-                response.status_code,
-                disconnected_cache_payload(source="offline_cache"),
-            )
             if path == "/sessions/status":
                 logger.warning("[SESSION_INVALID] user_id=%s reason=offline", user_id)
                 auto_trader.mark_market_sync(
@@ -951,12 +933,11 @@ async def call_bullex_service(
         else:
             mark_session_failure(user_id)
             if path == "/sessions/status":
-                logger.warning("[SESSION_INVALID] user_id=%s reason=temporary_failure", user_id)
+                logger.warning("[SESSION_INVALID] user_id=%s reason=service_error", user_id)
                 auto_trader.mark_market_sync(
                     user_id,
                     ws_connected=False,
                 )
-                schedule_auto_reconnect(user_id, source="status_temporary_failure")
 
     if method == "GET" and path in {"/candles", "/payouts"}:
         if path == "/candles":
@@ -1103,14 +1084,9 @@ def keep_connection_in_grace(user_id: str, state: Any, active_mode: str | None, 
         checked_at=checked_at,
     )
     state.connected = True
-    current_grace_until = connection_grace_until(state)
-    refreshed_grace_until = checked_at + timedelta(seconds=CONNECTION_GRACE_SECONDS)
-    if current_grace_until is None or refreshed_grace_until > current_grace_until:
-        state.connection_grace_until = refreshed_grace_until
-    else:
-        state.connection_grace_until = current_grace_until
+    state.connection_grace_until = connection_grace_until(state)
     logger.warning(
-        "[BULLEX_STATUS_GRACE_ACTIVE] user_id=%s failures=%s grace_until=%s",
+        "[CONNECTION_GRACE_ACTIVE] user_id=%s failures=%s grace_until=%s",
         user_id,
         state.connection_failure_count,
         state.connection_grace_until,
@@ -1128,7 +1104,6 @@ def sync_robot_connection_from_payload(
     connected, active_mode = extract_account_status(payload)
     checked_at = utc_now()
     resolved_source = source or connection_source_from_payload(payload)
-    explicitly_invalid = is_session_disconnected(payload)
     if connected:
         state = auto_trader.sync_connection(
             user_id,
@@ -1145,9 +1120,8 @@ def sync_robot_connection_from_payload(
         )
         return state, True, active_mode, resolved_source
 
-    if not explicitly_invalid and has_prior_valid_connection(state) and state.connection_failure_count < 2:
+    if state.connected and state.connection_failure_count < 3 and connection_grace_active(state):
         state = keep_connection_in_grace(user_id, state, active_mode, checked_at)
-        schedule_auto_reconnect(user_id, source="status_grace")
         return state, True, state.active_mode, "cached_grace"
 
     state = auto_trader.sync_connection(
@@ -1206,7 +1180,7 @@ async def reconcile_robot_connection_from_payload(
         )
         return state, True, state.active_mode, "bullex_service"
 
-    if state.connection_failure_count >= 3:
+    if state.connection_failure_count >= 3 and not connection_grace_active(state):
         state = auto_trader.defer_cycle(
             user_id,
             STATUS_WAITING_RECOVERY,
@@ -1217,7 +1191,6 @@ async def reconcile_robot_connection_from_payload(
         )
         state.connected = False
         state.active_mode = account_active_mode or active_mode
-        state.connection_grace_until = None
         logger.warning(
             "[WAITING_RECOVERY] user_id=%s failures=%s account_status=%s",
             user_id,
@@ -1495,59 +1468,6 @@ async def refresh_entry_window(user_id: str, state: Any) -> tuple[int, dict[str,
         window["entry_window_open"],
     )
     return status_code, payload, window
-
-
-async def perform_auto_reconnect(user_id: str, *, source: str) -> bool:
-    state = auto_trader.get(user_id)
-    now = utc_now()
-    if not reconnect_attempt_due(state, now=now):
-        logger.info("[BULLEX_RECONNECT_SKIPPED] user_id=%s source=%s reason=cooldown", user_id, source)
-        return False
-
-    remember_reconnect_attempt(state, now=now)
-    logger.warning("[BULLEX_RECONNECT_ATTEMPT] user_id=%s source=%s", user_id, source)
-    status_code, payload = await call_bullex_service("POST", "/sessions/reconnect", user_id)
-    sync_user_store_from_payload(user_id, payload)
-    if status_code >= 400 or not payload.get("ok"):
-        logger.warning(
-            "[BULLEX_RECONNECT_FAILED] user_id=%s source=%s status_code=%s error=%s",
-            user_id,
-            source,
-            status_code,
-            payload.get("error"),
-        )
-        return False
-
-    logger.info("[BULLEX_RECONNECT_OK] user_id=%s source=%s", user_id, source)
-    _, _, synced_state, connected, active_mode, _ = await fetch_and_sync_robot_connection(user_id)
-    auto_trader.mark_market_sync(
-        user_id,
-        ws_connected=bool(connected),
-        account_detected=active_mode is not None,
-    )
-    if connected:
-        synced_state.connection_failure_count = 0
-    return bool(connected)
-
-
-def schedule_auto_reconnect(user_id: str, *, source: str) -> None:
-    existing_task = reconnect_tasks.get(user_id)
-    if existing_task is not None and not existing_task.done():
-        return
-
-    state = auto_trader.get(user_id)
-    if not reconnect_attempt_due(state):
-        return
-
-    async def runner() -> None:
-        try:
-            await perform_auto_reconnect(user_id, source=source)
-        except Exception:
-            logger.exception("[BULLEX_RECONNECT_FAILED] user_id=%s source=%s", user_id, source)
-        finally:
-            reconnect_tasks.pop(user_id, None)
-
-    reconnect_tasks[user_id] = asyncio.create_task(runner())
 
 
 def real_block_reason(
@@ -3723,10 +3643,11 @@ async def run_robot_watchdog(user_id: str) -> None:
     logger.warning("[WS_RECONNECTING] user_id=%s", user_id)
     logger.warning("[STATE_CHANGE] user_id=%s status=SINCRONIZANDO_RECONECTANDO", user_id)
     try:
-        reconnected = await perform_auto_reconnect(user_id, source="watchdog")
-        if not reconnected:
+        status_code, payload = await call_bullex_service("POST", "/sessions/reconnect", user_id)
+        sync_user_store_from_payload(user_id, payload)
+        if status_code >= 400 or not payload.get("ok"):
             auto_trader.mark_market_sync(user_id, ws_connected=False, account_detected=False)
-            logger.warning("[WS_DISCONNECTED] user_id=%s source=watchdog", user_id)
+            logger.warning("[WS_DISCONNECTED] user_id=%s status_code=%s", user_id, status_code)
             return
         logger.info("[WS_RECONNECTED] user_id=%s", user_id)
         _, _, state, connected, active_mode, _ = await fetch_and_sync_robot_connection(user_id)
@@ -4045,7 +3966,6 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
             if state.connection_checked_at is not None
             else None,
             connection_status_source=source,
-            connection_warning="Reconectando BullEx..." if source == "cached_grace" else None,
             real_ready=block_reason is None,
             real_block_reason=block_reason,
             real_balance_warning=real_balance_warning,
@@ -4608,18 +4528,20 @@ async def bullex_connect(
 
 @app.get("/bullex/status")
 async def bullex_status(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    user_id = auth["user_id"]
-    status_code, payload, state, connected, active_mode, source = await fetch_and_sync_robot_connection(user_id)
-    sync_user_store_from_payload(user_id, payload)
-    if connected:
-        persist_robot(user_id)
-        if not payload.get("ok") or not isinstance(payload.get("data"), dict):
-            payload = build_success({})
+    status_code, payload = await call_bullex_service("GET", "/sessions/status", auth["user_id"])
+    sync_user_store_from_payload(auth["user_id"], payload)
+    connected, active_mode = extract_account_status(payload)
+    if payload.get("ok") and connected:
+        state = auto_trader.sync_connection(
+            auth["user_id"],
+            connected=True,
+            active_mode=active_mode,
+            source=connection_source_from_payload(payload),
+            align_status=True,
+        )
+        persist_robot(auth["user_id"])
         data = payload.get("data")
         if isinstance(data, dict):
-            data["connected"] = True
-            data["active_mode"] = active_mode
-            data["connection_status_source"] = source
             data["robot"] = build_robot_payload(
                 state,
                 connected=True,
@@ -4627,10 +4549,8 @@ async def bullex_status(auth: dict[str, str] = Depends(require_headers)) -> JSON
                 connection_checked_at=state.connection_checked_at.isoformat()
                 if state.connection_checked_at is not None
                 else None,
-                connection_status_source=source,
-                connection_warning="Reconectando BullEx..." if source == "cached_grace" else None,
+                connection_status_source=state.connection_status_source,
             )["data"]
-        status_code = 200
     return json_response(status_code, payload)
 
 
@@ -4844,16 +4764,12 @@ async def bullex_buy_real(
 
 @app.post("/bullex/disconnect")
 async def bullex_disconnect(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    user_id = auth["user_id"]
-    status_code, payload = await call_bullex_service("POST", "/sessions/disconnect", user_id)
-    mark_session_failure(user_id, offline=True)
-    auto_trader.disconnect_account(user_id)
-    persist_robot(user_id)
-    await stop_robot_worker(user_id)
+    status_code, payload = await call_bullex_service("POST", "/sessions/disconnect", auth["user_id"])
+    mark_session_failure(auth["user_id"], offline=True)
     if payload.get("ok"):
-        user_store.disconnect(user_id)
+        user_store.disconnect(auth["user_id"])
     else:
-        sync_user_store_from_payload(user_id, payload)
+        sync_user_store_from_payload(auth["user_id"], payload)
     return json_response(status_code, payload)
 
 
