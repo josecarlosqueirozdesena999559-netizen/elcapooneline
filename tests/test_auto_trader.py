@@ -2915,3 +2915,43 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["data"]["seconds_until_analysis_window"], 35)
         self.assertFalse(payload["data"]["entry_window_open"])
         self.assertNotIn("/orders/buy-demo", calls)
+
+    async def test_scan_local_signals_analyzes_only_configured_assets(self) -> None:
+        analyzed_symbols: list[str] = []
+
+        async def fake_analyze_active_signal(
+            user_id: str,
+            symbol: str,
+            timeframe: str = "M1",
+            endtime: int | None = None,
+            strategy_mode: str = "conservative",
+        ):
+            analyzed_symbols.append(symbol)
+            return 200, main.build_success(
+                {
+                    "symbol": symbol,
+                    "signal": "CALL",
+                    "direction": "CALL",
+                    "confidence": 90,
+                    "trade_allowed": True,
+                }
+            )
+
+        with (
+            patch.object(main, "analyze_active_signal", side_effect=fake_analyze_active_signal),
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            status_code, payload = await main.scan_local_signals("user-analysis-filter", limit=25)
+
+        expected_symbols = [
+            symbol for symbol in main.BINARY_ALLOWED_ASSETS if symbol in main.ANALYSIS_ASSETS
+        ]
+        output = "\n".join(logs.output)
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(analyzed_symbols, expected_symbols)
+        self.assertEqual(len(payload["data"]), 10)
+        self.assertNotIn("NZDUSD-OTC", analyzed_symbols)
+        self.assertIn("[ANALYSIS_FILTER] total_assets=21 filtered_assets=10", output)
+        self.assertIn("[ANALYZING_ASSET] symbol=EURUSD-OTC", output)
+        self.assertIn("[ANALYZING_ASSET] symbol=AUDJPY-OTC", output)

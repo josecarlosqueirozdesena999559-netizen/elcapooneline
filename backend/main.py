@@ -148,6 +148,18 @@ BINARY_ALLOWED_ASSETS = [
     "AUDCHF-OTC",
 ]
 BINARY_ALLOWED_ASSET_SET = set(BINARY_ALLOWED_ASSETS)
+ANALYSIS_ASSETS = {
+    "EURUSD-OTC",
+    "GBPUSD-OTC",
+    "USDJPY-OTC",
+    "EURJPY-OTC",
+    "AUDUSD-OTC",
+    "EURGBP-OTC",
+    "USDCHF-OTC",
+    "USDCAD-OTC",
+    "GBPJPY-OTC",
+    "AUDJPY-OTC",
+}
 SESSION_CACHE_TTL_SECONDS = 15
 SESSION_STATUS_THROTTLE_SECONDS = 5
 ROBOT_SESSION_REFRESH_SECONDS = 15
@@ -2112,9 +2124,17 @@ async def scan_local_signals(
 ) -> tuple[int, dict[str, Any]]:
     logger.info("[SIGNAL SCAN START]")
     signals = []
+    logger.info(
+        "[ANALYSIS_FILTER] total_assets=%s filtered_assets=%s",
+        len(BINARY_ALLOWED_ASSETS),
+        len(ANALYSIS_ASSETS),
+    )
 
     for symbol in BINARY_ALLOWED_ASSETS:
+        if symbol not in ANALYSIS_ASSETS:
+            continue
         try:
+            logger.info("[ANALYZING_ASSET] symbol=%s", symbol)
             status_code, payload = await analyze_active_signal(
                 user_id,
                 symbol,
