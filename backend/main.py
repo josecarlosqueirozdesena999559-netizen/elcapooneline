@@ -83,6 +83,8 @@ ROBOT_CONFIG_DEFAULTS = {
     "martingale_multiplier": 2.0,
 }
 ROBOT_CONFIG_ALLOWED_FIELDS = set(ROBOT_CONFIG_DEFAULTS)
+MIN_REAL_ENTRY = 2.0
+MAX_REAL_ENTRY = 1000.0
 
 ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
 SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
@@ -537,7 +539,7 @@ class GatewayConfig:
         self.panel_api_key = os.getenv("PANEL_API_KEY", "")
         self.supabase_url = os.getenv("SUPABASE_URL", "").strip()
         self.supabase_service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-        self.robot_real_max_entry = float(os.getenv("ROBOT_REAL_MAX_ENTRY", "10"))
+        self.robot_real_max_entry = float(os.getenv("ROBOT_REAL_MAX_ENTRY", str(MAX_REAL_ENTRY)))
         self.cors_origins = [
             origin.strip()
             for origin in os.getenv(
@@ -1479,7 +1481,7 @@ def real_block_reason(
         stop_reason = (daily_stop_reason(user_id, state) if user_id is not None else None) or robot_stop_reason(state)
         if stop_reason is not None:
             reason = stop_reason
-        elif state.entry_value > config.robot_real_max_entry:
+        elif state.entry_value > MAX_REAL_ENTRY:
             reason = "REAL_ENTRY_VALUE_EXCEEDS_MAX"
     logger.info(
         "[REAL_READY_CHECK] user_id=%s account_mode=%s active_mode=%s connected=%s allow_real=%s confirm_real=%s reason=%s",
@@ -4118,6 +4120,11 @@ async def robot_config(
         )
     filtered_body = filter_robot_config_payload(raw_body)
     partial_update = RobotConfigUpdate.model_validate(filtered_body)
+    if partial_update.entry_value is not None:
+        if partial_update.entry_value < MIN_REAL_ENTRY:
+            return json_response(400, build_error("ENTRY_VALUE_TOO_LOW"))
+        if partial_update.entry_value > MAX_REAL_ENTRY:
+            return json_response(400, build_error("ENTRY_VALUE_TOO_HIGH"))
     logger.warning(
         "[ROBOT_CONFIG_FILTERED_PAYLOAD] user_id=%s payload=%s",
         user_id,

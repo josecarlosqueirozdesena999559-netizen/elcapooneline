@@ -691,6 +691,75 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.account_mode, "REAL")
         persist.assert_called_once_with(user_id)
 
+    async def test_robot_config_rejects_entry_value_below_minimum(self) -> None:
+        user_id = "user-entry-too-low"
+        state = main.auto_trader.get(user_id)
+        original_entry = state.entry_value
+        original_stop_win = state.stop_win
+        original_stop_loss = state.stop_loss
+
+        with (
+            patch.object(main, "persist_robot") as persist,
+            patch.object(main, "ensure_robot_worker") as ensure_worker,
+            patch.object(main, "stop_robot_worker", new=AsyncMock()) as stop_worker,
+        ):
+            response = await main.robot_config({"entryValue": 1}, {"user_id": user_id})
+
+        payload = json.loads(response.body)
+        refreshed = main.auto_trader.get(user_id)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload["error"], "ENTRY_VALUE_TOO_LOW")
+        self.assertEqual(refreshed.entry_value, original_entry)
+        self.assertEqual(refreshed.stop_win, original_stop_win)
+        self.assertEqual(refreshed.stop_loss, original_stop_loss)
+        ensure_worker.assert_not_called()
+        stop_worker.assert_not_awaited()
+        persist.assert_not_called()
+
+    async def test_robot_config_rejects_entry_value_above_maximum(self) -> None:
+        user_id = "user-entry-too-high"
+        state = main.auto_trader.get(user_id)
+        original_entry = state.entry_value
+        original_stop_win = state.stop_win
+        original_stop_loss = state.stop_loss
+
+        with (
+            patch.object(main, "persist_robot") as persist,
+            patch.object(main, "ensure_robot_worker") as ensure_worker,
+            patch.object(main, "stop_robot_worker", new=AsyncMock()) as stop_worker,
+        ):
+            response = await main.robot_config({"entryValue": 1001}, {"user_id": user_id})
+
+        payload = json.loads(response.body)
+        refreshed = main.auto_trader.get(user_id)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload["error"], "ENTRY_VALUE_TOO_HIGH")
+        self.assertEqual(refreshed.entry_value, original_entry)
+        self.assertEqual(refreshed.stop_win, original_stop_win)
+        self.assertEqual(refreshed.stop_loss, original_stop_loss)
+        ensure_worker.assert_not_called()
+        stop_worker.assert_not_awaited()
+        persist.assert_not_called()
+
+    async def test_robot_config_accepts_entry_value_up_to_maximum(self) -> None:
+        user_id = "user-entry-maximum"
+
+        with (
+            patch.object(main, "persist_robot") as persist,
+            patch.object(main, "ensure_robot_worker") as ensure_worker,
+            patch.object(main, "stop_robot_worker", new=AsyncMock()) as stop_worker,
+        ):
+            response = await main.robot_config({"entryValue": 1000}, {"user_id": user_id})
+
+        data = json.loads(response.body)["data"]
+        refreshed = main.auto_trader.get(user_id)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["entry_value"], 1000)
+        self.assertEqual(refreshed.entry_value, 1000)
+        ensure_worker.assert_not_called()
+        stop_worker.assert_not_awaited()
+        persist.assert_called_once_with(user_id)
+
     async def test_robot_config_ignores_legacy_ai_fields(self) -> None:
         user_id = "user-ignore-ai-fields"
         body = {
