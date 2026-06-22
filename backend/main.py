@@ -149,6 +149,8 @@ BINARY_ALLOWED_ASSETS = [
 ]
 BINARY_ALLOWED_ASSET_SET = set(BINARY_ALLOWED_ASSETS)
 SESSION_CACHE_TTL_SECONDS = 15
+SESSION_STATUS_THROTTLE_SECONDS = 5
+ROBOT_SESSION_REFRESH_SECONDS = 15
 SESSION_OFFLINE_TTL_SECONDS = 60
 SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
 SESSION_CACHEABLE_PATHS = {"/sessions/status", "/account"}
@@ -327,6 +329,7 @@ class BullexUserSessionCache:
     failure_count: int = 0
     next_retry_at: datetime | None = None
     offline_until: datetime | None = None
+    last_request_at: dict[str, datetime] = field(default_factory=dict)
 
 
 session_response_cache: dict[str, BullexUserSessionCache] = {}
@@ -446,14 +449,22 @@ def build_cache_key(path: str, params: dict[str, Any] | None = None) -> str:
     return f"{path}?{'&'.join(parts)}"
 
 
-def cache_log_label(path: str) -> str | None:
-    if path == "/sessions/status":
-        return "SESSION_THROTTLED"
-    if path == "/payouts":
-        return "PAYOUT_THROTTLED"
-    if path == "/candles":
-        return "CANDLE_THROTTLED"
-    return None
+def should_throttle_session_status(user_id: str, cache_key: str) -> bool:
+    cache = get_session_cache(user_id)
+    now = utc_now()
+    last_request_at = cache.last_request_at.get(cache_key)
+    cache.last_request_at[cache_key] = now
+    if last_request_at is None:
+        return False
+    return 0 <= (now - last_request_at).total_seconds() < SESSION_STATUS_THROTTLE_SECONDS
+
+
+def cached_session_status_response(user_id: str, cache_key: str) -> tuple[int, dict[str, Any]] | None:
+    cached = get_session_cache(user_id).responses.get(cache_key)
+    if cached is None:
+        return None
+    logger.info("[SESSION_STATUS_THROTTLED] user_id=%s path=/sessions/status", user_id)
+    return cached.status_code, cached.payload
 
 
 def get_named_cooldown(
@@ -812,16 +823,32 @@ async def call_bullex_service(
     ttl_seconds = request_cache_ttl_seconds(path, params)
     if method == "GET" and ttl_seconds is not None:
         cache = get_session_cache(user_id)
+        if path == "/sessions/status" and should_throttle_session_status(user_id, cache_key):
+            throttled = cached_session_status_response(user_id, cache_key)
+            if throttled is not None:
+                return throttled
         cached = cache.responses.get(cache_key)
         now = utc_now()
         if cached is not None and now < cached.expires_at:
-            ttl_remaining = (cached.expires_at - now).total_seconds()
-            logger.info("[CACHE_HIT] user_id=%s path=%s ttl_remaining=%.2f", user_id, path, ttl_remaining)
-            throttled_label = cache_log_label(path)
-            if throttled_label is not None:
-                logger.info("[%s] user_id=%s path=%s retry_in=%.2f", throttled_label, user_id, path, ttl_remaining)
+            if path == "/sessions/status":
+                logger.info(
+                    "[SESSION_STATUS_CACHE_HIT] user_id=%s path=%s ttl_remaining=%.2f",
+                    user_id,
+                    path,
+                    (cached.expires_at - now).total_seconds(),
+                )
+            else:
+                logger.info(
+                    "[CACHE_HIT] user_id=%s path=%s ttl_remaining=%.2f",
+                    user_id,
+                    path,
+                    (cached.expires_at - now).total_seconds(),
+                )
             return cached.status_code, cached.payload
-        logger.info("[CACHE_MISS] user_id=%s path=%s", user_id, path)
+        if path == "/sessions/status":
+            logger.info("[SESSION_STATUS_CACHE_MISS] user_id=%s path=%s", user_id, path)
+        else:
+            logger.info("[CACHE_MISS] user_id=%s path=%s", user_id, path)
         if path in SESSION_CACHEABLE_PATHS:
             guard = connection_guard_reason(user_id)
         else:
@@ -1164,9 +1191,9 @@ async def fetch_and_sync_robot_connection(user_id: str) -> tuple[int, dict[str, 
     return status_code, payload, state, connected, active_mode, source
 
 
-def fresh_robot_connection(state: Any, *, max_age_seconds: int = 3) -> bool:
+def fresh_robot_connection(state: Any, *, max_age_seconds: int = ROBOT_SESSION_REFRESH_SECONDS) -> bool:
     checked_at = getattr(state, "connection_checked_at", None)
-    if not getattr(state, "connected", False) or checked_at is None:
+    if checked_at is None:
         return False
     age = (utc_now() - checked_at).total_seconds()
     return 0 <= age <= max_age_seconds
@@ -1175,12 +1202,26 @@ def fresh_robot_connection(state: Any, *, max_age_seconds: int = 3) -> bool:
 def cached_robot_connection_payload(state: Any) -> dict[str, Any]:
     return build_success(
         {
-            "connected": True,
+            "connected": bool(getattr(state, "connected", False)),
             "active_mode": getattr(state, "active_mode", None),
             "server_time": None,
             "connection_status_source": getattr(state, "connection_status_source", "cached"),
         }
     )
+
+
+def estimate_state_server_timestamp(state: Any) -> float | None:
+    checked_at = getattr(state, "connection_checked_at", None)
+    server_time = getattr(state, "server_time", None)
+    if checked_at is None or not server_time:
+        return None
+    parsed_server_time = parse_datetime(server_time)
+    if parsed_server_time is None:
+        return None
+    elapsed = (utc_now() - checked_at).total_seconds()
+    if elapsed < 0:
+        return None
+    return parsed_server_time.timestamp() + elapsed
 
 
 def build_guarded_connection_payload(reason: str) -> dict[str, Any]:
@@ -1332,6 +1373,32 @@ def calculate_expected_expire_at(
 
 
 async def refresh_entry_window(user_id: str, state: Any) -> tuple[int, dict[str, Any], dict[str, Any] | None]:
+    if fresh_robot_connection(state):
+        estimated_timestamp = estimate_state_server_timestamp(state)
+        window = get_entry_window(
+            state.timeframe,
+            estimated_timestamp,
+            server_time_source="bullex" if estimated_timestamp is not None else "vps_fallback",
+        )
+        auto_trader.update_entry_window(user_id, window)
+        logger.info(
+            "[ENTRY_WINDOW_CALCULATED] user_id=%s timeframe=%s current_candle_seconds=%s "
+            "server_time_source=%s analysis_window_start=%s analysis_window_end=%s analysis_open=%s "
+            "window_start=%s window_end=%s buy_target_second=%s open=%s",
+            user_id,
+            state.timeframe,
+            window["current_candle_seconds"],
+            window["server_time_source"],
+            window["analysis_window_start_second"],
+            window["analysis_window_end_second"],
+            window["analysis_window_open"],
+            window["entry_window_start_second"],
+            window["entry_window_end_second"],
+            window["buy_target_second"],
+            window["entry_window_open"],
+        )
+        return 200, cached_robot_connection_payload(state), window
+
     status_code, payload = await call_bullex_service("GET", "/sessions/status", user_id)
     timestamp = extract_server_timestamp(payload)
     if timestamp is None:
@@ -3298,14 +3365,14 @@ async def execute_robot_cycle(
                 sent_at = datetime.now(timezone.utc)
                 expiration_window = entry_window
                 try:
-                    fresh_status, fresh_payload = await call_bullex_service("GET", "/sessions/status", user_id)
-                    fresh_timestamp = extract_server_timestamp(fresh_payload)
+                    fresh_timestamp = estimate_state_server_timestamp(state)
+                    if fresh_timestamp is None:
+                        fresh_status, fresh_payload = await call_bullex_service("GET", "/sessions/status", user_id)
+                        fresh_timestamp = extract_server_timestamp(fresh_payload)
+                    else:
+                        fresh_status = 200
                     if fresh_status < 500 and fresh_timestamp is not None:
-                        expiration_window = get_entry_window(
-                            state.timeframe,
-                            fresh_timestamp,
-                            server_time_source="bullex",
-                        )
+                        expiration_window = get_entry_window(state.timeframe, fresh_timestamp, server_time_source="bullex")
                 except Exception as exc:
                     logger.warning(
                         "[EXPIRATION_SERVER_TIME_REFRESH_FAILED] user_id=%s error=%s",

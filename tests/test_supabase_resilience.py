@@ -225,6 +225,51 @@ class EndpointResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_payload, second_payload)
         self.assertEqual(len(requests), 1)
 
+    async def test_sessions_status_returns_last_known_state_when_repeated_within_5_seconds(self) -> None:
+        user_id = "user-throttle-stale"
+        requests: list[str] = []
+
+        def response_factory(**kwargs):
+            requests.append(kwargs["url"])
+            return AsyncResponse(
+                200,
+                main.build_success({"connected": True, "active_mode": "PRACTICE", "server_time": 250.0}),
+            )
+
+        with patch("backend.main.httpx.AsyncClient", return_value=AsyncClientContext(response_factory)):
+            first_status, first_payload = await main.call_bullex_service("GET", "/sessions/status", user_id)
+            cached = main.get_session_cache(user_id).responses["/sessions/status"]
+            cached.expires_at = main.utc_now() - main.timedelta(seconds=1)
+            second_status, second_payload = await main.call_bullex_service("GET", "/sessions/status", user_id)
+
+        self.assertEqual(first_status, 200)
+        self.assertEqual(second_status, 200)
+        self.assertEqual(first_payload, second_payload)
+        self.assertEqual(len(requests), 1)
+
+    async def test_refresh_entry_window_uses_robot_connection_cache_for_15_seconds(self) -> None:
+        user_id = "user-entry-window-cache"
+        state = main.auto_trader.start(user_id)
+        state.timeframe = "M1"
+        main.auto_trader.sync_connection(
+            user_id,
+            connected=True,
+            active_mode="PRACTICE",
+            source="bullex_service",
+        )
+        state = main.auto_trader.get(user_id)
+        state.server_time = "2026-06-22T12:00:00+00:00"
+
+        with patch.object(main, "call_bullex_service", new=AsyncMock()) as service_call:
+            status_code, payload, window = await main.refresh_entry_window(user_id, state)
+
+        self.assertEqual(status_code, 200)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["data"]["connected"])
+        self.assertIsNotNone(window)
+        self.assertIn(window["server_time_source"], {"bullex", "vps_fallback"})
+        service_call.assert_not_awaited()
+
     def test_temporary_recovery_state_returns_to_waiting_next_cycle(self) -> None:
         user_id = "user-recovery"
         state = main.auto_trader.start(user_id)

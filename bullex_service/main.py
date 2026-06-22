@@ -50,7 +50,8 @@ BINARY_ALLOWED_ASSETS = [
 ]
 BINARY_ALLOWED_ASSET_SET = set(BINARY_ALLOWED_ASSETS)
 SESSION_EXCEPTION_TYPES = (WebSocketConnectionClosedException, ConnectionError, TimeoutError)
-SESSION_CACHE_TTL_SECONDS = 10
+SESSION_CACHE_TTL_SECONDS = 15
+SESSION_STATUS_THROTTLE_SECONDS = 5
 SESSION_OFFLINE_TTL_SECONDS = 60
 SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
 
@@ -118,6 +119,7 @@ class SessionProbeState:
     failure_count: int = 0
     next_retry_at: float = 0.0
     offline_until: float = 0.0
+    last_request_at: dict[str, float] = field(default_factory=dict)
 
 
 class SessionManager:
@@ -155,6 +157,21 @@ class SessionManager:
             expires_at=time.time() + SESSION_CACHE_TTL_SECONDS,
         )
 
+    def _throttled_probe(self, user_id: str, path: str) -> tuple[int, dict[str, Any]] | None:
+        if path != "/sessions/status":
+            return None
+        probe = self.get_probe_state(user_id)
+        now = time.time()
+        last_request_at = probe.last_request_at.get(path, 0.0)
+        probe.last_request_at[path] = now
+        if last_request_at <= 0 or (now - last_request_at) >= SESSION_STATUS_THROTTLE_SECONDS:
+            return None
+        cached = probe.responses.get(path)
+        if cached is None:
+            return None
+        logger.info("[SESSION_STATUS_THROTTLED] %s %s", user_id, path)
+        return cached.status_code, cached.payload
+
     def _probe_backoff_seconds(self, failure_count: int) -> int:
         index = min(max(failure_count, 1), len(SESSION_FAILURE_BACKOFF_SECONDS)) - 1
         return SESSION_FAILURE_BACKOFF_SECONDS[index]
@@ -182,13 +199,18 @@ class SessionManager:
         self._cache_probe(user_id, "/account", 200, disconnected_payload)
 
     def get_cached_probe(self, user_id: str, path: str) -> tuple[int, dict[str, Any]] | None:
+        throttled = self._throttled_probe(user_id, path)
+        if throttled is not None:
+            return throttled
         probe = self.get_probe_state(user_id)
         now = time.time()
         cached = probe.responses.get(path)
         if cached is not None and now < cached.expires_at:
-            logger.info("[CACHE_HIT] %s %s", user_id, path)
+            if path == "/sessions/status":
+                logger.info("[SESSION_STATUS_CACHE_HIT] %s %s", user_id, path)
             return cached.status_code, cached.payload
-        logger.info("[CACHE_MISS] %s %s", user_id, path)
+        if path == "/sessions/status":
+            logger.info("[SESSION_STATUS_CACHE_MISS] %s %s", user_id, path)
         if probe.offline_until > now:
             logger.warning("[SESSION_CHECK_SKIPPED] %s %s reason=offline", user_id, path)
             logger.warning("[USER_OFFLINE_SKIPPED] %s %s", user_id, path)
