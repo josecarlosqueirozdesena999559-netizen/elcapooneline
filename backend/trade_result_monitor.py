@@ -87,7 +87,7 @@ class TradeResultMonitor:
                     if expiration.tzinfo is None:
                         expiration = expiration.replace(tzinfo=timezone.utc)
                     delay = max(0.0, (expiration - datetime.now(timezone.utc)).total_seconds())
-                    timeout_seconds = max(timeout_seconds, delay + 30.0)
+                    timeout_seconds = delay + 30.0
                 except (TypeError, ValueError):
                     logger.warning(
                         "[RESULT_MONITOR_EXPIRATION_INVALID] user_id=%s order_id=%s expires_at=%s",

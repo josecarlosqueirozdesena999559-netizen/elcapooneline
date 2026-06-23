@@ -1027,12 +1027,18 @@ def order_result(order_id: str, x_user_id: str | None = Header(default=None)) ->
 
     def operation(session: ManagedSession) -> dict[str, Any]:
         ensure_session_ready(session)
-        closed_order = session.client.api.socket_option_closed.get(parsed_order_id)
+        socket_option_closed = getattr(session.client.api, "socket_option_closed", {})
+        order_binary = getattr(session.client.api, "order_binary", {})
+        closed_order = socket_option_closed.get(parsed_order_id)
         if closed_order is None:
-            closed_order = session.client.api.socket_option_closed.get(str(parsed_order_id))
+            closed_order = socket_option_closed.get(str(parsed_order_id))
+        if closed_order is None:
+            closed_order = order_binary.get(parsed_order_id)
+        if closed_order is None:
+            closed_order = order_binary.get(str(parsed_order_id))
         if not isinstance(closed_order, dict):
             return {"order_id": parsed_order_id, "result": "PENDING_RESULT", "profit": None}
-        message = closed_order.get("msg")
+        message = closed_order.get("msg") if isinstance(closed_order.get("msg"), dict) else closed_order
         if not isinstance(message, dict):
             return {"order_id": parsed_order_id, "result": "PENDING_RESULT", "profit": None}
 

@@ -295,3 +295,21 @@ class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
 
         finish.assert_not_awaited()
         timeout.assert_awaited_once_with("user-monitor", "105")
+
+    async def test_monitor_uses_expiration_timeout_instead_of_default_ceiling(self) -> None:
+        fetch = AsyncMock(return_value=(200, {"ok": True, "data": {"result": "PENDING_RESULT"}, "error": None}))
+        finish = AsyncMock()
+        timeout = AsyncMock()
+        monitor = TradeResultMonitor(fetch, finish, timeout_seconds=2100, timeout_trade=timeout, poll_seconds=0)
+        expires_at = utc_now() - timedelta(seconds=1)
+
+        with (
+            patch("backend.trade_result_monitor.monotonic", side_effect=[0, 0, 31]),
+            patch("backend.trade_result_monitor.asyncio.sleep", new=AsyncMock()),
+        ):
+            monitor.start("user-monitor-expiration", "107", expires_at.isoformat())
+            await asyncio.gather(*list(monitor._tasks.values()))
+
+        fetch.assert_awaited_once_with("user-monitor-expiration", "107")
+        finish.assert_not_awaited()
+        timeout.assert_awaited_once_with("user-monitor-expiration", "107")
