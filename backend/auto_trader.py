@@ -40,6 +40,8 @@ STATUS_WAITING_NEXT_CANDLE_ENTRY = "WAITING_NEXT_CANDLE_ENTRY"
 STATUS_WAITING_ENTRY_WINDOW = STATUS_WAITING_NEXT_CANDLE_ENTRY
 STATUS_WAITING_ANALYSIS_WINDOW = "WAITING_ANALYSIS_WINDOW"
 STATUS_ACCOUNT_DISCONNECTED = "DISCONNECTED"
+STATUS_SYNCING = "SYNCING"
+STATUS_SYNCING_PT = "SINCRONIZANDO"
 STATUS_ANALYSIS_TIMEOUT = "ANALYSIS_TIMEOUT"
 STATUS_ANALYSIS_ERROR = "ANALYSIS_ERROR"
 STATUS_NO_CANDIDATES = "NO_CANDIDATES"
@@ -61,6 +63,7 @@ RESULT_WAITING_MESSAGE = "Aguardando resultado..."
 ANALYSIS_MESSAGE = "Analisando mercado..."
 DISCONNECTED_MESSAGE = "Conta BullEx desconectada"
 ANALYSIS_TIMEOUT_SECONDS = 10
+SYNC_TIMEOUT_SECONDS = 30
 ANALYSIS_TIMEOUT_MESSAGE = "Análise demorou demais, aguardando próxima vela."
 NO_MINIMUM_SCORE_MESSAGE = "Nenhum ativo atingiu score mínimo."
 
@@ -225,6 +228,7 @@ class RobotState:
     entry_reason: str | None = None
     block_reasons: list[str] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
+    sync_started_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = strip_ai_fields(asdict(self))
@@ -241,6 +245,7 @@ class RobotState:
             "connection_checked_at",
             "last_connected_at",
             "connection_grace_until",
+            "sync_started_at",
         ):
             value = data[key]
             data[key] = value.isoformat() if value is not None else None
@@ -521,6 +526,7 @@ class AutoTrader:
             "connection_checked_at",
             "last_connected_at",
             "connection_grace_until",
+            "sync_started_at",
         }
         for key, value in payload.items():
             if not hasattr(state, key) or key in {"accuracy", "seconds_until_next_cycle"}:
@@ -532,6 +538,8 @@ class AutoTrader:
             state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
         if state.status == STATUS_PENDING_RESULT and state.gale_active:
             state.status = STATUS_PENDING_GALE_RESULT
+        if state.status in {STATUS_SYNCING, STATUS_SYNCING_PT} and state.sync_started_at is None:
+            state.sync_started_at = state.analysis_started_at or state.last_analysis_at or state.current_cycle_started_at
         if state.status == STATUS_RESULT_RECEIVED and bool((state.last_trade or {}).get("is_gale")):
             state.status = STATUS_GALE_RESULT_RECEIVED
 
@@ -564,6 +572,45 @@ class AutoTrader:
             if trade.get("order_id") is not None
         }
         return state
+
+    def recover_sync_timeout(self, user_id: str) -> tuple[bool, RobotState]:
+        state = self.get(user_id)
+        if str(state.status).upper() not in {STATUS_SYNCING, STATUS_SYNCING_PT}:
+            state.sync_started_at = None
+            return False, state
+        now = utc_now()
+        if state.sync_started_at is None:
+            state.sync_started_at = now
+            return False, state
+        if (now - state.sync_started_at).total_seconds() <= SYNC_TIMEOUT_SECONDS:
+            return False, state
+        state.sync_started_at = None
+        state.analysis_started_at = None
+        state.analysis_result = None
+        state.last_analysis_result = None
+        state.analysis_message = None
+        state.rejection_reason = None
+        if state.connected and state.enabled:
+            state.status = STATUS_ANALYZING
+            state.analysis_started_at = now
+            state.last_analysis_at = now
+            state.analysis_result = "RUNNING"
+            state.last_analysis_result = "RUNNING"
+            state.analysis_message = ANALYSIS_MESSAGE
+        elif not state.connected:
+            state.enabled = False
+            state.status = STATUS_ACCOUNT_DISCONNECTED
+            state.rejection_reason = STATUS_ACCOUNT_DISCONNECTED
+            state.last_rejection_reason = STATUS_ACCOUNT_DISCONNECTED
+            state.pending_signal = None
+            state.last_signal = None
+            state.operation_in_progress = False
+            state.entry_window_open = False
+            state.seconds_until_entry_window = 0
+            state.next_cycle_at = None
+        else:
+            state.status = STATUS_STOPPED
+        return True, state
 
     def lock(self, user_id: str) -> asyncio.Lock:
         return self._locks.setdefault(user_id, asyncio.Lock())
@@ -649,6 +696,8 @@ class AutoTrader:
 
     def stop(self, user_id: str) -> RobotState:
         state = self.get(user_id)
+        trade_result = str((state.last_trade or {}).get("result") or "").strip().upper()
+        pending_trade = state.operation_in_progress and trade_result not in {"WIN", "LOSS", "TIMEOUT"}
         state.enabled = False
         state.status = STATUS_STOPPED
         state.rejection_reason = None
@@ -661,16 +710,20 @@ class AutoTrader:
         state.pending_signal = None
         state.last_signal = None
         state.next_cycle_at = None
-        state.operation_in_progress = False
+        state.operation_in_progress = pending_trade
         state.entry_window_open = False
         state.seconds_until_entry_window = 0
         state.analysis_window_open = False
         state.seconds_until_analysis_window = 0
-        state.result_received_at = None
-        state.result_display_until = None
+        if not pending_trade:
+            state.result_received_at = None
+            state.result_display_until = None
         state.order_attempts = 0
         state.fallback_candidate_used = False
-        self._clear_gale_state(state)
+        if not pending_trade:
+            self._clear_gale_state(state)
+        else:
+            state.gale_pending = False
         return state
 
     def prepare_cycle(self, user_id: str) -> tuple[bool, RobotState]:
@@ -1070,6 +1123,12 @@ class AutoTrader:
         state.candidates_count = len(candidates)
         state.candidates = [strip_ai_fields(dict(candidate)) for candidate in candidates]
         state.best_candidate = strip_ai_fields(dict(best_candidate)) if best_candidate is not None else None
+        state.cycle_best_candidate = strip_ai_fields(dict(best_candidate)) if best_candidate is not None else None
+        state.cycle_best_trade_candidate = (
+            strip_ai_fields(dict(best_candidate))
+            if best_candidate is not None and bool(best_candidate.get("trade_allowed", True))
+            else None
+        )
         state.strategy_score = int((best_candidate or {}).get("strategy_score") or 0)
         state.strategy_name = (best_candidate or {}).get("strategy_name")
         state.strategy_reason = (best_candidate or {}).get("strategy_reason")
@@ -1414,6 +1473,7 @@ class AutoTrader:
         state.expiration_seconds = int(window["expiration_seconds"])
         if (
             state.status == STATUS_ANALYZING
+            and state.analysis_result != "RUNNING"
             and state.pending_signal is None
             and not state.operation_in_progress
         ):

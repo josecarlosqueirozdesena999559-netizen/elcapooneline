@@ -163,7 +163,7 @@ ANALYSIS_ASSETS = {
     "AUDJPY-OTC",
 }
 SESSION_CACHE_TTL_SECONDS = 15
-SESSION_STATUS_THROTTLE_SECONDS = 5
+SESSION_STATUS_THROTTLE_SECONDS = 10
 ROBOT_SESSION_REFRESH_SECONDS = 15
 SESSION_OFFLINE_TTL_SECONDS = 60
 SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
@@ -182,6 +182,13 @@ def build_success(data: Any) -> dict[str, Any]:
 
 def build_error(message: str) -> dict[str, Any]:
     return {"ok": False, "data": None, "error": message}
+
+
+CONFIG_LOCK_ERROR = {
+    "ok": False,
+    "error": "ROBOT_RUNNING_CONFIG_LOCKED",
+    "message": "Pare o robô antes de alterar configurações.",
+}
 
 
 ROBOT_BASIC_CONFIG_FIELDS = {
@@ -1781,6 +1788,36 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     return build_success(data)
 
 
+def robot_config_locked(user_id: str, state: Any) -> bool:
+    worker_task = robot_tasks.get(user_id)
+    worker_running = bool(worker_task is not None and not worker_task.done())
+    result_waiting = bool(
+        getattr(state, "operation_in_progress", False)
+        and str(((getattr(state, "last_trade", None) or {}).get("result") or "")).upper()
+        not in {"WIN", "LOSS", "TIMEOUT"}
+    )
+    return bool(
+        getattr(state, "enabled", False)
+        or worker_running
+        or getattr(state, "operation_in_progress", False)
+        or result_waiting
+    )
+
+
+def recover_sync_timeout_if_needed(user_id: str) -> Any:
+    recovered, state = auto_trader.recover_sync_timeout(user_id)
+    if recovered:
+        logger.warning(
+            "[SYNC_TIMEOUT_RECOVERED] user_id=%s status=%s connected=%s enabled=%s",
+            user_id,
+            state.status,
+            state.connected,
+            state.enabled,
+        )
+        persist_robot(user_id)
+    return state
+
+
 def get_real_balance_warning(user_id: str | None, state: Any, active_mode: str | None) -> str | None:
     if user_id is None or getattr(state, "account_mode", None) != "REAL" or active_mode != "REAL":
         return None
@@ -2547,6 +2584,12 @@ async def finish_monitored_trade(user_id: str, order_id: str, result: str, profi
         finalized, state = auto_trader.finish_trade(user_id, order_id, result, profit)
         if not finalized and state.gale_pending:
             logger.info(
+                "[TRADE_RESULT] user_id=%s order_id=%s result=LOSS profit=%s",
+                user_id,
+                order_id,
+                (state.last_trade or {}).get("profit"),
+            )
+            logger.info(
                 "[GALE_TRIGGERED] user_id=%s order_id=%s gale_amount=%s multiplier=%s",
                 user_id,
                 order_id,
@@ -2612,6 +2655,14 @@ async def finish_monitored_trade(user_id: str, order_id: str, result: str, profi
                     state.last_trade.get("parent_order_id"),
                     result,
                     state.last_trade.get("profit"),
+                )
+            if state.cycle_result == "LOSS":
+                logger.info(
+                    "[LOSS_COUNTED] user_id=%s order_id=%s losses=%s profit=%s",
+                    user_id,
+                    order_id,
+                    state.losses,
+                    state.profit,
                 )
             try:
                 robot_persistence.save_trade_history(user_id, state.last_trade)
@@ -2681,7 +2732,7 @@ async def execute_robot_cycle(
     required_mode: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     async with auto_trader.lock(user_id):
-        state = auto_trader.get(user_id)
+        state = recover_sync_timeout_if_needed(user_id)
         had_pending_signal = state.pending_signal is not None
         running_analysis = state.analysis_result == "RUNNING" or state.last_analysis_result == "RUNNING"
         if not had_pending_signal and not running_analysis:
@@ -2699,6 +2750,15 @@ async def execute_robot_cycle(
 
         logger.info("[ROBOT TICK] user_id=%s", user_id)
         try:
+            result_waiting = bool(
+                state.operation_in_progress
+                and str((state.last_trade or {}).get("result") or "").upper() not in {"WIN", "LOSS", "TIMEOUT"}
+            )
+            if state.operation_in_progress or result_waiting:
+                state.status = STATUS_PENDING_GALE_RESULT if state.gale_active else STATUS_PENDING_RESULT
+                logger.info("[RESULT_WAIT_ONLY] user_id=%s status=%s", user_id, state.status)
+                return 200, build_robot_payload(state)
+
             active_stop_reason = daily_stop_reason(user_id, state) or robot_stop_reason(state)
             if active_stop_reason is not None:
                 if active_stop_reason.startswith("DAILY_STOP"):
@@ -3594,6 +3654,7 @@ async def run_analysis_now(user_id: str) -> tuple[int, dict[str, Any]]:
 async def robot_worker(user_id: str) -> None:
     try:
         while auto_trader.get(user_id).enabled:
+            recover_sync_timeout_if_needed(user_id)
             robot_worker_last_tick_at[user_id] = utc_now()
             logger.info("[ROBOT_RUNNING] user_id=%s", user_id)
             guard = connection_guard_reason(user_id)
@@ -3851,13 +3912,18 @@ async def signals_top_reviewed(auth: dict[str, str] = Depends(require_headers)) 
 @app.get("/robot/state")
 async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     user_id = auth["user_id"]
-    state = get_user_robot_state(user_id)
+    get_user_robot_state(user_id)
+    state = recover_sync_timeout_if_needed(user_id)
     guard = connection_guard_reason(user_id)
     if guard is not None:
         reason, _ = guard
         connected = bool(state.connected)
         active_mode = state.active_mode
         source = "offline_cache" if reason == "offline" else "backoff_active"
+    elif state.connected and state.active_mode is not None:
+        connected = True
+        active_mode = state.active_mode
+        source = state.connection_status_source or "cached"
     else:
         _, _, state, connected, active_mode, source = await fetch_and_sync_robot_connection(user_id)
         if robot_connection_unavailable(connected, active_mode):
@@ -4108,6 +4174,16 @@ async def robot_config(
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
     user_id = auth["user_id"]
+    state = recover_sync_timeout_if_needed(user_id)
+    if robot_config_locked(user_id, state):
+        logger.warning(
+            "[ROBOT_CONFIG_LOCKED] user_id=%s enabled=%s worker_running=%s operation_in_progress=%s",
+            user_id,
+            state.enabled,
+            bool(robot_tasks.get(user_id) is not None and not robot_tasks[user_id].done()),
+            state.operation_in_progress,
+        )
+        return json_response(409, CONFIG_LOCK_ERROR)
     raw_body = dict(body or {})
     logger.warning("[ROBOT_CONFIG_PAYLOAD] user_id=%s payload=%s", user_id, raw_body)
     logger.info("[REAL_CONFIG_RECEIVED] user_id=%s payload=%s", user_id, raw_body)
@@ -4157,6 +4233,14 @@ async def robot_config(
             state.confirm_real,
         )
     return json_response(200, build_robot_payload(state, user_id=user_id))
+
+
+@app.post("/robot/settings")
+async def robot_settings(
+    body: dict[str, Any] | None = Body(default=None),
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    return await robot_config(body, auth)
 
 
 @app.post("/robot/start")

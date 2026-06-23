@@ -8,8 +8,10 @@ from backend.auto_trader import (
     STATUS_GALE_RESULT_RECEIVED,
     STATUS_PENDING_GALE_RESULT,
     STATUS_ANALYZING,
+    STATUS_ACCOUNT_DISCONNECTED,
     STATUS_PENDING_RESULT,
     STATUS_RESULT_RECEIVED,
+    STATUS_SYNCING,
     STATUS_WAITING_GALE_ENTRY,
     STATUS_WAITING_NEXT_CYCLE,
     parse_datetime,
@@ -229,11 +231,37 @@ class AutoTraderResultTests(unittest.TestCase):
         self.assertTrue(can_run)
         self.assertEqual(waiting_analysis.status, STATUS_WAITING_NEXT_CYCLE)
 
+    def test_syncing_timeout_recovers_to_analysis_when_connected_and_enabled(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-sync")
+        state.connected = True
+        state.status = STATUS_SYNCING
+        state.sync_started_at = utc_now() - timedelta(seconds=31)
+
+        recovered, state = trader.recover_sync_timeout("user-sync")
+
+        self.assertTrue(recovered)
+        self.assertEqual(state.status, STATUS_ANALYZING)
+        self.assertEqual(state.analysis_result, "RUNNING")
+
+    def test_syncing_timeout_disconnects_when_connection_is_down(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-sync-down")
+        state.connected = False
+        state.status = STATUS_SYNCING
+        state.sync_started_at = utc_now() - timedelta(seconds=31)
+
+        recovered, state = trader.recover_sync_timeout("user-sync-down")
+
+        self.assertTrue(recovered)
+        self.assertEqual(state.status, STATUS_ACCOUNT_DISCONNECTED)
+        self.assertFalse(state.enabled)
+
 
 class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
     def test_default_poll_interval_is_realtime(self) -> None:
         monitor = TradeResultMonitor(AsyncMock(), AsyncMock(), AsyncMock())
-        self.assertEqual(monitor.poll_seconds, 0.25)
+        self.assertEqual(monitor.poll_seconds, 0.5)
 
     def test_normalizes_bullex_results(self) -> None:
         self.assertEqual(
@@ -257,11 +285,12 @@ class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
         )
         finish = AsyncMock()
         timeout = AsyncMock()
-        monitor = TradeResultMonitor(fetch, finish, timeout, poll_seconds=0, timeout_seconds=1)
+        monitor = TradeResultMonitor(fetch, finish, timeout, poll_seconds=0.5, timeout_seconds=1)
 
         self.assertTrue(monitor.start("user-monitor", "104"))
         self.assertFalse(monitor.start("user-monitor", "104"))
-        await asyncio.gather(*list(monitor._tasks.values()))
+        with patch("backend.trade_result_monitor.asyncio.sleep", new=AsyncMock()):
+            await asyncio.gather(*list(monitor._tasks.values()))
 
         self.assertEqual(fetch.await_count, 2)
         finish.assert_awaited_once_with("user-monitor", "104", "WIN", 1.76)
@@ -288,10 +317,11 @@ class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
         fetch = AsyncMock(return_value=(200, {"ok": True, "data": {"result": "PENDING_RESULT"}, "error": None}))
         finish = AsyncMock()
         timeout = AsyncMock()
-        monitor = TradeResultMonitor(fetch, finish, timeout, poll_seconds=0, timeout_seconds=0.001)
+        monitor = TradeResultMonitor(fetch, finish, timeout, poll_seconds=0.5, timeout_seconds=0.001)
 
         monitor.start("user-monitor", "105")
-        await asyncio.gather(*list(monitor._tasks.values()))
+        with patch("backend.trade_result_monitor.asyncio.sleep", new=AsyncMock()):
+            await asyncio.gather(*list(monitor._tasks.values()))
 
         finish.assert_not_awaited()
         timeout.assert_awaited_once_with("user-monitor", "105")

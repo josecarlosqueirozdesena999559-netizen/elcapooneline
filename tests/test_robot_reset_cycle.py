@@ -106,6 +106,11 @@ class RobotResetCycleTests(unittest.IsolatedAsyncioTestCase):
         user_id = "user-stop"
         state = main.auto_trader.start(user_id)
         state.operation_in_progress = True
+        state.last_trade = {
+            "order_id": "stop-open-1",
+            "amount": 2,
+            "result": "PENDING_RESULT",
+        }
         state.pending_signal = {"symbol": "EURUSD-OTC"}
         state.gale_pending = True
         state.gale_active = True
@@ -131,11 +136,39 @@ class RobotResetCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(refreshed.enabled)
         self.assertEqual(refreshed.status, "STOPPED")
-        self.assertFalse(refreshed.operation_in_progress)
+        self.assertTrue(refreshed.operation_in_progress)
         self.assertFalse(refreshed.gale_pending)
-        self.assertFalse(refreshed.gale_active)
+        self.assertTrue(refreshed.gale_active)
         self.assertFalse(payload["enabled"])
         self.assertEqual(payload["status"], "STOPPED")
         self.assertFalse(payload["worker_running"])
-        self.assertFalse(payload["operation_in_progress"])
-        self.assertFalse(payload["result_waiting"])
+        self.assertTrue(payload["operation_in_progress"])
+        self.assertTrue(payload["result_waiting"])
+
+        finalized, finished_state = main.auto_trader.finish_trade(user_id, "stop-open-1", "LOSS", 0)
+        self.assertTrue(finalized)
+        self.assertEqual(finished_state.status, "STOPPED")
+        self.assertEqual(finished_state.losses, 1)
+
+    async def test_robot_config_rejects_changes_while_robot_is_running(self) -> None:
+        user_id = "user-config-locked"
+        main.auto_trader.start(user_id)
+
+        response = await main.robot_config({"entry_value": 5}, {"user_id": user_id})
+        payload = json.loads(response.body)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "ROBOT_RUNNING_CONFIG_LOCKED")
+        self.assertEqual(payload["message"], "Pare o robô antes de alterar configurações.")
+
+    async def test_robot_config_allows_changes_after_robot_is_fully_stopped(self) -> None:
+        user_id = "user-config-unlocked"
+        main.auto_trader.get(user_id)
+
+        with patch.object(main, "persist_robot"):
+            response = await main.robot_config({"entry_value": 5}, {"user_id": user_id})
+        payload = json.loads(response.body)["data"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["entry_value"], 5)

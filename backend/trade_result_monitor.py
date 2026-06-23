@@ -45,7 +45,7 @@ class TradeResultMonitor:
     fetch_result: FetchResult
     finish_trade: FinishTrade
     timeout_trade: TimeoutTrade
-    poll_seconds: float = 0.25
+    poll_seconds: float = 0.5
     timeout_seconds: float = 2100.0
     _tasks: dict[tuple[str, str], asyncio.Task[None]] = field(default_factory=dict)
 
@@ -136,7 +136,7 @@ class TradeResultMonitor:
                         order_id,
                         exc,
                     )
-                await asyncio.sleep(self.poll_seconds)
+                await asyncio.sleep(max(0.5, float(self.poll_seconds)))
 
             await self.timeout_trade(user_id, order_id)
             logger.warning("[ROBOT TRADE TIMEOUT] user_id=%s order_id=%s", user_id, order_id)
