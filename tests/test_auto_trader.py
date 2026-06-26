@@ -2601,7 +2601,16 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         state.account_mode = "REAL"
         state.allow_real = True
         state.confirm_real = True
-        main.user_store.save_connection(user_id, {"connected": True, "account_mode": "REAL", "last_balance": 0})
+        main.user_store.save_connection(
+            user_id,
+            {
+                "connected": True,
+                "account_mode": "REAL",
+                "last_balance": 0,
+                "currency": "BRL",
+                "bullex_email": "real@example.com",
+            },
+        )
 
         with (
             patch.object(
@@ -2623,9 +2632,33 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["confirm_real"])
         self.assertEqual(data["account_mode"], "REAL")
         self.assertEqual(data["active_mode"], "REAL")
+        self.assertEqual(data["balance"], 0.0)
+        self.assertEqual(data["currency"], "BRL")
+        self.assertEqual(data["email"], "real@example.com")
         self.assertTrue(data["real_ready"])
         self.assertIsNone(data["real_block_reason"])
         self.assertEqual(data["real_balance_warning"], "BALANCE_ZERO")
+
+    async def test_robot_worker_skips_analysis_while_waiting_trade_result(self) -> None:
+        user_id = "user-waiting-result"
+        state = main.auto_trader.start(user_id)
+        state.enabled = True
+        state.connected = True
+        state.active_mode = "PRACTICE"
+        state.operation_in_progress = True
+        state.last_trade = {"order_id": "trade-1", "result": "PENDING_RESULT"}
+
+        async def stop_after_sleep(_: float) -> None:
+            state.enabled = False
+
+        with (
+            patch.object(main, "execute_robot_cycle", new=AsyncMock()) as execute_cycle,
+            patch.object(main, "persist_robot"),
+            patch("backend.main.asyncio.sleep", new=AsyncMock(side_effect=stop_after_sleep)),
+        ):
+            await main.robot_worker(user_id)
+
+        execute_cycle.assert_not_called()
 
     async def test_robot_state_requires_allow_real_for_real_readiness(self) -> None:
         user_id = "user-real-allow-required"

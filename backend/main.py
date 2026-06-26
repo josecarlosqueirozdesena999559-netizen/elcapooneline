@@ -150,7 +150,7 @@ BINARY_ALLOWED_ASSETS = [
     "AUDCHF-OTC",
 ]
 BINARY_ALLOWED_ASSET_SET = set(BINARY_ALLOWED_ASSETS)
-ANALYSIS_ASSETS = {
+ANALYSIS_ASSETS = [
     "EURUSD-OTC",
     "GBPUSD-OTC",
     "USDJPY-OTC",
@@ -161,16 +161,16 @@ ANALYSIS_ASSETS = {
     "USDCAD-OTC",
     "GBPJPY-OTC",
     "AUDJPY-OTC",
-}
+]
 SESSION_CACHE_TTL_SECONDS = 15
 SESSION_STATUS_THROTTLE_SECONDS = 10
 ROBOT_SESSION_REFRESH_SECONDS = 15
 SESSION_OFFLINE_TTL_SECONDS = 60
 SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
 SESSION_CACHEABLE_PATHS = {"/sessions/status", "/account"}
-ACCOUNT_CACHE_TTL_SECONDS = 15
-ASSETS_CACHE_TTL_SECONDS = 60
-PAYOUT_CACHE_TTL_SECONDS = 30
+ACCOUNT_CACHE_TTL_SECONDS = 10
+ASSETS_CACHE_TTL_SECONDS = 300
+PAYOUT_CACHE_TTL_SECONDS = 60
 CANDLES_CACHE_TTL_SECONDS = 2
 ACTIVE_COOLDOWN_SECONDS = 300
 PAYOUT_COOLDOWN_SECONDS = 30
@@ -1212,6 +1212,36 @@ async def fetch_and_sync_robot_connection(user_id: str) -> tuple[int, dict[str, 
     return status_code, payload, state, connected, active_mode, source
 
 
+async def refresh_account_snapshot_if_needed(
+    user_id: str,
+    *,
+    connected: bool,
+    active_mode: str | None,
+) -> dict[str, Any]:
+    snapshot = get_user_account_snapshot(user_id)
+    needs_refresh = (
+        connected
+        and (
+            snapshot.get("connected") is not True
+            or snapshot.get("balance") is None
+            or snapshot.get("currency") is None
+            or (active_mode is not None and snapshot.get("mode") != active_mode)
+        )
+    )
+    if not needs_refresh:
+        return snapshot
+    _, payload = await call_bullex_service("GET", "/account", user_id)
+    if payload.get("ok"):
+        sync_user_store_from_payload(user_id, payload)
+        data = payload.get("data")
+        if isinstance(data, dict):
+            snapshot = get_user_account_snapshot(user_id)
+            if active_mode == "REAL" and snapshot.get("balance") == 0:
+                logger.info("[ACCOUNT_REAL_CONNECTED] user_id=%s balance=0 mode=REAL", user_id)
+            return snapshot
+    return snapshot
+
+
 def fresh_robot_connection(state: Any, *, max_age_seconds: int = ROBOT_SESSION_REFRESH_SECONDS) -> bool:
     checked_at = getattr(state, "connection_checked_at", None)
     if checked_at is None:
@@ -1748,6 +1778,32 @@ def robot_connection_unavailable(connected: bool, active_mode: str | None) -> bo
     return not connected or active_mode is None
 
 
+def get_user_account_snapshot(user_id: str | None) -> dict[str, Any]:
+    if not user_id:
+        return {"email": None, "balance": None, "currency": None, "mode": None, "connected": None}
+    try:
+        record = user_store.get_user(str(user_id))
+    except Exception:
+        logger.warning("[ACCOUNT_SNAPSHOT_LOOKUP_FAILED] user_id=%s", user_id, exc_info=True)
+        return {"email": None, "balance": None, "currency": None, "mode": None, "connected": None}
+    if record is None:
+        return {"email": None, "balance": None, "currency": None, "mode": None, "connected": None}
+    balance = None
+    if record.last_balance is not None:
+        try:
+            balance = float(record.last_balance)
+        except (TypeError, ValueError):
+            balance = None
+    mode = str(record.account_mode).strip().upper() if record.account_mode else None
+    return {
+        "email": record.bullex_email,
+        "balance": balance,
+        "currency": record.currency,
+        "mode": mode,
+        "connected": record.connected,
+    }
+
+
 def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     data = strip_ai_fields(state.to_dict())
     user_id = extra.pop("user_id", None)
@@ -1821,17 +1877,12 @@ def recover_sync_timeout_if_needed(user_id: str) -> Any:
 def get_real_balance_warning(user_id: str | None, state: Any, active_mode: str | None) -> str | None:
     if user_id is None or getattr(state, "account_mode", None) != "REAL" or active_mode != "REAL":
         return None
-    try:
-        record = user_store.get_user(str(user_id))
-    except Exception:
-        logger.warning("[REAL_BALANCE_WARNING_LOOKUP_FAILED] user_id=%s", user_id, exc_info=True)
+    snapshot = get_user_account_snapshot(user_id)
+    if snapshot.get("balance") is None:
         return None
-    if record is None or record.last_balance is None:
-        return None
-    try:
-        balance = float(record.last_balance)
-    except (TypeError, ValueError):
-        return None
+    balance = float(snapshot["balance"])
+    if balance == 0:
+        logger.info("[BALANCE_ZERO_NOT_DISCONNECTED] user_id=%s mode=REAL", user_id)
     return "BALANCE_ZERO" if balance == 0 else None
 
 
@@ -2168,10 +2219,9 @@ async def scan_local_signals(
         len(BINARY_ALLOWED_ASSETS),
         len(ANALYSIS_ASSETS),
     )
+    logger.info("[ANALYSIS_FILTER_10_ASSETS] assets=%s", ",".join(ANALYSIS_ASSETS))
 
-    for symbol in BINARY_ALLOWED_ASSETS:
-        if symbol not in ANALYSIS_ASSETS:
-            continue
+    for symbol in ANALYSIS_ASSETS:
         try:
             logger.info("[ANALYZING_ASSET] symbol=%s", symbol)
             status_code, payload = await analyze_active_signal(
@@ -2276,7 +2326,7 @@ async def select_fallback_candidate(
     *,
     endtime: int | None = None,
 ) -> dict[str, Any] | None:
-    for symbol in BINARY_ALLOWED_ASSETS:
+    for symbol in ANALYSIS_ASSETS:
         if active_cooldown_remaining(user_id, symbol) is not None:
             logger.warning("[ACTIVE_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
             continue
@@ -2402,7 +2452,7 @@ async def update_cycle_analysis(
     )
     scan_status, scan_payload = await scan_local_signals(
         user_id,
-        limit=len(BINARY_ALLOWED_ASSETS),
+        limit=len(ANALYSIS_ASSETS),
         include_wait=True,
         timeframe=state.timeframe,
         endtime=int(entry_window["server_timestamp"]),
@@ -2933,7 +2983,7 @@ async def execute_robot_cycle(
                 )
                 scan_status, scan_payload = await scan_local_signals(
                     user_id,
-                    limit=len(BINARY_ALLOWED_ASSETS),
+                    limit=len(ANALYSIS_ASSETS),
                     include_wait=True,
                     timeframe=state.timeframe,
                     endtime=int(entry_window["server_timestamp"]),
@@ -3657,6 +3707,11 @@ async def robot_worker(user_id: str) -> None:
             recover_sync_timeout_if_needed(user_id)
             robot_worker_last_tick_at[user_id] = utc_now()
             logger.info("[ROBOT_RUNNING] user_id=%s", user_id)
+            state = auto_trader.get(user_id)
+            result_waiting = bool(
+                state.operation_in_progress
+                and str((state.last_trade or {}).get("result") or "").strip().upper() not in {"WIN", "LOSS", "TIMEOUT"}
+            )
             guard = connection_guard_reason(user_id)
             if guard is not None:
                 reason, remaining = guard
@@ -3665,16 +3720,25 @@ async def robot_worker(user_id: str) -> None:
                 else:
                     logger.warning("[BACKOFF_ACTIVE] user_id=%s retry_in=%.2f", user_id, remaining)
                 logger.warning("[CPU_LOOP_PROTECTION] user_id=%s reason=%s", user_id, reason)
-                await asyncio.sleep(max(1, remaining))
+                delay = max(0.5, remaining)
+                logger.info("[CPU_GUARD_SLEEP] user_id=%s seconds=%.2f", user_id, delay)
+                await asyncio.sleep(delay)
+                continue
+            if state.operation_in_progress or result_waiting:
+                logger.info(
+                    "[SKIP_ANALYSIS_WAITING_RESULT] user_id=%s order_id=%s",
+                    user_id,
+                    (state.last_trade or {}).get("order_id"),
+                )
+                logger.info("[CPU_GUARD_SLEEP] user_id=%s seconds=0.50", user_id)
+                await asyncio.sleep(0.5)
                 continue
             logger.info("[ROBOT_WORKER_TICK] user_id=%s", user_id)
             await execute_robot_cycle(user_id)
             state = auto_trader.get(user_id)
             if not state.enabled:
                 break
-            if state.operation_in_progress:
-                delay = 3
-            elif state.status == STATUS_WAITING_ENTRY_WINDOW:
+            if state.status == STATUS_WAITING_ENTRY_WINDOW:
                 delay = max(1, state.seconds_until_entry_window)
             elif state.status in TEMPORARY_WAIT_STATUSES:
                 delay = max(1, state.to_dict()["seconds_until_next_cycle"])
@@ -3686,6 +3750,8 @@ async def robot_worker(user_id: str) -> None:
                 delay = max(1, min(5, float(state.to_dict()["seconds_until_next_cycle"])))
             else:
                 delay = max(1, state.to_dict()["seconds_until_next_cycle"])
+            delay = max(0.5, float(delay))
+            logger.info("[CPU_GUARD_SLEEP] user_id=%s seconds=%.2f", user_id, delay)
             await asyncio.sleep(delay)
     except asyncio.CancelledError:
         raise
@@ -3943,6 +4009,11 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
         window,
     )
     state = auto_trader.get(user_id)
+    account_snapshot = await refresh_account_snapshot_if_needed(
+        user_id,
+        connected=connected,
+        active_mode=active_mode,
+    )
     block_reason = real_block_reason(state, connected=connected, active_mode=active_mode, user_id=user_id)
     real_balance_warning = get_real_balance_warning(user_id, state, active_mode)
     return json_response(
@@ -3952,6 +4023,9 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
             user_id=user_id,
             connected=connected,
             active_mode=active_mode,
+            balance=account_snapshot.get("balance"),
+            currency=account_snapshot.get("currency"),
+            email=account_snapshot.get("email"),
             connection_checked_at=state.connection_checked_at.isoformat()
             if state.connection_checked_at is not None
             else None,
@@ -4362,6 +4436,11 @@ async def robot_sync_connection(auth: dict[str, str] = Depends(require_headers))
     get_user_robot_state(user_id)
     status_code, _, state, connected, active_mode, source = await fetch_and_sync_robot_connection(user_id)
     persist_robot(user_id)
+    account_snapshot = await refresh_account_snapshot_if_needed(
+        user_id,
+        connected=connected,
+        active_mode=active_mode,
+    )
     block_reason = real_block_reason(state, connected=connected, active_mode=active_mode, user_id=user_id)
     real_balance_warning = get_real_balance_warning(user_id, state, active_mode)
     return json_response(
@@ -4371,6 +4450,9 @@ async def robot_sync_connection(auth: dict[str, str] = Depends(require_headers))
             user_id=user_id,
             connected=connected,
             active_mode=active_mode,
+            balance=account_snapshot.get("balance"),
+            currency=account_snapshot.get("currency"),
+            email=account_snapshot.get("email"),
             connection_checked_at=state.connection_checked_at.isoformat()
             if state.connection_checked_at is not None
             else None,

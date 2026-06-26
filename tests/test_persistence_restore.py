@@ -22,6 +22,26 @@ from bullex_service.session_store import SessionStore
 
 
 class SessionPersistenceTests(unittest.TestCase):
+    def test_build_account_payload_keeps_real_connected_with_zero_balance(self) -> None:
+        session = bullex_main.ManagedSession(
+            user_id="user-real-zero",
+            client=SimpleNamespace(
+                check_connect=lambda: True,
+                get_balance=lambda: 0,
+                get_currency=lambda: "BRL",
+                get_balance_mode=lambda: "REAL",
+            ),
+            email="real@example.com",
+        )
+
+        payload = bullex_main.build_account_payload(session)
+
+        self.assertTrue(payload["connected"])
+        self.assertEqual(payload["mode"], "REAL")
+        self.assertEqual(payload["currency"], "BRL")
+        self.assertEqual(payload["balance"], 0.0)
+        self.assertEqual(payload["real_balance_warning"], "BALANCE_ZERO")
+
     def test_session_token_is_encrypted_and_password_is_never_stored(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = str(Path(directory) / "sessions.db")

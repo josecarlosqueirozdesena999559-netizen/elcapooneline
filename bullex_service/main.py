@@ -50,7 +50,11 @@ BINARY_ALLOWED_ASSETS = [
 ]
 BINARY_ALLOWED_ASSET_SET = set(BINARY_ALLOWED_ASSETS)
 SESSION_EXCEPTION_TYPES = (WebSocketConnectionClosedException, ConnectionError, TimeoutError)
-SESSION_CACHE_TTL_SECONDS = 15
+SESSION_STATUS_TTL_SECONDS = 15
+ACCOUNT_TTL_SECONDS = 10
+ASSETS_TTL_SECONDS = 300
+PAYOUT_TTL_SECONDS = 60
+CANDLES_TTL_SECONDS = 2
 SESSION_STATUS_THROTTLE_SECONDS = 5
 SESSION_OFFLINE_TTL_SECONDS = 60
 SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
@@ -150,38 +154,59 @@ class SessionManager:
     def remove(self, user_id: str) -> None:
         self.sessions.pop(user_id, None)
 
-    def _cache_probe(self, user_id: str, path: str, status_code: int, payload: dict[str, Any]) -> None:
-        self.get_probe_state(user_id).responses[path] = CachedProbe(
+    def clear_probe_cache(self, user_id: str) -> None:
+        probe = self.get_probe_state(user_id)
+        probe.responses.clear()
+        probe.last_request_at.clear()
+
+    def _cache_probe(
+        self,
+        user_id: str,
+        cache_key: str,
+        status_code: int,
+        payload: dict[str, Any],
+        *,
+        ttl_seconds: int,
+    ) -> None:
+        self.get_probe_state(user_id).responses[cache_key] = CachedProbe(
             status_code=status_code,
             payload=payload,
-            expires_at=time.time() + SESSION_CACHE_TTL_SECONDS,
+            expires_at=time.time() + ttl_seconds,
         )
 
-    def _throttled_probe(self, user_id: str, path: str) -> tuple[int, dict[str, Any]] | None:
+    def _throttled_probe(self, user_id: str, cache_key: str, *, path: str) -> tuple[int, dict[str, Any]] | None:
         if path != "/sessions/status":
             return None
         probe = self.get_probe_state(user_id)
         now = time.time()
-        last_request_at = probe.last_request_at.get(path, 0.0)
-        probe.last_request_at[path] = now
+        last_request_at = probe.last_request_at.get(cache_key, 0.0)
+        probe.last_request_at[cache_key] = now
         if last_request_at <= 0 or (now - last_request_at) >= SESSION_STATUS_THROTTLE_SECONDS:
             return None
-        cached = probe.responses.get(path)
+        cached = probe.responses.get(cache_key)
         if cached is None:
             return None
-        logger.info("[SESSION_STATUS_THROTTLED] %s %s", user_id, path)
+        logger.info("[SESSION_STATUS_THROTTLED] %s %s", user_id, cache_key)
         return cached.status_code, cached.payload
 
     def _probe_backoff_seconds(self, failure_count: int) -> int:
         index = min(max(failure_count, 1), len(SESSION_FAILURE_BACKOFF_SECONDS)) - 1
         return SESSION_FAILURE_BACKOFF_SECONDS[index]
 
-    def _mark_probe_success(self, user_id: str, path: str, status_code: int, payload: dict[str, Any]) -> None:
+    def _mark_probe_success(
+        self,
+        user_id: str,
+        cache_key: str,
+        status_code: int,
+        payload: dict[str, Any],
+        *,
+        ttl_seconds: int,
+    ) -> None:
         probe = self.get_probe_state(user_id)
         probe.failure_count = 0
         probe.next_retry_at = 0.0
         probe.offline_until = 0.0
-        self._cache_probe(user_id, path, status_code, payload)
+        self._cache_probe(user_id, cache_key, status_code, payload, ttl_seconds=ttl_seconds)
 
     def _mark_probe_failure(self, user_id: str, *, offline: bool = False) -> None:
         probe = self.get_probe_state(user_id)
@@ -191,24 +216,50 @@ class SessionManager:
         if offline:
             probe.offline_until = now + SESSION_OFFLINE_TTL_SECONDS
             probe.next_retry_at = probe.offline_until
-            self._cache_probe(user_id, "/sessions/status", 404, {"ok": False, "data": {"connected": False}, "error": SESSION_NOT_FOUND})
-            self._cache_probe(user_id, "/account", 200, disconnected_payload)
+            self._cache_probe(
+                user_id,
+                "/sessions/status",
+                404,
+                {"ok": False, "data": {"connected": False}, "error": SESSION_NOT_FOUND},
+                ttl_seconds=SESSION_STATUS_TTL_SECONDS,
+            )
+            self._cache_probe(
+                user_id,
+                "/account",
+                200,
+                disconnected_payload,
+                ttl_seconds=ACCOUNT_TTL_SECONDS,
+            )
             return
         probe.next_retry_at = now + self._probe_backoff_seconds(probe.failure_count)
-        self._cache_probe(user_id, "/sessions/status", 200, disconnected_payload)
-        self._cache_probe(user_id, "/account", 200, disconnected_payload)
+        self._cache_probe(
+            user_id,
+            "/sessions/status",
+            200,
+            disconnected_payload,
+            ttl_seconds=SESSION_STATUS_TTL_SECONDS,
+        )
+        self._cache_probe(
+            user_id,
+            "/account",
+            200,
+            disconnected_payload,
+            ttl_seconds=ACCOUNT_TTL_SECONDS,
+        )
 
-    def get_cached_probe(self, user_id: str, path: str) -> tuple[int, dict[str, Any]] | None:
-        throttled = self._throttled_probe(user_id, path)
+    def get_cached_probe(self, user_id: str, cache_key: str, *, path: str) -> tuple[int, dict[str, Any]] | None:
+        throttled = self._throttled_probe(user_id, cache_key, path=path)
         if throttled is not None:
             return throttled
         probe = self.get_probe_state(user_id)
         now = time.time()
-        cached = probe.responses.get(path)
+        cached = probe.responses.get(cache_key)
         if cached is not None and now < cached.expires_at:
+            logger.info("[CACHE_HIT] user_id=%s path=%s", user_id, path)
             if path == "/sessions/status":
                 logger.info("[SESSION_STATUS_CACHE_HIT] %s %s", user_id, path)
             return cached.status_code, cached.payload
+        logger.info("[CACHE_MISS] user_id=%s path=%s", user_id, path)
         if path == "/sessions/status":
             logger.info("[SESSION_STATUS_CACHE_MISS] %s %s", user_id, path)
         if probe.offline_until > now:
@@ -236,7 +287,7 @@ class SessionManager:
         return session
 
     def ensure_session_alive(self, user_id: str) -> ManagedSession:
-        cached = self.get_cached_probe(user_id, "/sessions/status")
+        cached = self.get_cached_probe(user_id, "/sessions/status", path="/sessions/status")
         if cached is not None:
             session = self.get(user_id)
             if session is not None:
@@ -599,6 +650,19 @@ def parse_order_id(order_id: str) -> int | str:
     return int(order_id) if order_id.isdigit() else order_id
 
 
+def build_cache_key(path: str, params: dict[str, Any] | None = None) -> str:
+    if not params:
+        return path
+    parts = [f"{key}={params[key]}" for key in sorted(params)]
+    return f"{path}?{'&'.join(parts)}"
+
+
+def normalize_balance_value(balance: Any) -> float | None:
+    if balance is None:
+        return None
+    return float(balance)
+
+
 def build_account_payload(session: ManagedSession) -> dict[str, Any]:
     connected = bool(session.client.check_connect())
     account = {
@@ -611,9 +675,17 @@ def build_account_payload(session: ManagedSession) -> dict[str, Any]:
     }
 
     if connected and not session.requires_2fa:
-        account["balance"] = session.client.get_balance()
-        account["currency"] = session.client.get_currency()
-        account["mode"] = session.client.get_balance_mode()
+        balance = normalize_balance_value(session.client.get_balance())
+        mode = normalize_mode(session.client.get_balance_mode())
+        currency = session.client.get_currency() or ("BRL" if mode == "REAL" else None)
+        account["balance"] = balance
+        account["currency"] = currency
+        account["mode"] = mode
+        if mode == "REAL":
+            logger.info("[ACCOUNT_REAL_CONNECTED] user_id=%s email=%s", session.user_id, session.email)
+            if balance == 0:
+                account["real_balance_warning"] = "BALANCE_ZERO"
+                logger.info("[BALANCE_ZERO_NOT_DISCONNECTED] user_id=%s mode=REAL", session.user_id)
 
     return account
 
@@ -728,6 +800,7 @@ def connect_session(payload: ConnectRequest, x_user_id: str | None = Header(defa
     user_id = require_user_id(x_user_id)
     payload.account_mode = normalize_mode(payload.account_mode)
     session = session_manager.connect(user_id, payload)
+    session_manager.clear_probe_cache(user_id)
 
     connected = False
     active_mode = None
@@ -749,7 +822,7 @@ def connect_session(payload: ConnectRequest, x_user_id: str | None = Header(defa
 @app.get("/sessions/status")
 def session_status(x_user_id: str | None = Header(default=None)) -> JSONResponse:
     user_id = require_user_id(x_user_id)
-    cached = session_manager.get_cached_probe(user_id, "/sessions/status")
+    cached = session_manager.get_cached_probe(user_id, "/sessions/status", path="/sessions/status")
     if cached is not None:
         status_code, payload = cached
         return JSONResponse(status_code=status_code, content=payload)
@@ -768,7 +841,13 @@ def session_status(x_user_id: str | None = Header(default=None)) -> JSONResponse
 
     try:
         payload = build_success(session_manager.run(user_id, operation))
-        session_manager._mark_probe_success(user_id, "/sessions/status", 200, payload)
+        session_manager._mark_probe_success(
+            user_id,
+            "/sessions/status",
+            200,
+            payload,
+            ttl_seconds=SESSION_STATUS_TTL_SECONDS,
+        )
         return JSONResponse(status_code=200, content=payload)
     except ServiceError as exc:
         if exc.message in {SESSION_NOT_FOUND, SESSION_DISCONNECTED}:
@@ -788,6 +867,7 @@ def sessions_persistence_debug() -> dict[str, Any]:
 def disconnect_session(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
     session_manager.disconnect(user_id)
+    session_manager.clear_probe_cache(user_id)
     return build_success({"user_id": user_id, "connected": False})
 
 
@@ -795,6 +875,7 @@ def disconnect_session(x_user_id: str | None = Header(default=None)) -> dict[str
 def reconnect_session(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
     session_manager.reconnect(user_id)
+    session_manager.clear_probe_cache(user_id)
     return build_success(session_manager.run(user_id, build_account_payload))
 
 
@@ -816,7 +897,7 @@ def account_balance(x_user_id: str | None = Header(default=None)) -> dict[str, A
 @app.get("/account")
 def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
-    cached = session_manager.get_cached_probe(user_id, "/account")
+    cached = session_manager.get_cached_probe(user_id, "/account", path="/account")
     if cached is not None:
         _, payload = cached
         return payload
@@ -831,7 +912,13 @@ def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, 
     try:
         payload = build_success(session_manager.run(user_id, operation))
         if bool((payload.get("data") or {}).get("connected")):
-            session_manager._mark_probe_success(user_id, "/account", 200, payload)
+            session_manager._mark_probe_success(
+                user_id,
+                "/account",
+                200,
+                payload,
+                ttl_seconds=ACCOUNT_TTL_SECONDS,
+            )
         else:
             session_manager._mark_probe_failure(user_id, offline=True)
         return payload
@@ -857,6 +944,7 @@ def account_change_mode(payload: ChangeModeRequest, x_user_id: str | None = Head
             raise ServiceError("falha ao trocar o modo da conta", 409)
         session.desired_mode = active_mode
         session_manager._persist_connected(session)
+        session_manager.clear_probe_cache(user_id)
         return {"mode": active_mode}
 
     return build_success(session_manager.run(user_id, operation))
@@ -865,6 +953,11 @@ def account_change_mode(payload: ChangeModeRequest, x_user_id: str | None = Head
 @app.get("/assets")
 def list_assets(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
+    cache_key = build_cache_key("/assets")
+    cached = session_manager.get_cached_probe(user_id, cache_key, path="/assets")
+    if cached is not None:
+        _, payload = cached
+        return payload
 
     def operation(session: ManagedSession) -> list[dict[str, Any]]:
         ensure_session_ready(session)
@@ -877,7 +970,15 @@ def list_assets(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
             logger.exception("falha ao listar ativos")
             raise ServiceError(SESSION_DISCONNECTED, 409) from exc
 
-    return build_success(session_manager.run(user_id, operation))
+    payload = build_success(session_manager.run(user_id, operation))
+    session_manager._mark_probe_success(
+        user_id,
+        cache_key,
+        200,
+        payload,
+        ttl_seconds=ASSETS_TTL_SECONDS,
+    )
+    return payload
 
 
 @app.get("/candles")
@@ -891,6 +992,14 @@ def get_candles(
     user_id = require_user_id(x_user_id)
     active = ensure_binary_asset_allowed(active)
     resolved_endtime = endtime or int(time.time())
+    cache_key = build_cache_key(
+        "/candles",
+        {"active": active, "interval": interval, "count": count, "endtime": resolved_endtime},
+    )
+    cached = session_manager.get_cached_probe(user_id, cache_key, path="/candles")
+    if cached is not None:
+        _, payload = cached
+        return payload
 
     def operation(session: ManagedSession) -> list[dict[str, Any]]:
         ensure_session_ready(session)
@@ -906,13 +1015,26 @@ def get_candles(
             raise ServiceError(SESSION_DISCONNECTED, 409)
         return normalize_candles(candles)
 
-    return build_success(session_manager.run(user_id, operation))
+    payload = build_success(session_manager.run(user_id, operation))
+    session_manager._mark_probe_success(
+        user_id,
+        cache_key,
+        200,
+        payload,
+        ttl_seconds=CANDLES_TTL_SECONDS,
+    )
+    return payload
 
 
 @app.get("/payouts")
 def get_payouts(active: str | None = None, x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
     active = ensure_binary_asset_allowed(active) if active else None
+    cache_key = build_cache_key("/payouts", {"active": active} if active else None)
+    cached = session_manager.get_cached_probe(user_id, cache_key, path="/payouts")
+    if cached is not None:
+        _, payload = cached
+        return payload
 
     def operation(session: ManagedSession) -> list[dict[str, Any]]:
         ensure_session_ready(session)
@@ -937,7 +1059,15 @@ def get_payouts(active: str | None = None, x_user_id: str | None = Header(defaul
             for symbol in symbols
         ]
 
-    return build_success(session_manager.run(user_id, operation))
+    payload = build_success(session_manager.run(user_id, operation))
+    session_manager._mark_probe_success(
+        user_id,
+        cache_key,
+        200,
+        payload,
+        ttl_seconds=PAYOUT_TTL_SECONDS,
+    )
+    return payload
 
 
 @app.post("/orders/buy-demo")
