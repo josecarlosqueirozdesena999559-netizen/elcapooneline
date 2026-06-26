@@ -3,6 +3,7 @@ import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from threading import BoundedSemaphore, RLock
 from typing import Any
 
@@ -58,6 +59,17 @@ CANDLES_TTL_SECONDS = 2
 SESSION_STATUS_THROTTLE_SECONDS = 5
 SESSION_OFFLINE_TTL_SECONDS = 60
 SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
+LOGIN_TIMEOUT_SECONDS = 60
+LOGIN_RETRY_DELAY_SECONDS = 5
+LOGIN_MAX_ATTEMPTS = 3
+LOGIN_PROGRESS_STATES = (
+    "CONNECTING",
+    "AUTHENTICATING",
+    "OPENING_WEBSOCKET",
+    "LOADING_PROFILE",
+    "LOADING_BALANCE",
+    "READY",
+)
 
 
 class ServiceError(Exception):
@@ -126,10 +138,21 @@ class SessionProbeState:
     last_request_at: dict[str, float] = field(default_factory=dict)
 
 
+@dataclass
+class LoginProgress:
+    state: str = "IDLE"
+    attempt: int = 0
+    max_attempts: int = LOGIN_MAX_ATTEMPTS
+    updated_at: float = 0.0
+    error: str | None = None
+    active: bool = False
+
+
 class SessionManager:
     def __init__(self, store: SessionStore | None = None) -> None:
         self.sessions: dict[str, ManagedSession] = {}
         self._probe_cache: dict[str, SessionProbeState] = {}
+        self._login_progress: dict[str, LoginProgress] = {}
         self.store = store
         self._runtime_lock = RLock()
         self._max_concurrent_api_calls = read_max_concurrent_api_calls()
@@ -147,6 +170,9 @@ class SessionManager:
     def get_probe_state(self, user_id: str) -> SessionProbeState:
         return self._probe_cache.setdefault(user_id, SessionProbeState())
 
+    def get_login_progress(self, user_id: str) -> LoginProgress:
+        return self._login_progress.setdefault(user_id, LoginProgress())
+
     def upsert(self, session: ManagedSession) -> ManagedSession:
         self.sessions[session.user_id] = session
         return session
@@ -158,6 +184,43 @@ class SessionManager:
         probe = self.get_probe_state(user_id)
         probe.responses.clear()
         probe.last_request_at.clear()
+
+    def login_progress_payload(self, user_id: str) -> dict[str, Any]:
+        progress = self.get_login_progress(user_id)
+        return {
+            "state": progress.state,
+            "attempt": progress.attempt,
+            "max_attempts": progress.max_attempts,
+            "updated_at": progress.updated_at,
+            "error": progress.error,
+            "active": progress.active,
+        }
+
+    def _set_login_progress(
+        self,
+        user_id: str,
+        state: str,
+        *,
+        attempt: int,
+        active: bool,
+        error: str | None = None,
+    ) -> None:
+        progress = self.get_login_progress(user_id)
+        progress.state = state
+        progress.attempt = attempt
+        progress.max_attempts = LOGIN_MAX_ATTEMPTS
+        progress.updated_at = time.time()
+        progress.error = error
+        progress.active = active
+
+    def _clear_login_progress(self, user_id: str) -> None:
+        progress = self.get_login_progress(user_id)
+        progress.state = "READY"
+        progress.attempt = 0
+        progress.max_attempts = LOGIN_MAX_ATTEMPTS
+        progress.updated_at = time.time()
+        progress.error = None
+        progress.active = False
 
     def _cache_probe(
         self,
@@ -316,6 +379,87 @@ class SessionManager:
         self._mark_probe_failure(user_id)
         return self._attempt_reconnect(session, dead_reason)
 
+    def _run_with_timeout(self, operation, *, timeout_seconds: int = LOGIN_TIMEOUT_SECONDS):
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(operation)
+            try:
+                return future.result(timeout=timeout_seconds)
+            except FutureTimeoutError as exc:
+                raise TimeoutError(f"operation exceeded {timeout_seconds}s") from exc
+
+    def _wait_until_session_ready(self, session: ManagedSession, *, timeout_seconds: int = LOGIN_TIMEOUT_SECONDS) -> None:
+        deadline = time.time() + timeout_seconds
+        last_error: Exception | None = None
+        while time.time() < deadline:
+            try:
+                if self._is_session_alive(session):
+                    return
+            except Exception as exc:
+                last_error = exc
+            time.sleep(0.5)
+        if last_error is not None:
+            raise TimeoutError(type(last_error).__name__)
+        raise TimeoutError("websocket_not_ready")
+
+    def _populate_ready_state(self, session: ManagedSession, *, user_id: str, attempt: int) -> None:
+        self._set_login_progress(user_id, "OPENING_WEBSOCKET", attempt=attempt, active=True)
+        logger.info("[LOGIN_WS] user_id=%s attempt=%s", user_id, attempt)
+        with self._session_context(session):
+            self._wait_until_session_ready(session)
+            self._set_login_progress(user_id, "LOADING_PROFILE", attempt=attempt, active=True)
+            current_mode = normalize_mode(session.client.get_balance_mode())
+            logger.info("[LOGIN_AUTH] user_id=%s attempt=%s mode=%s", user_id, attempt, current_mode)
+            if session.desired_mode != current_mode:
+                session.client.change_balance(session.desired_mode)
+                current_mode = normalize_mode(session.client.get_balance_mode())
+            if current_mode != session.desired_mode:
+                raise ServiceError("nao foi possivel ativar o modo solicitado", 409)
+            self._set_login_progress(user_id, "LOADING_BALANCE", attempt=attempt, active=True)
+            session.client.get_balance()
+            session.client.get_currency()
+
+    def _connect_with_retries(self, user_id: str, action) -> ManagedSession:
+        last_error: Exception | None = None
+        for attempt in range(1, LOGIN_MAX_ATTEMPTS + 1):
+            self._set_login_progress(user_id, "CONNECTING", attempt=attempt, active=True)
+            if attempt == 1:
+                logger.info("[LOGIN_STARTED] user_id=%s", user_id)
+            else:
+                logger.warning("[LOGIN_RETRY] user_id=%s attempt=%s", user_id, attempt)
+            try:
+                session = action(attempt)
+                self._set_login_progress(user_id, "READY", attempt=attempt, active=False)
+                logger.info("[LOGIN_READY] user_id=%s attempt=%s", user_id, attempt)
+                logger.info("[LOGIN_SUCCESS] user_id=%s attempt=%s", user_id, attempt)
+                return session
+            except TimeoutError as exc:
+                last_error = exc
+                self._set_login_progress(user_id, "CONNECTING", attempt=attempt, active=True, error="LOGIN_TIMEOUT")
+                logger.warning("[LOGIN_TIMEOUT] user_id=%s attempt=%s error=%s", user_id, attempt, exc)
+                if attempt >= LOGIN_MAX_ATTEMPTS:
+                    break
+                time.sleep(LOGIN_RETRY_DELAY_SECONDS)
+            except ServiceError as exc:
+                last_error = exc
+                if "timeout" in str(exc.message).lower() and attempt < LOGIN_MAX_ATTEMPTS:
+                    logger.warning("[LOGIN_TIMEOUT] user_id=%s attempt=%s error=%s", user_id, attempt, exc.message)
+                    logger.warning("[LOGIN_RETRY] user_id=%s attempt=%s", user_id, attempt + 1)
+                    time.sleep(LOGIN_RETRY_DELAY_SECONDS)
+                    continue
+                self._set_login_progress(user_id, "CONNECTING", attempt=attempt, active=False, error=exc.message)
+                logger.warning("[LOGIN_FAILED] user_id=%s attempt=%s error=%s", user_id, attempt, exc.message)
+                raise
+            except Exception as exc:
+                last_error = exc
+                self._set_login_progress(user_id, "CONNECTING", attempt=attempt, active=False, error=type(exc).__name__)
+                logger.warning("[LOGIN_FAILED] user_id=%s attempt=%s error=%s", user_id, attempt, type(exc).__name__)
+                raise ServiceError(type(exc).__name__, 401) from exc
+
+        error_message = "LOGIN_TIMEOUT" if isinstance(last_error, TimeoutError) else type(last_error).__name__ if last_error else "LOGIN_FAILED"
+        self._set_login_progress(user_id, "CONNECTING", attempt=LOGIN_MAX_ATTEMPTS, active=False, error=error_message)
+        logger.warning("[LOGIN_FAILED] user_id=%s attempt=%s error=%s", user_id, LOGIN_MAX_ATTEMPTS, error_message)
+        raise ServiceError(error_message, 504 if error_message == "LOGIN_TIMEOUT" else 401)
+
     def run(self, user_id: str, operation):
         session = self.ensure_session_alive(user_id)
         try:
@@ -338,37 +482,72 @@ class SessionManager:
         probe.offline_until = 0.0
         existing = self.get(user_id)
 
+        if existing is not None and not existing.requires_2fa:
+            try:
+                with self._session_context(existing):
+                    if self._is_session_alive(existing):
+                        target_mode = normalize_mode(payload.account_mode)
+                        if existing.desired_mode != target_mode:
+                            existing.desired_mode = target_mode
+                            self._populate_ready_state(existing, user_id=user_id, attempt=1)
+                            self._persist_connected(existing)
+                        self._set_login_progress(user_id, "READY", attempt=1, active=False)
+                        logger.info("[LOGIN_SUCCESS] user_id=%s attempt=1 reused_session=true", user_id)
+                        return existing
+            except Exception:
+                logger.warning("[SESSION-REUSE-FAILED] %s", user_id, exc_info=True)
+
         if payload.sms_code and existing and not payload.email and not payload.password:
-            session = existing
-            session.sms_code = payload.sms_code
-            session.desired_mode = normalize_mode(payload.account_mode)
-            with self._session_context(session):
-                ok, reason = session.client.connect_2fa(payload.sms_code)
-                self._finalize_connect(session, ok, reason)
-            self._persist_connected(session)
-            return session
+            def connect_existing_2fa(attempt: int) -> ManagedSession:
+                session = existing
+                session.sms_code = payload.sms_code
+                session.desired_mode = normalize_mode(payload.account_mode)
+                self._set_login_progress(user_id, "AUTHENTICATING", attempt=attempt, active=True)
+                logger.info("[LOGIN_AUTH] user_id=%s attempt=%s mode=2FA", user_id, attempt)
+                with self._session_context(session):
+                    ok, reason = self._run_with_timeout(
+                        lambda: session.client.connect_2fa(payload.sms_code),
+                        timeout_seconds=LOGIN_TIMEOUT_SECONDS,
+                    )
+                self._finalize_connect(session, ok, reason, user_id=user_id, attempt=attempt)
+                self._persist_connected(session)
+                return session
+
+            return self._connect_with_retries(user_id, connect_existing_2fa)
 
         if not payload.email or not payload.password:
             raise ServiceError("email e password sao obrigatorios para conectar")
 
-        new_session = ManagedSession(
-            user_id=user_id,
-            client=Bullex(payload.email, payload.password),
-            email=payload.email,
-            password=payload.password,
-            sms_code=payload.sms_code,
-            desired_mode=normalize_mode(payload.account_mode),
-        )
+        desired_mode = normalize_mode(payload.account_mode)
 
-        if existing is not None:
-            self._close_session(existing)
+        def connect_new_session(attempt: int) -> ManagedSession:
+            new_session = ManagedSession(
+                user_id=user_id,
+                client=Bullex(payload.email, payload.password),
+                email=payload.email,
+                password=payload.password,
+                sms_code=payload.sms_code,
+                desired_mode=desired_mode,
+            )
+            if existing is not None and attempt == 1:
+                self._close_session(existing)
+            self.upsert(new_session)
+            self._set_login_progress(user_id, "AUTHENTICATING", attempt=attempt, active=True)
+            logger.info("[LOGIN_AUTH] user_id=%s attempt=%s mode=password", user_id, attempt)
+            try:
+                with self._session_context(new_session):
+                    ok, reason = self._run_with_timeout(
+                        lambda: new_session.client.connect(payload.sms_code),
+                        timeout_seconds=LOGIN_TIMEOUT_SECONDS,
+                    )
+                self._finalize_connect(new_session, ok, reason, user_id=user_id, attempt=attempt)
+                self._persist_connected(new_session)
+                return new_session
+            except Exception:
+                self.remove(user_id)
+                raise
 
-        self.upsert(new_session)
-        with self._session_context(new_session):
-            ok, reason = new_session.client.connect(payload.sms_code)
-            self._finalize_connect(new_session, ok, reason)
-        self._persist_connected(new_session)
-        return new_session
+        return self._connect_with_retries(user_id, connect_new_session)
 
     def disconnect(self, user_id: str) -> str:
         session = self.require(user_id)
@@ -415,40 +594,61 @@ class SessionManager:
     def _attempt_reconnect(self, session: ManagedSession, reason: str) -> ManagedSession:
         user_id = session.user_id
         logger.info("[SESSION-RECONNECT-START] %s", user_id)
-        if not session.email or not session.password:
-            logger.warning("[SESSION-RECONNECT-FAILED] %s missing_credentials", user_id)
-            self._mark_disconnected(user_id, reason)
-
         old_client = session.client
-        new_session = ManagedSession(
-            user_id=user_id,
-            client=Bullex(session.email, session.password),
-            email=session.email,
-            password=session.password,
-            sms_code=session.sms_code,
-            desired_mode=session.desired_mode,
-            requires_2fa=session.requires_2fa,
-        )
 
-        try:
+        def reconnect_attempt(attempt: int) -> ManagedSession:
+            new_session = ManagedSession(
+                user_id=user_id,
+                client=Bullex(session.email, session.password or ""),
+                email=session.email,
+                password=session.password,
+                sms_code=session.sms_code,
+                desired_mode=session.desired_mode,
+                requires_2fa=session.requires_2fa,
+                state=SessionState(SSID=session.state.SSID),
+            )
             try:
                 old_client.api.close()
             except Exception:
                 pass
-            with self._session_context(new_session):
-                ok, connect_reason = new_session.client.connect(new_session.sms_code)
-                self._finalize_connect(new_session, ok, connect_reason)
-        except SESSION_EXCEPTION_TYPES as exc:
-            logger.warning("[SESSION-RECONNECT-FAILED] %s %s", user_id, type(exc).__name__)
-            self._mark_disconnected(user_id, type(exc).__name__)
-        except Exception as exc:
-            logger.warning("[SESSION-RECONNECT-FAILED] %s %s", user_id, exc)
-            self._mark_disconnected(user_id, type(exc).__name__)
 
-        self.upsert(new_session)
-        self._persist_connected(new_session)
-        logger.info("[SESSION-RECONNECT-OK] %s", user_id)
-        return new_session
+            restore_with_ssid = getattr(new_session.client, "restore_with_ssid", None)
+            if new_session.state.SSID and callable(restore_with_ssid):
+                self._set_login_progress(user_id, "AUTHENTICATING", attempt=attempt, active=True)
+                logger.info("[LOGIN_AUTH] user_id=%s attempt=%s mode=ssid_restore", user_id, attempt)
+                with self._session_context(new_session):
+                    ok, connect_reason = self._run_with_timeout(
+                        lambda: restore_with_ssid(str(new_session.state.SSID)),
+                        timeout_seconds=LOGIN_TIMEOUT_SECONDS,
+                    )
+                self._finalize_connect(new_session, ok, connect_reason, user_id=user_id, attempt=attempt)
+                self.upsert(new_session)
+                self._persist_connected(new_session)
+                logger.info("[SESSION-RECONNECT-OK] %s restored_ssid=true", user_id)
+                return new_session
+
+            if not session.email or not session.password:
+                logger.warning("[SESSION-RECONNECT-FAILED] %s missing_credentials", user_id)
+                self._mark_disconnected(user_id, reason)
+
+            self._set_login_progress(user_id, "AUTHENTICATING", attempt=attempt, active=True)
+            logger.info("[LOGIN_AUTH] user_id=%s attempt=%s mode=password", user_id, attempt)
+            with self._session_context(new_session):
+                ok, connect_reason = self._run_with_timeout(
+                    lambda: new_session.client.connect(new_session.sms_code),
+                    timeout_seconds=LOGIN_TIMEOUT_SECONDS,
+                )
+            self._finalize_connect(new_session, ok, connect_reason, user_id=user_id, attempt=attempt)
+            self.upsert(new_session)
+            self._persist_connected(new_session)
+            logger.info("[SESSION-RECONNECT-OK] %s restored_ssid=false", user_id)
+            return new_session
+
+        try:
+            return self._connect_with_retries(user_id, reconnect_attempt)
+        except ServiceError as exc:
+            logger.warning("[SESSION-RECONNECT-FAILED] %s %s", user_id, exc.message)
+            self._mark_disconnected(user_id, exc.message)
 
     def restore_sessions(self) -> None:
         if self.store is None:
@@ -478,8 +678,9 @@ class SessionManager:
                 with self._session_context(session):
                     ok, reason = restore_with_ssid(persisted.session_token)
                     restore_failure_reason = str(reason or "restore_rejected")
-                    self._finalize_connect(session, ok, reason)
+                    self._finalize_connect(session, ok, reason, user_id=session.user_id, attempt=1)
                 self._persist_connected(session)
+                self._clear_login_progress(session.user_id)
                 logger.info("[SESSION_RESTORE] user_id=%s status=success", session.user_id)
             except Exception as exc:
                 self.remove(session.user_id)
@@ -525,15 +726,18 @@ class SessionManager:
             str(token),
         )
 
-    def _finalize_connect(self, session: ManagedSession, ok: bool, reason: Any) -> None:
+    def _finalize_connect(
+        self,
+        session: ManagedSession,
+        ok: bool,
+        reason: Any,
+        *,
+        user_id: str,
+        attempt: int,
+    ) -> None:
         if ok:
             session.requires_2fa = False
-            current_mode = session.client.get_balance_mode()
-            if session.desired_mode != current_mode:
-                session.client.change_balance(session.desired_mode)
-                current_mode = session.client.get_balance_mode()
-            if current_mode != session.desired_mode:
-                raise ServiceError("nao foi possivel ativar o modo solicitado", 409)
+            self._populate_ready_state(session, user_id=user_id, attempt=attempt)
             return
 
         session.requires_2fa = reason == "2FA"
@@ -620,6 +824,13 @@ def build_success(data: Any) -> dict[str, Any]:
 
 def build_error(message: str) -> dict[str, Any]:
     return {"ok": False, "data": None, "error": message}
+
+
+def with_login_progress(payload: dict[str, Any], user_id: str) -> dict[str, Any]:
+    data = payload.get("data")
+    if isinstance(data, dict):
+        data["login_progress"] = session_manager.login_progress_payload(user_id)
+    return payload
 
 
 def require_user_id(x_user_id: str | None) -> str:
@@ -809,14 +1020,14 @@ def connect_session(payload: ConnectRequest, x_user_id: str | None = Header(defa
             active_mode = session.client.get_balance_mode()
         connected = True
 
-    return build_success(
+    return with_login_progress(build_success(
         {
             "user_id": user_id,
             "connected": connected,
             "requires_2fa": session.requires_2fa,
             "active_mode": active_mode,
         }
-    )
+    ), user_id)
 
 
 @app.get("/sessions/status")
@@ -825,7 +1036,7 @@ def session_status(x_user_id: str | None = Header(default=None)) -> JSONResponse
     cached = session_manager.get_cached_probe(user_id, "/sessions/status", path="/sessions/status")
     if cached is not None:
         status_code, payload = cached
-        return JSONResponse(status_code=status_code, content=payload)
+        return JSONResponse(status_code=status_code, content=with_login_progress(payload, user_id))
 
     def operation(current: ManagedSession) -> dict[str, Any]:
         connected = bool(current.client.check_connect())
@@ -840,7 +1051,7 @@ def session_status(x_user_id: str | None = Header(default=None)) -> JSONResponse
         }
 
     try:
-        payload = build_success(session_manager.run(user_id, operation))
+        payload = with_login_progress(build_success(session_manager.run(user_id, operation)), user_id)
         session_manager._mark_probe_success(
             user_id,
             "/sessions/status",
@@ -854,7 +1065,7 @@ def session_status(x_user_id: str | None = Header(default=None)) -> JSONResponse
             status_code = 404 if exc.message == SESSION_NOT_FOUND else 409
             payload = {"ok": False, "data": {"connected": False}, "error": exc.message}
             session_manager._mark_probe_failure(user_id, offline=True)
-            return JSONResponse(status_code=status_code, content=payload)
+            return JSONResponse(status_code=status_code, content=with_login_progress(payload, user_id))
         raise
 
 
@@ -876,7 +1087,7 @@ def reconnect_session(x_user_id: str | None = Header(default=None)) -> dict[str,
     user_id = require_user_id(x_user_id)
     session_manager.reconnect(user_id)
     session_manager.clear_probe_cache(user_id)
-    return build_success(session_manager.run(user_id, build_account_payload))
+    return with_login_progress(build_success(session_manager.run(user_id, build_account_payload)), user_id)
 
 
 @app.get("/account/balance")
@@ -900,9 +1111,9 @@ def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, 
     cached = session_manager.get_cached_probe(user_id, "/account", path="/account")
     if cached is not None:
         _, payload = cached
-        return payload
+        return with_login_progress(payload, user_id)
     if session_manager.get(user_id) is None:
-        payload = build_success({"connected": False})
+        payload = with_login_progress(build_success({"connected": False}), user_id)
         session_manager._mark_probe_failure(user_id, offline=True)
         return payload
 
@@ -910,7 +1121,7 @@ def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, 
         return build_account_payload(session)
 
     try:
-        payload = build_success(session_manager.run(user_id, operation))
+        payload = with_login_progress(build_success(session_manager.run(user_id, operation)), user_id)
         if bool((payload.get("data") or {}).get("connected")):
             session_manager._mark_probe_success(
                 user_id,
@@ -925,7 +1136,7 @@ def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, 
     except ServiceError as exc:
         if exc.message in {SESSION_NOT_FOUND, SESSION_DISCONNECTED}:
             session_manager._mark_probe_failure(user_id, offline=True)
-            return build_success({"connected": False})
+            return with_login_progress(build_success({"connected": False}), user_id)
         raise
 
 

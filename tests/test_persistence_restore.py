@@ -152,6 +152,96 @@ class SessionPersistenceTests(unittest.TestCase):
                 "\n".join(logs.output),
             )
 
+    def test_session_manager_reuses_existing_valid_session_without_new_login(self) -> None:
+        manager = bullex_main.SessionManager(None)
+        existing_client = SimpleNamespace(
+            check_connect=lambda: True,
+            websocket_alive=lambda: True,
+            get_balance_mode=lambda: "PRACTICE",
+            get_balance=lambda: 100.0,
+            get_currency=lambda: "USD",
+        )
+        existing = bullex_main.ManagedSession(
+            user_id="user-reuse",
+            client=existing_client,
+            email="user@example.com",
+            password="secret",
+            desired_mode="PRACTICE",
+        )
+        manager.upsert(existing)
+
+        with patch.object(bullex_main, "Bullex", side_effect=AssertionError("should not create new session")):
+            session = manager.connect(
+                "user-reuse",
+                bullex_main.ConnectRequest(email="user@example.com", password="secret", account_mode="PRACTICE"),
+            )
+
+        self.assertIs(session, existing)
+        self.assertEqual(manager.login_progress_payload("user-reuse")["state"], "READY")
+
+    def test_session_manager_retries_login_after_timeout(self) -> None:
+        first_client = SimpleNamespace(api=SimpleNamespace(close=Mock()))
+        second_client = SimpleNamespace(
+            get_balance_mode=lambda: "PRACTICE",
+            get_balance=lambda: 100.0,
+            get_currency=lambda: "USD",
+            check_connect=lambda: True,
+            websocket_alive=lambda: True,
+            connect=Mock(return_value=(True, None)),
+        )
+        manager = bullex_main.SessionManager(None)
+        attempts = {"count": 0}
+
+        def fake_run(operation, *, timeout_seconds=60):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise TimeoutError("slow login")
+            return operation()
+
+        with (
+            patch.object(bullex_main, "Bullex", side_effect=[first_client, second_client]),
+            patch.object(manager, "_session_context", side_effect=lambda session: _FakeContext(session)),
+            patch.object(manager, "_run_with_timeout", side_effect=fake_run),
+            patch.object(bullex_main.time, "sleep"),
+        ):
+            session = manager.connect(
+                "user-timeout",
+                bullex_main.ConnectRequest(email="user@example.com", password="secret", account_mode="PRACTICE"),
+            )
+
+        self.assertIs(session.client, second_client)
+        self.assertEqual(manager.login_progress_payload("user-timeout")["state"], "READY")
+        second_client.connect.assert_called_once()
+
+    def test_session_manager_reconnects_with_ssid_without_password(self) -> None:
+        manager = bullex_main.SessionManager(None)
+        old_client = SimpleNamespace(api=SimpleNamespace(close=Mock()))
+        session = bullex_main.ManagedSession(
+            user_id="user-ssid",
+            client=old_client,
+            email="user@example.com",
+            password=None,
+            desired_mode="PRACTICE",
+            state=bullex_main.SessionState(SSID="persisted-ssid"),
+        )
+        fake_client = SimpleNamespace(
+            restore_with_ssid=Mock(return_value=(True, None)),
+            get_balance_mode=lambda: "PRACTICE",
+            get_balance=lambda: 50.0,
+            get_currency=lambda: "USD",
+            check_connect=lambda: True,
+            websocket_alive=lambda: True,
+        )
+
+        with (
+            patch.object(bullex_main, "Bullex", return_value=fake_client),
+            patch.object(manager, "_session_context", side_effect=lambda current: _FakeContext(current)),
+        ):
+            restored = manager._attempt_reconnect(session, "SESSION_EXPIRED")
+
+        self.assertIs(restored.client, fake_client)
+        fake_client.restore_with_ssid.assert_called_once_with("persisted-ssid")
+
     def test_session_persistence_debug_does_not_expose_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SessionStore(str(Path(directory) / "sessions.db"), "test-secret")
