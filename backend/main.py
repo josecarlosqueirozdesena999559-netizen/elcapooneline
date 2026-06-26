@@ -25,9 +25,12 @@ from backend.auto_trader import (
     STATUS_ORDER_REJECTED,
     STATUS_PENDING_GALE_RESULT,
     STATUS_PENDING_RESULT,
+    STATUS_SIGNAL_EXPIRED,
     STATUS_SENDING_GALE_ORDER,
     STATUS_PAYOUT_COOLDOWN,
     STATUS_SENDING_ORDER,
+    STATUS_STOP_LOSS_HIT,
+    STATUS_STOP_WIN_HIT,
     STATUS_WAITING_GALE_ENTRY,
     STATUS_WAITING_RECOVERY,
     STATUS_WAITING_ANALYSIS_WINDOW,
@@ -1768,14 +1771,30 @@ def robot_stop_reason(state: Any) -> str | None:
     if state.operation_in_progress:
         return "OPERATION_IN_PROGRESS"
     if state.stop_win > 0 and state.profit >= state.stop_win:
-        return "STOP_WIN_HIT"
+        return STATUS_STOP_WIN_HIT
     if state.stop_loss > 0 and state.profit <= -state.stop_loss:
-        return "STOP_LOSS_HIT"
+        return STATUS_STOP_LOSS_HIT
     return None
+
+
+async def pause_robot_by_stop(user_id: str, reason: str) -> Any:
+    state = auto_trader.pause_by_stop(user_id, reason)
+    if reason == STATUS_STOP_WIN_HIT:
+        logger.warning("[STOP_WIN_HIT] user_id=%s profit=%s", user_id, state.profit)
+    else:
+        logger.warning("[STOP_LOSS_HIT] user_id=%s profit=%s", user_id, state.profit)
+    logger.warning("[ROBOT_PAUSED_BY_STOP] user_id=%s reason=%s", user_id, reason)
+    persist_robot(user_id)
+    await stop_robot_worker(user_id)
+    return state
 
 
 def robot_connection_unavailable(connected: bool, active_mode: str | None) -> bool:
     return not connected or active_mode is None
+
+
+def is_stop_status(status: Any) -> bool:
+    return str(status or "").strip().upper() in {STATUS_STOP_WIN_HIT, STATUS_STOP_LOSS_HIT}
 
 
 def get_user_account_snapshot(user_id: str | None) -> dict[str, Any]:
@@ -1828,6 +1847,11 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         data["pending_signal"] = None
         data["last_signal"] = None
         data["last_trade"] = None
+    if is_stop_status(data.get("status")):
+        data["enabled"] = False
+        data["worker_running"] = False
+        data["operation_in_progress"] = False
+        data["result_waiting"] = False
     if data.get("operation_in_progress"):
         logger.info(
             "[EXPIRATION_COUNTDOWN] status=%s order_id=%s expiration_seconds=%s result_waiting=%s",
@@ -2630,6 +2654,7 @@ async def fetch_trade_result(user_id: str, order_id: str) -> tuple[int, dict[str
 
 
 async def finish_monitored_trade(user_id: str, order_id: str, result: str, profit: float) -> None:
+    should_pause_worker = False
     async with auto_trader.lock(user_id):
         finalized, state = auto_trader.finish_trade(user_id, order_id, result, profit)
         if not finalized and state.gale_pending:
@@ -2760,7 +2785,16 @@ async def finish_monitored_trade(user_id: str, order_id: str, result: str, profi
                 )
             elif result == "LOSS" and not state.martingale_enabled:
                 logger.info("[GALE_DISABLED_LOSS_FINAL] user_id=%s order_id=%s", user_id, order_id)
+            if state.status in {STATUS_STOP_WIN_HIT, STATUS_STOP_LOSS_HIT}:
+                should_pause_worker = True
+                if state.status == STATUS_STOP_WIN_HIT:
+                    logger.warning("[STOP_WIN_HIT] user_id=%s profit=%s", user_id, state.profit)
+                else:
+                    logger.warning("[STOP_LOSS_HIT] user_id=%s profit=%s", user_id, state.profit)
+                logger.warning("[ROBOT_PAUSED_BY_STOP] user_id=%s reason=%s", user_id, state.status)
         persist_robot(user_id)
+    if should_pause_worker:
+        await stop_robot_worker(user_id)
 
 
 async def timeout_monitored_trade(user_id: str, order_id: str) -> None:
@@ -2811,12 +2845,15 @@ async def execute_robot_cycle(
 
             active_stop_reason = daily_stop_reason(user_id, state) or robot_stop_reason(state)
             if active_stop_reason is not None:
-                if active_stop_reason.startswith("DAILY_STOP"):
-                    state.enabled = False
-                    logger.warning("[DAILY_STOP_HIT] user_id=%s reason=%s", user_id, active_stop_reason)
-                state = auto_trader.reject(user_id, active_stop_reason)
-                logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=%s", user_id, active_stop_reason)
-                return 200, build_robot_payload(state)
+                if active_stop_reason in {STATUS_STOP_WIN_HIT, STATUS_STOP_LOSS_HIT}:
+                    state = await pause_robot_by_stop(user_id, active_stop_reason)
+                else:
+                    if active_stop_reason.startswith("DAILY_STOP"):
+                        state.enabled = False
+                        logger.warning("[DAILY_STOP_HIT] user_id=%s reason=%s", user_id, active_stop_reason)
+                    state = auto_trader.reject(user_id, active_stop_reason)
+                    logger.info("[ROBOT SIGNAL REJECTED] user_id=%s reason=%s", user_id, active_stop_reason)
+                return 200, build_robot_payload(state, user_id=user_id)
 
             if required_mode is not None and state.account_mode != required_mode:
                 return 409, build_error(f"ACCOUNT_MODE_NOT_{required_mode}")
@@ -2943,6 +2980,14 @@ async def execute_robot_cycle(
                 if selected.get("fallback_candidate_used"):
                     state.fallback_candidate_used = True
                 selected = dict(state.pending_signal or {})
+                logger.info(
+                    "[SIGNAL_PREPARED] user_id=%s cycle_id=%s symbol=%s direction=%s seconds_until_entry=%s",
+                    user_id,
+                    state.cycle_id,
+                    selected.get("symbol"),
+                    selected.get("signal") or selected.get("direction"),
+                    state.seconds_until_entry_window,
+                )
             if selected is None and False:
                 if not entry_window["analysis_window_open"]:
                     state = auto_trader.wait_analysis_window(user_id, entry_window)
@@ -3237,6 +3282,14 @@ async def execute_robot_cycle(
                 state = auto_trader.set_pending_signal(user_id, selected)
                 selected = dict(state.pending_signal or {})
                 logger.info(
+                    "[SIGNAL_PREPARED] user_id=%s cycle_id=%s symbol=%s direction=%s seconds_until_entry=%s",
+                    user_id,
+                    state.cycle_id,
+                    selected.get("symbol"),
+                    selected.get("signal") or selected.get("direction"),
+                    state.seconds_until_entry_window,
+                )
+                logger.info(
                     "[CYCLE_FINISHED_SIGNAL_LOCKED] user_id=%s symbol=%s signal=%s confidence=%s "
                     "payout=%s timeframe=%s",
                     user_id,
@@ -3249,8 +3302,8 @@ async def execute_robot_cycle(
 
             if selected is not None and not entry_window["entry_window_open"]:
                 if entry_window["missed_entry_window"]:
-                    logger.info(
-                        "[MISSED_NEXT_CANDLE_ENTRY_WINDOW] user_id=%s symbol=%s server_time=%s "
+                    logger.warning(
+                        "[ENTRY_WINDOW_MISSED] user_id=%s symbol=%s server_time=%s "
                         "timeframe=%s current_candle_seconds=%s window_end=%s",
                         user_id,
                         selected.get("symbol"),
@@ -3259,6 +3312,17 @@ async def execute_robot_cycle(
                         entry_window["current_candle_seconds"],
                         entry_window["entry_window_end_second"],
                     )
+                    state = auto_trader.expire_pending_signal(
+                        user_id,
+                        reason="ENTRY_WINDOW_MISSED",
+                        wait_seconds=5,
+                    )
+                    logger.warning(
+                        "[SIGNAL_EXPIRED] user_id=%s cycle_id=%s reason=ENTRY_WINDOW_MISSED",
+                        user_id,
+                        state.cycle_id,
+                    )
+                    return 200, build_robot_payload(state, user_id=user_id)
                 waiting_log = "[WAITING_GALE_ENTRY]" if state.gale_pending else "[WAITING_NEXT_CANDLE_ENTRY]"
                 logger.info(
                     "%s user_id=%s symbol=%s server_time=%s timeframe=%s current_candle_seconds=%s "
@@ -3284,6 +3348,13 @@ async def execute_robot_cycle(
                 )
                 return 200, build_robot_payload(state)
 
+            logger.info(
+                "[ENTRY_COUNTDOWN_ZERO] user_id=%s cycle_id=%s symbol=%s current_candle_seconds=%s",
+                user_id,
+                state.cycle_id,
+                selected.get("symbol") if isinstance(selected, dict) else None,
+                entry_window["current_candle_seconds"],
+            )
             logger.info(
                 "[NEXT_CANDLE_ENTRY_WINDOW_OPEN] user_id=%s server_time=%s timeframe=%s "
                 "seconds_in_candle=%s window_start=%s window_end=%s buy_target_second=%s",
@@ -3330,7 +3401,34 @@ async def execute_robot_cycle(
                 if state.order_attempts >= MAX_ORDER_ATTEMPTS_PER_CYCLE:
                     break
                 validation_reason = candidate_pre_order_block_reason(candidate)
+                if validation_reason is None:
+                    payout = candidate.get("payout")
+                    try:
+                        payout_value = float(payout) if payout is not None else None
+                    except (TypeError, ValueError):
+                        payout_value = None
+                    if payout_value is not None and payout_value < float(state.min_payout):
+                        validation_reason = "PAYOUT_TOO_LOW"
+                stop_reason = daily_stop_reason(user_id, state) or robot_stop_reason(state)
+                if stop_reason in {STATUS_STOP_WIN_HIT, STATUS_STOP_LOSS_HIT}:
+                    state = await pause_robot_by_stop(user_id, stop_reason)
+                    return 200, build_robot_payload(state)
                 if validation_reason is not None:
+                    if validation_reason == "PAYOUT_TOO_LOW":
+                        state = auto_trader.reject_strategy(
+                            user_id,
+                            "SIGNAL_REJECTED",
+                            last_rejection_reason="PAYOUT_TOO_LOW",
+                            blocked_filters=["PAYOUT_TOO_LOW"],
+                        )
+                        state.last_order_error = "PAYOUT_TOO_LOW"
+                        state.pending_signal = None
+                        logger.warning(
+                            "[SIGNAL_REJECTED] user_id=%s symbol=%s reason=PAYOUT_TOO_LOW",
+                            user_id,
+                            candidate.get("symbol"),
+                        )
+                        return 200, build_robot_payload(state, user_id=user_id)
                     skipped_candidates += 1
                     logger.warning(
                         "[ORDER_FALLBACK_NEXT_CANDIDATE] user_id=%s skipped_active=%s reason=%s attempts=%s",
@@ -4321,6 +4419,8 @@ async def robot_settings(
 async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     user_id = auth["user_id"]
     state = get_user_robot_state(user_id)
+    if is_stop_status(state.status):
+        return json_response(409, build_error("RESET_CYCLE_REQUIRED"))
     if fresh_robot_connection(state) and state.connected and state.active_mode is not None:
         connected = True
         active_mode = state.active_mode
@@ -4403,6 +4503,7 @@ async def robot_reset_cycle(
         state = auto_trader.reset_cycle(user_id, reset_score=True, reset_daily_profit=True)
         persist_robot(user_id)
     await stop_robot_worker(user_id)
+    logger.info("[RESET_CYCLE] user_id=%s cycle_id=%s", user_id, state.cycle_id)
     logger.info(
         "[ROBOT_RESET_SCORE] user_id=%s wins=%s losses=%s profit=%s",
         user_id,

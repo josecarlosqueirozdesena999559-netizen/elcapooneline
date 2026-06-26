@@ -15,6 +15,7 @@ from backend.auto_trader import (
     STATUS_RESULT_RECEIVED,
     STATUS_SENDING_GALE_ORDER,
     STATUS_SENDING_ORDER,
+    STATUS_SIGNAL_EXPIRED,
     STATUS_STOPPED,
     STATUS_WAITING_GALE_ENTRY,
     STATUS_WAITING_NEXT_CYCLE,
@@ -165,6 +166,17 @@ class AutoTraderStateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "ROBOT_STOPPED"):
             trader.start_sending_order("user-disabled-send")
+
+    def test_signal_expired_waits_before_releasing_cycle(self) -> None:
+        trader = AutoTrader()
+        state = trader.start("user-signal-expired")
+        state.status = STATUS_SIGNAL_EXPIRED
+        state.next_cycle_at = utc_now() + timedelta(seconds=5)
+
+        can_run, waiting = trader.prepare_cycle("user-signal-expired")
+
+        self.assertFalse(can_run)
+        self.assertEqual(waiting.status, STATUS_SIGNAL_EXPIRED)
 
     def test_stopped_robot_finishes_trade_without_triggering_gale(self) -> None:
         trader = AutoTrader()
@@ -2659,6 +2671,108 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             await main.robot_worker(user_id)
 
         execute_cycle.assert_not_called()
+
+    async def test_execute_robot_cycle_pauses_on_stop_win(self) -> None:
+        user_id = "user-stop-win"
+        state = main.auto_trader.start(user_id)
+        state.connected = True
+        state.active_mode = "PRACTICE"
+        state.stop_win = 10
+        state.profit = 10
+
+        with (
+            patch.object(main, "persist_robot"),
+            patch.object(main, "stop_robot_worker", new=AsyncMock()) as stop_worker,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "STOP_WIN_HIT")
+        self.assertFalse(data["enabled"])
+        self.assertFalse(data["worker_running"])
+        stop_worker.assert_awaited_once_with(user_id)
+
+    async def test_execute_robot_cycle_pauses_on_stop_loss(self) -> None:
+        user_id = "user-stop-loss"
+        state = main.auto_trader.start(user_id)
+        state.connected = True
+        state.active_mode = "PRACTICE"
+        state.stop_loss = 10
+        state.profit = -10
+
+        with (
+            patch.object(main, "persist_robot"),
+            patch.object(main, "stop_robot_worker", new=AsyncMock()) as stop_worker,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "STOP_LOSS_HIT")
+        self.assertFalse(data["enabled"])
+        self.assertFalse(data["worker_running"])
+        stop_worker.assert_awaited_once_with(user_id)
+
+    async def test_execute_robot_cycle_expires_missed_pending_signal(self) -> None:
+        user_id = "user-expired-entry"
+        state = main.auto_trader.start(user_id)
+        state.connected = True
+        state.active_mode = "PRACTICE"
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "direction": "CALL",
+                "confidence": 92,
+                "payout": 88,
+                "strategy_score": 90,
+            },
+        )
+        entry_window = {
+            "server_timestamp": 125.0,
+            "server_time": "2026-06-26T12:00:00+00:00",
+            "server_time_source": "bullex",
+            "timeframe": "M1",
+            "analysis_window_open": False,
+            "seconds_until_analysis_window": 1,
+            "analysis_window_start_second": 5,
+            "analysis_window_end_second": 20,
+            "entry_window_open": False,
+            "missed_entry_window": True,
+            "seconds_until_entry_window": 55,
+            "current_candle_seconds": 5.0,
+            "entry_window_start_second": 0,
+            "entry_window_end_second": 3,
+            "buy_target_second": 0,
+            "seconds_until_close": 55.0,
+            "expiration_seconds": 60,
+            "expiration": "M1",
+            "expiration_minutes": 1,
+        }
+
+        with (
+            patch.object(
+                main,
+                "refresh_entry_window",
+                new=AsyncMock(return_value=(200, main.build_success({"connected": True, "active_mode": "PRACTICE"}), entry_window)),
+            ),
+            patch.object(
+                main,
+                "reconcile_robot_connection_from_payload",
+                new=AsyncMock(return_value=(state, True, "PRACTICE", "bullex_service")),
+            ),
+            patch.object(main, "persist_robot"),
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "SIGNAL_EXPIRED")
+        self.assertEqual(data["operation_message"], "Entrada perdida por atraso. Aguardando novo sinal.")
+        self.assertEqual(data["last_order_error"], "ENTRY_WINDOW_MISSED")
+        self.assertIsNone(data["pending_signal"])
 
     async def test_robot_state_requires_allow_real_for_real_readiness(self) -> None:
         user_id = "user-real-allow-required"

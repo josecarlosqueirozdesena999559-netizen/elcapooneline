@@ -39,6 +39,9 @@ STATUS_REAL_TRADING_LOCKED = "REAL_TRADING_LOCKED"
 STATUS_WAITING_NEXT_CANDLE_ENTRY = "WAITING_NEXT_CANDLE_ENTRY"
 STATUS_WAITING_ENTRY_WINDOW = STATUS_WAITING_NEXT_CANDLE_ENTRY
 STATUS_WAITING_ANALYSIS_WINDOW = "WAITING_ANALYSIS_WINDOW"
+STATUS_SIGNAL_EXPIRED = "SIGNAL_EXPIRED"
+STATUS_STOP_WIN_HIT = "STOP_WIN_HIT"
+STATUS_STOP_LOSS_HIT = "STOP_LOSS_HIT"
 STATUS_ACCOUNT_DISCONNECTED = "DISCONNECTED"
 STATUS_SYNCING = "SYNCING"
 STATUS_SYNCING_PT = "SINCRONIZANDO"
@@ -56,12 +59,16 @@ TEMPORARY_WAIT_STATUSES = {
     STATUS_WAITING_RECOVERY,
     STATUS_ACTIVE_COOLDOWN,
     STATUS_PAYOUT_COOLDOWN,
+    STATUS_SIGNAL_EXPIRED,
 }
 
 TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800}
 RESULT_WAITING_MESSAGE = "Aguardando resultado..."
 ANALYSIS_MESSAGE = "Analisando mercado..."
 DISCONNECTED_MESSAGE = "Conta BullEx desconectada"
+STOP_WIN_MESSAGE = "Stop Win atingido. Clique em Reiniciar ciclo para continuar."
+STOP_LOSS_MESSAGE = "Stop Loss atingido. Clique em Reiniciar ciclo para continuar."
+SIGNAL_EXPIRED_MESSAGE = "Entrada perdida por atraso. Aguardando novo sinal."
 ANALYSIS_TIMEOUT_SECONDS = 10
 SYNC_TIMEOUT_SECONDS = 30
 ANALYSIS_TIMEOUT_MESSAGE = "Análise demorou demais, aguardando próxima vela."
@@ -266,6 +273,11 @@ class RobotState:
             self.rejection_reason = None
             data["status"] = self.status
             data["rejection_reason"] = None
+        if self.status == STATUS_SIGNAL_EXPIRED and self.next_cycle_at is not None and now >= self.next_cycle_at:
+            self.status = STATUS_WAITING_NEXT_CYCLE if self.enabled else STATUS_STOPPED
+            self.rejection_reason = None
+            data["status"] = self.status
+            data["rejection_reason"] = None
         if data["status"] == STATUS_WAITING_NEXT_CYCLE and data.get("analysis_result") == "RUNNING":
             data["analysis_result"] = self.analysis_result = None
             data["last_analysis_result"] = self.last_analysis_result = None
@@ -346,6 +358,20 @@ class RobotState:
             data["pending_signal"] = None
             data["last_signal"] = None
             data["last_trade"] = None
+        elif self.status == STATUS_STOP_WIN_HIT:
+            data["enabled"] = False
+            data["operation_in_progress"] = False
+            data["result_waiting"] = False
+            data["operation_message"] = STOP_WIN_MESSAGE
+        elif self.status == STATUS_STOP_LOSS_HIT:
+            data["enabled"] = False
+            data["operation_in_progress"] = False
+            data["result_waiting"] = False
+            data["operation_message"] = STOP_LOSS_MESSAGE
+        elif self.status == STATUS_SIGNAL_EXPIRED:
+            data["operation_message"] = SIGNAL_EXPIRED_MESSAGE
+        elif self.status == STATUS_SIGNAL_REJECTED and self.last_order_error == "PAYOUT_TOO_LOW":
+            data["operation_message"] = "Entrada bloqueada: payout abaixo do minimo."
         if self.status == STATUS_ANALYZING:
             data["last_analysis_result"] = "RUNNING"
             data["analysis_result"] = "RUNNING"
@@ -360,6 +386,9 @@ class RobotState:
             display_countdown_seconds = max(0, int(data["seconds_until_entry_window"]))
         elif data["status"] in TEMPORARY_WAIT_STATUSES:
             display_countdown_label = "Recuperando em"
+            display_countdown_seconds = max(0, int(data["seconds_until_next_cycle"]))
+        elif data["status"] == STATUS_SIGNAL_EXPIRED:
+            display_countdown_label = "Novo sinal em"
             display_countdown_seconds = max(0, int(data["seconds_until_next_cycle"]))
         data["display_countdown_label"] = display_countdown_label
         data["display_countdown_seconds"] = display_countdown_seconds
@@ -730,7 +759,8 @@ class AutoTrader:
         state = self.get(user_id)
         now = utc_now()
         if not state.enabled:
-            state.status = STATUS_STOPPED
+            if state.status not in {STATUS_STOP_WIN_HIT, STATUS_STOP_LOSS_HIT}:
+                state.status = STATUS_STOPPED
             return False, state
         if state.status in TEMPORARY_WAIT_STATUSES:
             if state.next_cycle_at is not None and now < state.next_cycle_at:
@@ -1202,6 +1232,27 @@ class AutoTrader:
         state.cycle_best_trade_candidate = None
         return state
 
+    def pause_by_stop(self, user_id: str, reason: str) -> RobotState:
+        state = self.get(user_id)
+        state.enabled = False
+        state.status = reason
+        state.rejection_reason = None
+        state.last_rejection_reason = reason
+        state.analysis_message = None
+        state.operation_in_progress = False
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        state.analysis_window_open = False
+        state.seconds_until_analysis_window = 0
+        state.pending_signal = None
+        state.next_cycle_at = None
+        if reason == STATUS_STOP_WIN_HIT:
+            state.last_order_error = STATUS_STOP_WIN_HIT
+        elif reason == STATUS_STOP_LOSS_HIT:
+            state.last_order_error = STATUS_STOP_LOSS_HIT
+        self._clear_gale_state(state)
+        return state
+
     def reset_cycle(
         self,
         user_id: str,
@@ -1228,6 +1279,7 @@ class AutoTrader:
         state.analysis_message = None
         state.last_order_error = None
         state.operation_in_progress = False
+        state.sync_started_at = None
         state.analysis_window_open = False
         state.seconds_until_analysis_window = 0
         state.entry_window_open = False
@@ -1264,6 +1316,29 @@ class AutoTrader:
             state.stop_reset_at = now
 
         self._sources[user_id] = "memory"
+        return state
+
+    def expire_pending_signal(
+        self,
+        user_id: str,
+        *,
+        reason: str = "ENTRY_WINDOW_MISSED",
+        wait_seconds: int = 5,
+    ) -> RobotState:
+        state = self.get(user_id)
+        now = utc_now()
+        state.status = STATUS_SIGNAL_EXPIRED
+        state.rejection_reason = STATUS_SIGNAL_EXPIRED
+        state.last_rejection_reason = STATUS_SIGNAL_EXPIRED
+        state.last_order_error = reason
+        state.pending_signal = None
+        state.last_signal = None
+        state.operation_in_progress = False
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        state.next_cycle_at = now + timedelta(seconds=max(1, int(wait_seconds)))
+        state.analysis_message = None
+        self._clear_gale_state(state)
         return state
 
     def disconnect_account(self, user_id: str) -> RobotState:
@@ -1618,6 +1693,19 @@ class AutoTrader:
 
         trade = dict(state.last_trade)
         is_gale_trade = bool(trade.get("is_gale"))
+        amount = float(trade.get("amount") or 0)
+        projected_trade_profit = float(profit)
+        if normalized_result == "WIN":
+            projected_trade_profit = projected_trade_profit if projected_trade_profit > 0 else amount
+        else:
+            projected_trade_profit = projected_trade_profit if projected_trade_profit < 0 else -amount
+        projected_cycle_profit = projected_trade_profit
+        if is_gale_trade:
+            projected_cycle_profit = round(
+                float((state.gale_parent_trade or {}).get("profit") or 0) + projected_trade_profit,
+                2,
+            )
+        projected_total_profit = round(float(state.profit) + projected_cycle_profit, 2)
         should_trigger_gale = (
             normalized_result == "LOSS"
             and state.enabled
@@ -1625,6 +1713,7 @@ class AutoTrader:
             and state.martingale_enabled
             and int(state.martingale_steps or 1) >= 1
             and not state.gale_active
+            and not (state.stop_loss > 0 and projected_total_profit <= -state.stop_loss)
         )
         if should_trigger_gale:
             triggered, triggered_state = self.trigger_gale(user_id, normalized_order_id, profit)
@@ -1632,7 +1721,6 @@ class AutoTrader:
                 return False, triggered_state
             return False, state
 
-        amount = float(trade.get("amount") or 0)
         trade_profit = float(profit)
         if normalized_result == "WIN":
             trade_profit = trade_profit if trade_profit > 0 else amount
@@ -1683,6 +1771,11 @@ class AutoTrader:
         state.next_cycle_at = None
         state.profit = round(state.profit, 2)
         self._clear_gale_state(state, preserve_context=True)
+        if state.enabled:
+            if state.stop_win > 0 and state.profit >= state.stop_win:
+                state = self.pause_by_stop(user_id, STATUS_STOP_WIN_HIT)
+            elif state.stop_loss > 0 and state.profit <= -state.stop_loss:
+                state = self.pause_by_stop(user_id, STATUS_STOP_LOSS_HIT)
         history = self._histories.setdefault(user_id, [])
         history.append(dict(trade))
         del history[:-100]

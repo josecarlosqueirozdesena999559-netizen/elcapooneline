@@ -62,11 +62,17 @@ class RobotResetCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed.losses, 0)
         self.assertEqual(refreshed.profit, 0.0)
         self.assertIsNone(refreshed.last_trade)
+        self.assertIsNone(refreshed.pending_signal)
+        self.assertFalse(refreshed.gale_pending)
+        self.assertFalse(refreshed.gale_active)
+        self.assertFalse(refreshed.operation_in_progress)
         self.assertNotEqual(refreshed.cycle_id, previous_cycle_id)
         self.assertIsNone(refreshed.current_cycle_started_at)
         self.assertIsNone(refreshed.next_cycle_at)
         self.assertEqual(payload["status"], "STOPPED")
         self.assertFalse(payload["worker_running"])
+        self.assertFalse(payload["operation_in_progress"])
+        self.assertFalse(payload["result_waiting"])
         stop_worker.assert_awaited_once_with(user_id)
 
     async def test_reset_cycle_with_reset_score_clears_score_and_history(self) -> None:
@@ -172,3 +178,15 @@ class RobotResetCycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["entry_value"], 5)
+
+    async def test_robot_start_requires_reset_cycle_after_stop_hit(self) -> None:
+        user_id = "user-stop-blocked-start"
+        state = main.auto_trader.get(user_id)
+        state.status = "STOP_WIN_HIT"
+
+        response = await main.robot_start({"user_id": user_id})
+        payload = json.loads(response.body)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "RESET_CYCLE_REQUIRED")
