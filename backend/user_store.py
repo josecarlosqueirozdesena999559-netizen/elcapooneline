@@ -62,6 +62,10 @@ class UserStore(ABC):
     def save_market_asset_payout(self, user_id: str, symbol: str, payout: int | float | None) -> None:
         raise NotImplementedError
 
+    @abstractmethod
+    def get_market_assets_snapshot(self, user_id: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
     def connection_upsert_diagnostic(
         self,
         user_id: str,
@@ -133,6 +137,10 @@ class InMemoryUserStore(UserStore):
             "updated_at": now,
         }
         logger.info("MARKET_ASSET_PAYOUT_UPDATED %s %s %s", user_id, symbol, payout)
+
+    def get_market_assets_snapshot(self, user_id: str) -> list[dict[str, Any]]:
+        assets = self.market_assets.get(user_id, {})
+        return [dict(asset) for _, asset in sorted(assets.items())]
 
     def _upsert(self, user_id: str, payload: dict[str, Any]) -> BullExUserRecord:
         record = self.users.get(user_id) or BullExUserRecord(user_id=user_id)
@@ -229,6 +237,18 @@ class SupabaseUserStore(UserStore):
             extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
         )
         logger.info("MARKET_ASSET_PAYOUT_UPDATED %s %s %s", user_id, symbol, payout)
+
+    def get_market_assets_snapshot(self, user_id: str) -> list[dict[str, Any]]:
+        self._ensure_user_row(user_id)
+        rows = self._request(
+            "GET",
+            (
+                f"/market_assets?user_id=eq.{quote(user_id, safe='')}"
+                "&select=user_id,active_id,symbol,name,enabled,payout,last_seen_at,updated_at"
+                "&order=symbol.asc"
+            ),
+        )
+        return [row for row in rows if isinstance(row, dict)]
 
     def _ensure_user_row(self, user_id: str) -> None:
         body = {"id": user_id}

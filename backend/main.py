@@ -56,15 +56,18 @@ logger = logging.getLogger("backend-gateway")
 CORS_ALLOWED_ORIGINS_DEFAULT = (
     "https://www.elcapobot.online,"
     "https://elcapobot.online,"
+    "http://localhost:3000,"
     "http://localhost:5173,"
     "http://localhost:5174"
 )
 CORS_ALLOWED_METHODS = ["GET", "POST", "OPTIONS"]
 CORS_ALLOWED_HEADERS = [
-    "Content-Type",
-    "Authorization",
+    "content-type",
+    "authorization",
     "x-api-key",
     "x-user-id",
+    "Content-Type",
+    "Authorization",
     "X-Api-Key",
     "X-User-Id",
 ]
@@ -173,6 +176,7 @@ SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
 SESSION_CACHEABLE_PATHS = {"/sessions/status", "/account"}
 ACCOUNT_CACHE_TTL_SECONDS = 10
 ASSETS_CACHE_TTL_SECONDS = 300
+ASSETS_RETRY_BACKOFF_SECONDS = (10, 30, 60)
 PAYOUT_CACHE_TTL_SECONDS = 60
 CANDLES_CACHE_TTL_SECONDS = 2
 ACTIVE_COOLDOWN_SECONDS = 300
@@ -354,6 +358,8 @@ class BullexUserSessionCache:
     next_retry_at: datetime | None = None
     offline_until: datetime | None = None
     last_request_at: dict[str, datetime] = field(default_factory=dict)
+    assets_failure_count: int = 0
+    assets_next_retry_at: datetime | None = None
 
 
 session_response_cache: dict[str, BullexUserSessionCache] = {}
@@ -466,6 +472,103 @@ def request_cache_ttl_seconds(path: str, params: dict[str, Any] | None = None) -
     return None
 
 
+def normalize_allowed_assets_list(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, list):
+        return []
+    return [
+        asset
+        for asset in payload
+        if isinstance(asset, dict) and is_binary_asset_allowed(str(asset.get("symbol") or ""))
+    ]
+
+
+def build_assets_payload(
+    assets: list[dict[str, Any]],
+    *,
+    source: str,
+    stale: bool,
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "data": assets,
+        "error": None,
+        "meta": {
+            "source": source,
+            "syncing": stale,
+            "stale": stale,
+        },
+    }
+
+
+def get_cached_response_entry(user_id: str, cache_key: str) -> BullexResponseCacheEntry | None:
+    return get_session_cache(user_id).responses.get(cache_key)
+
+
+def get_assets_cache_entry(user_id: str) -> BullexResponseCacheEntry | None:
+    return get_cached_response_entry(user_id, "/assets")
+
+
+def get_cached_assets_payload(user_id: str) -> dict[str, Any] | None:
+    cached = get_assets_cache_entry(user_id)
+    if cached is None:
+        return None
+    assets = normalize_allowed_assets_list(cached.payload.get("data"))
+    if not assets:
+        return None
+    return build_assets_payload(assets, source="cache", stale=True)
+
+
+def get_snapshot_assets_payload(user_id: str) -> dict[str, Any] | None:
+    try:
+        assets = normalize_allowed_assets_list(user_store.get_market_assets_snapshot(user_id))
+    except Exception:
+        logger.exception("falha ao carregar snapshot de market_assets para %s", user_id)
+        return None
+    if not assets:
+        return None
+    return build_assets_payload(assets, source="snapshot", stale=True)
+
+
+def clear_assets_backoff(user_id: str) -> None:
+    cache = get_session_cache(user_id)
+    cache.assets_failure_count = 0
+    cache.assets_next_retry_at = None
+
+
+def schedule_assets_retry(user_id: str) -> int:
+    cache = get_session_cache(user_id)
+    cache.assets_failure_count += 1
+    index = min(cache.assets_failure_count - 1, len(ASSETS_RETRY_BACKOFF_SECONDS) - 1)
+    retry_seconds = ASSETS_RETRY_BACKOFF_SECONDS[index]
+    cache.assets_next_retry_at = utc_now() + timedelta(seconds=retry_seconds)
+    return retry_seconds
+
+
+def assets_retry_remaining(user_id: str) -> float | None:
+    retry_at = get_session_cache(user_id).assets_next_retry_at
+    if retry_at is None:
+        return None
+    remaining = (retry_at - utc_now()).total_seconds()
+    return remaining if remaining > 0 else None
+
+
+def account_still_connected(user_id: str) -> bool:
+    if bool(getattr(auto_trader.get(user_id), "connected", False)):
+        return True
+    return get_user_account_snapshot(user_id).get("connected") is True
+
+
+def log_ignored_disconnect(user_id: str, path: str, payload: dict[str, Any]) -> None:
+    if not is_session_disconnected(payload):
+        return
+    logger.warning(
+        "[DISCONNECT_IGNORED_NON_SESSION_ERROR] user_id=%s path=%s error=%s",
+        user_id,
+        path,
+        payload.get("error"),
+    )
+
+
 def build_cache_key(path: str, params: dict[str, Any] | None = None) -> str:
     if not params:
         return path
@@ -569,6 +672,21 @@ app.add_middleware(
     allow_methods=CORS_ALLOWED_METHODS,
     allow_headers=CORS_ALLOWED_HEADERS,
 )
+
+
+@app.middleware("http")
+async def log_cors_allowed_origin(request: Request, call_next):
+    origin = str(request.headers.get("origin") or "").strip()
+    if origin and origin in config.cors_origins:
+        logger.info(
+            "[CORS_ALLOWED_ORIGIN] origin=%s method=%s path=%s",
+            origin,
+            request.method,
+            request.url.path,
+        )
+    return await call_next(request)
+
+
 user_store: UserStore = create_user_store()
 auto_trader = AutoTrader()
 robot_persistence: RobotPersistence = create_robot_persistence()
@@ -2189,7 +2307,7 @@ async def analyze_active_signal(
         user_id,
         params=candle_params,
     )
-    mark_disconnected_from_payload(user_id, payload)
+    log_ignored_disconnect(user_id, "/candles", payload)
     if not payload.get("ok"):
         if is_session_disconnected(payload):
             return 409, build_error(SESSION_DISCONNECTED)
@@ -2201,7 +2319,7 @@ async def analyze_active_signal(
         user_id,
         params={"active": symbol},
     )
-    mark_disconnected_from_payload(user_id, payout_payload)
+    log_ignored_disconnect(user_id, "/payouts", payout_payload)
     payout = extract_payout(payout_payload, symbol) if payout_payload.get("ok") else None
     if payout is None and payout_status >= 400:
         set_named_cooldown(
@@ -2364,7 +2482,7 @@ async def select_fallback_candidate(
                 user_id,
                 params={"active": symbol},
             )
-            mark_disconnected_from_payload(user_id, payout_payload)
+            log_ignored_disconnect(user_id, "/payouts", payout_payload)
             payout = (
                 extract_payout(payout_payload, symbol)
                 if payout_status < 400 and payout_payload.get("ok")
@@ -2395,7 +2513,7 @@ async def select_fallback_candidate(
                 user_id,
                 params=candle_params,
             )
-            mark_disconnected_from_payload(user_id, candle_payload)
+            log_ignored_disconnect(user_id, "/candles", candle_payload)
             candles = extract_candles(candle_payload) if candle_status < 400 else []
             if not candles:
                 continue
@@ -2519,7 +2637,7 @@ async def update_cycle_analysis(
                 user_id,
                 params={"active": symbol},
             )
-            mark_disconnected_from_payload(user_id, payout_payload)
+            log_ignored_disconnect(user_id, "/payouts", payout_payload)
             payout = (
                 extract_payout(payout_payload, symbol)
                 if payout_status < 400 and payout_payload.get("ok")
@@ -3089,7 +3207,7 @@ async def execute_robot_cycle(
                             user_id,
                             params={"active": symbol},
                         )
-                        mark_disconnected_from_payload(user_id, payout_payload)
+                        log_ignored_disconnect(user_id, "/payouts", payout_payload)
                         payout = (
                             extract_payout(payout_payload, symbol)
                             if payout_status < 400 and payout_payload.get("ok")
@@ -4741,20 +4859,61 @@ async def bullex_change_mode(
 
 @app.get("/bullex/assets")
 async def bullex_assets(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    status_code, payload = await call_bullex_service("GET", "/assets", auth["user_id"])
-    mark_disconnected_from_payload(auth["user_id"], payload)
+    user_id = auth["user_id"]
+    retry_remaining = assets_retry_remaining(user_id)
+    if retry_remaining is not None:
+        cached_payload = get_cached_assets_payload(user_id) or get_snapshot_assets_payload(user_id)
+        if cached_payload is not None:
+            logger.info(
+                "[ASSETS_CACHE_HIT] user_id=%s source=%s retry_in=%.2f",
+                user_id,
+                ((cached_payload.get("meta") or {}).get("source") or "cache"),
+                retry_remaining,
+            )
+            return json_response(200, cached_payload)
+
+    status_code, payload = await call_bullex_service("GET", "/assets", user_id)
+    log_ignored_disconnect(user_id, "/assets", payload)
     if payload.get("ok") and isinstance(payload.get("data"), list):
-        allowed_assets = [
-            asset
-            for asset in payload["data"]
-            if isinstance(asset, dict) and is_binary_asset_allowed(str(asset.get("symbol") or ""))
-        ]
-        payload["data"] = allowed_assets
+        allowed_assets = normalize_allowed_assets_list(payload.get("data"))
+        clear_assets_backoff(user_id)
+        payload = build_assets_payload(allowed_assets, source="bullex_service", stale=False)
+        get_session_cache(user_id).responses["/assets"] = BullexResponseCacheEntry(
+            status_code=200,
+            payload=payload,
+            expires_at=utc_now() + timedelta(seconds=ASSETS_CACHE_TTL_SECONDS),
+        )
         try:
-            user_store.save_market_assets_snapshot(auth["user_id"], allowed_assets)
+            user_store.save_market_assets_snapshot(user_id, allowed_assets)
         except Exception:
-            logger.exception("falha ao salvar snapshot de market_assets para %s", auth["user_id"])
-    return json_response(status_code, payload)
+            logger.exception("falha ao salvar snapshot de market_assets para %s", user_id)
+        return json_response(200, payload)
+
+    retry_seconds = schedule_assets_retry(user_id)
+    cached_payload = get_cached_assets_payload(user_id) or get_snapshot_assets_payload(user_id)
+    if cached_payload is not None:
+        if account_still_connected(user_id):
+            logger.info("[ACCOUNT_STILL_CONNECTED] user_id=%s source=assets_failure", user_id)
+        logger.warning(
+            "[ASSETS_FETCH_FAILED_USING_CACHE] user_id=%s retry_in=%ss error=%s",
+            user_id,
+            retry_seconds,
+            payload.get("error"),
+        )
+        return json_response(200, cached_payload)
+
+    if account_still_connected(user_id):
+        logger.info("[ACCOUNT_STILL_CONNECTED] user_id=%s source=assets_failure_no_cache", user_id)
+    logger.warning(
+        "[ASSETS_FETCH_FAILED_USING_CACHE] user_id=%s retry_in=%ss error=%s source=empty_fallback",
+        user_id,
+        retry_seconds,
+        payload.get("error"),
+    )
+    return json_response(
+        200,
+        build_assets_payload([], source="empty_fallback", stale=True),
+    )
 
 
 @app.get("/bullex/candles")
@@ -4775,7 +4934,7 @@ async def bullex_candles(
     resolved_limit = max(1, min(int(limit or count or 60), 500))
 
     status_code, session_payload = await call_bullex_service("GET", "/sessions/status", auth["user_id"])
-    mark_disconnected_from_payload(auth["user_id"], session_payload)
+    log_ignored_disconnect(auth["user_id"], "/sessions/status", session_payload)
     if not session_payload.get("ok"):
         return json_response(status_code, session_payload)
     server_timestamp = extract_server_timestamp(session_payload) or utc_now().timestamp()
@@ -4789,7 +4948,7 @@ async def bullex_candles(
     if endtime is not None:
         params["endtime"] = endtime
     status_code, payload = await call_bullex_service("GET", "/candles", auth["user_id"], params=params)
-    mark_disconnected_from_payload(auth["user_id"], payload)
+    log_ignored_disconnect(auth["user_id"], "/candles", payload)
     if not payload.get("ok"):
         return json_response(status_code, payload)
     live_payload = build_live_candles_payload(
@@ -4851,7 +5010,7 @@ async def bullex_payouts(
     active = normalize_binary_active(active) if active is not None else None
     params = {"active": active} if active is not None else None
     status_code, payload = await call_bullex_service("GET", "/payouts", auth["user_id"], params=params)
-    mark_disconnected_from_payload(auth["user_id"], payload)
+    log_ignored_disconnect(auth["user_id"], "/payouts", payload)
     if payload.get("ok") and active and isinstance(payload.get("data"), list):
         payout_item = next(
             (
@@ -4946,8 +5105,28 @@ async def bullex_reconnect(auth: dict[str, str] = Depends(require_headers)) -> J
 
 @app.get("/bullex/account")
 async def bullex_account(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    status_code, payload = await call_bullex_service("GET", "/account", auth["user_id"])
-    sync_user_store_from_payload(auth["user_id"], payload)
+    user_id = auth["user_id"]
+    status_code, payload = await call_bullex_service("GET", "/account", user_id)
+    sync_user_store_from_payload(user_id, payload)
+    if payload.get("ok") and payload_connected_state(payload) is not False:
+        return json_response(status_code, payload)
+    if account_still_connected(user_id):
+        logger.info("[ACCOUNT_STILL_CONNECTED] user_id=%s source=account_false_negative", user_id)
+        snapshot = get_user_account_snapshot(user_id)
+        active_mode = auto_trader.get(user_id).active_mode or snapshot.get("mode")
+        return json_response(
+            200,
+            build_success(
+                {
+                    "connected": True,
+                    "active_mode": active_mode,
+                    "mode": active_mode,
+                    "balance": snapshot.get("balance"),
+                    "currency": snapshot.get("currency"),
+                    "email": snapshot.get("email"),
+                }
+            ),
+        )
     if status_code == 404 or is_session_disconnected(payload) or payload_connected_state(payload) is False:
         return json_response(200, build_success({"connected": False}))
     return json_response(status_code, payload)

@@ -362,6 +362,7 @@ class RobotHistoryCorsTests(unittest.TestCase):
             [
                 "https://www.elcapobot.online",
                 "https://elcapobot.online",
+                "http://localhost:3000",
                 "http://localhost:5173",
                 "http://localhost:5174",
             ],

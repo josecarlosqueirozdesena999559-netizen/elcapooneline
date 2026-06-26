@@ -1,5 +1,6 @@
 import json
 import unittest
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -44,6 +45,9 @@ class FailingUserStore:
 
     update_connection = save_connection
     disconnect = save_connection
+
+    def get_market_assets_snapshot(self, *_args, **_kwargs):
+        return []
 
     def connection_upsert_diagnostic(self, user_id, payload=None):
         return {
@@ -293,3 +297,113 @@ class EndpointResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["table"], "bullex_connections")
         self.assertEqual(body["payload"]["user_id"], "user-debug")
         self.assertIn("connected", body["fields"])
+
+
+class MarketDataResilienceTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.old_store = main.user_store
+        self.old_trader = main.auto_trader
+        main.user_store = main.create_user_store()
+        main.auto_trader = AutoTrader()
+        main.session_response_cache.clear()
+        main.robot_tasks.clear()
+
+    def tearDown(self) -> None:
+        main.user_store = self.old_store
+        main.auto_trader = self.old_trader
+        main.session_response_cache.clear()
+        main.robot_tasks.clear()
+
+    async def test_bullex_assets_returns_stale_cache_on_failure(self) -> None:
+        user_id = "user-assets-cache"
+        state = main.auto_trader.start(user_id)
+        state.connected = True
+        state.active_mode = "PRACTICE"
+        cached_assets = [{"symbol": "EURUSD-OTC", "name": "EURUSD-OTC", "enabled": True, "payout": 91}]
+        main.get_session_cache(user_id).responses["/assets"] = main.BullexResponseCacheEntry(
+            status_code=200,
+            payload=main.build_assets_payload(cached_assets, source="bullex_service", stale=False),
+            expires_at=main.utc_now() - timedelta(seconds=1),
+        )
+
+        with patch.object(
+            main,
+            "call_bullex_service",
+            new=AsyncMock(return_value=(502, main.build_error("BULLEX_SERVICE_UNAVAILABLE"))),
+        ):
+            response = await main.bullex_assets({"user_id": user_id})
+
+        body = json.loads(response.body)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["data"], cached_assets)
+        self.assertEqual(body["meta"]["source"], "cache")
+        self.assertTrue(body["meta"]["syncing"])
+        self.assertEqual(main.get_session_cache(user_id).assets_failure_count, 1)
+        self.assertTrue(main.auto_trader.get(user_id).connected)
+
+    async def test_bullex_assets_honors_backoff_and_uses_cache_without_refetch(self) -> None:
+        user_id = "user-assets-backoff"
+        cached_assets = [{"symbol": "GBPUSD-OTC", "name": "GBPUSD-OTC", "enabled": True}]
+        cache = main.get_session_cache(user_id)
+        cache.responses["/assets"] = main.BullexResponseCacheEntry(
+            status_code=200,
+            payload=main.build_assets_payload(cached_assets, source="bullex_service", stale=False),
+            expires_at=main.utc_now() - timedelta(seconds=1),
+        )
+        cache.assets_next_retry_at = main.utc_now() + timedelta(seconds=10)
+
+        with patch.object(main, "call_bullex_service", new=AsyncMock()) as service_call:
+            response = await main.bullex_assets({"user_id": user_id})
+
+        body = json.loads(response.body)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["data"], cached_assets)
+        self.assertEqual(body["meta"]["source"], "cache")
+        service_call.assert_not_awaited()
+
+    async def test_bullex_payouts_does_not_mark_connected_user_as_disconnected(self) -> None:
+        user_id = "user-payout-stable"
+        main.user_store.save_connection(user_id, {"connected": True, "account_mode": "PRACTICE"})
+
+        with patch.object(
+            main,
+            "call_bullex_service",
+            new=AsyncMock(return_value=(409, {"ok": False, "data": {"connected": False}, "error": "SESSION_DISCONNECTED"})),
+        ):
+            response = await main.bullex_payouts(active="EURUSD-OTC", auth={"user_id": user_id})
+
+        body = json.loads(response.body)
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(body["ok"])
+        self.assertTrue(main.user_store.get_user(user_id).connected)
+
+    async def test_bullex_account_keeps_connected_snapshot_on_false_negative(self) -> None:
+        user_id = "user-account-stable"
+        main.user_store.save_connection(
+            user_id,
+            {
+                "connected": True,
+                "account_mode": "PRACTICE",
+                "currency": "USD",
+                "last_balance": 42.5,
+                "bullex_email": "user@example.com",
+            },
+        )
+        state = main.auto_trader.start(user_id)
+        state.connected = True
+        state.active_mode = "PRACTICE"
+
+        with patch.object(
+            main,
+            "call_bullex_service",
+            new=AsyncMock(return_value=(409, {"ok": False, "data": {"connected": False}, "error": "SESSION_DISCONNECTED"})),
+        ):
+            response = await main.bullex_account({"user_id": user_id})
+
+        body = json.loads(response.body)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["data"]["connected"])
+        self.assertEqual(body["data"]["active_mode"], "PRACTICE")
+        self.assertEqual(body["data"]["balance"], 42.5)
