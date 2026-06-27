@@ -54,22 +54,17 @@ from backend.user_store import UserStore, create_user_store
 logger = logging.getLogger("backend-gateway")
 
 CORS_ALLOWED_ORIGINS_DEFAULT = (
-    "https://www.elcapobot.online,"
     "https://elcapobot.online,"
-    "http://localhost:3000,"
+    "https://www.elcapobot.online,"
     "http://localhost:5173,"
-    "http://localhost:5174"
+    "http://localhost:3000"
 )
 CORS_ALLOWED_METHODS = ["GET", "POST", "OPTIONS"]
 CORS_ALLOWED_HEADERS = [
-    "content-type",
-    "authorization",
     "x-api-key",
     "x-user-id",
-    "Content-Type",
-    "Authorization",
-    "X-Api-Key",
-    "X-User-Id",
+    "content-type",
+    "authorization",
 ]
 ROBOT_CONFIG_DEFAULTS = {
     "account_mode": "DEMO",

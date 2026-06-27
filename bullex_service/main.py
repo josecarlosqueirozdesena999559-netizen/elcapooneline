@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -20,6 +21,20 @@ from websocket._exceptions import WebSocketConnectionClosedException
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bullex-service")
+
+CORS_ALLOWED_ORIGINS_DEFAULT = (
+    "https://elcapobot.online,"
+    "https://www.elcapobot.online,"
+    "http://localhost:5173,"
+    "http://localhost:3000"
+)
+CORS_ALLOWED_METHODS = ["GET", "POST", "OPTIONS"]
+CORS_ALLOWED_HEADERS = [
+    "x-api-key",
+    "x-user-id",
+    "content-type",
+    "authorization",
+]
 
 ALLOWED_BALANCE_MODES = {"PRACTICE", "REAL", "TOURNAMENT"}
 ALLOWED_ACTIONS = {"call", "put"}
@@ -963,7 +978,20 @@ def read_digital_payout(client: Bullex, active: str) -> int | float | None:
     return payout if payout else None
 
 
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", CORS_ALLOWED_ORIGINS_DEFAULT).split(",")
+    if origin.strip()
+]
+
 app = FastAPI(title="bullex-service", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=CORS_ALLOWED_METHODS,
+    allow_headers=CORS_ALLOWED_HEADERS,
+)
 session_manager = SessionManager(create_session_store())
 
 

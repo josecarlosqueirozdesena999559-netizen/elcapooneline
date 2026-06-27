@@ -360,11 +360,10 @@ class RobotHistoryCorsTests(unittest.TestCase):
         self.assertEqual(
             middleware.kwargs["allow_origins"],
             [
-                "https://www.elcapobot.online",
                 "https://elcapobot.online",
-                "http://localhost:3000",
+                "https://www.elcapobot.online",
                 "http://localhost:5173",
-                "http://localhost:5174",
+                "http://localhost:3000",
             ],
         )
         self.assertEqual(middleware.kwargs["allow_methods"], ["GET", "POST", "OPTIONS"])
@@ -389,6 +388,38 @@ class RobotHistoryCorsTests(unittest.TestCase):
         allow_headers = response.headers.get("access-control-allow-headers", "").lower()
         self.assertIn("x-api-key", allow_headers)
         self.assertIn("x-user-id", allow_headers)
+
+    def test_options_bullex_routes_returns_cors_headers_for_apex_origin(self) -> None:
+        for path, method in (
+            ("/bullex/account", "GET"),
+            ("/bullex/connect", "POST"),
+        ):
+            with self.subTest(path=path):
+                response = self.client.options(
+                    path,
+                    headers={
+                        "Origin": "https://elcapobot.online",
+                        "Access-Control-Request-Method": method,
+                        "Access-Control-Request-Headers": (
+                            "x-api-key,x-user-id,content-type,authorization"
+                        ),
+                    },
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.headers.get("access-control-allow-origin"),
+                    "https://elcapobot.online",
+                )
+                self.assertIn(
+                    method,
+                    response.headers.get("access-control-allow-methods", ""),
+                )
+                allow_headers = response.headers.get(
+                    "access-control-allow-headers", ""
+                ).lower()
+                for header in main.CORS_ALLOWED_HEADERS:
+                    self.assertIn(header, allow_headers)
 
     def test_options_robot_history_returns_cors_headers_for_www_origin(self) -> None:
         response = self.client.options(

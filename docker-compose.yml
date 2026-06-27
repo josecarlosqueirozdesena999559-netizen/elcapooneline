@@ -6,7 +6,7 @@ services:
     container_name: backend-gateway
     environment:
       BULLEX_SERVICE_URL: "http://bullex-service:8000"
-      CORS_ORIGINS: "http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174"
+      CORS_ORIGINS: "https://elcapobot.online,https://www.elcapobot.online,http://localhost:5173,http://localhost:3000"
       PANEL_API_KEY: "${PANEL_API_KEY:-change-me}"
       SUPABASE_URL: "${SUPABASE_URL:-}"
       SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY:-}"
@@ -28,6 +28,7 @@ services:
       dockerfile: Dockerfile
     container_name: bullex-service
     environment:
+      CORS_ORIGINS: "https://elcapobot.online,https://www.elcapobot.online,http://localhost:5173,http://localhost:3000"
       BULLEX_MAX_CONCURRENT_API_CALLS: "1"
       BULLEX_SESSION_DB_PATH: "/data/bullex-sessions.db"
       BULLEX_SESSION_ENCRYPTION_KEY: "${BULLEX_SESSION_ENCRYPTION_KEY:-}"
