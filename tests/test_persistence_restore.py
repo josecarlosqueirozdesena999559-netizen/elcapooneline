@@ -645,7 +645,7 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_has_no_user_restore_handler(self) -> None:
         from backend import main
 
-        self.assertEqual(main.app.router.on_startup, [])
+        self.assertEqual(len(main.app.router.on_startup), 1)
         self.assertNotIn("restore_robot_states", vars(main))
 
     async def test_empty_startup_does_not_load_users_or_create_workers(self) -> None:
@@ -663,14 +663,22 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
         main.robot_tasks = {}
         main.restorable_robot_states.clear()
         try:
-            for handler in main.app.router.on_startup:
-                result = handler()
-                if asyncio.iscoroutine(result):
-                    await result
+            with self.assertLogs("backend-gateway", level="INFO") as logs:
+                for handler in main.app.router.on_startup:
+                    result = handler()
+                    if asyncio.iscoroutine(result):
+                        await result
 
             persistence.load_states.assert_not_called()
             self.assertEqual(main.robot_tasks, {})
             self.assertEqual(main.restorable_robot_states, {})
+            output = "\n".join(logs.output)
+            self.assertIn("[STARTUP_RESTORE_DISABLED]", output)
+            self.assertIn("[ON_DEMAND_RESTORE_ONLY]", output)
+            self.assertIn("[STARTUP_READY]", output)
+            self.assertNotIn("[USER_BACKOFF_ACTIVE]", output)
+            self.assertNotIn("[SESSION_CHECK_SKIPPED]", output)
+            self.assertNotIn("[ROBOT_WORKER_BLOCKED_DISCONNECTED]", output)
         finally:
             main.auto_trader = old_trader
             main.robot_persistence = old_persistence

@@ -2291,10 +2291,11 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(body["robot"]["connected"])
         self.assertEqual(body["robot"]["active_mode"], "PRACTICE")
         persist.assert_called_once_with(user_id)
-        worker.assert_called_once_with(user_id)
+        worker.assert_not_called()
         output = "\n".join(logs.output)
         self.assertIn("[BULLEX_CONNECTED]", output)
         self.assertIn("[ROBOT_CONNECTION_SYNCED]", output)
+        self.assertIn("[ON_DEMAND_RESTORE_ONLY]", output)
 
     async def test_robot_state_uses_fresh_connection_without_waiting_bullex_poll(self) -> None:
         user_id = "user-fresh-connection-state"
@@ -2341,7 +2342,12 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["connection_failure_count"], 0)
         self.assertEqual(data["connection_status_source"], "bullex_service")
         self.assertEqual(data["status"], STATUS_WAITING_NEXT_CYCLE)
-        service_call.assert_awaited_once_with("GET", "/sessions/status", user_id)
+        service_call.assert_awaited_once_with(
+            "GET",
+            "/sessions/status",
+            user_id,
+            allow_session_restore=True,
+        )
         ensure_worker.assert_called_once_with(user_id)
 
     async def test_robot_start_returns_error_when_bullex_is_disconnected(self) -> None:
@@ -2362,7 +2368,12 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["error"], "BULLEX_NOT_CONNECTED")
         self.assertEqual(state.status, STATUS_ACCOUNT_DISCONNECTED)
         self.assertFalse(state.enabled)
-        service_call.assert_awaited_once_with("GET", "/sessions/status", user_id)
+        service_call.assert_any_await(
+            "GET",
+            "/sessions/status",
+            user_id,
+            allow_session_restore=True,
+        )
         ensure_worker.assert_not_called()
 
     async def test_robot_sync_connection_endpoint_returns_connection_fields(self) -> None:

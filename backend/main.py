@@ -2689,7 +2689,7 @@ def get_user_robot_state(user_id: str) -> Any:
                 source=robot_persistence_source(),
             )
             robot_state_hydrated_users.add(user_id)
-            logger.info("[SESSION_RESTORE_ON_DEMAND] user_id=%s component=robot_state", user_id)
+            logger.info("[USER_STATE_LOADED_NO_WORKER] user_id=%s source=%s", user_id, robot_persistence_source())
             return state
         if settings is not None:
             state = auto_trader.get(user_id)
@@ -2699,6 +2699,7 @@ def get_user_robot_state(user_id: str) -> Any:
             state.enabled = False
             auto_trader.mark_source(user_id, robot_persistence_source())
             robot_state_hydrated_users.add(user_id)
+            logger.info("[USER_STATE_LOADED_NO_WORKER] user_id=%s source=%s", user_id, robot_persistence_source())
             return state
     except Exception:
         logger.exception("[ROBOT USER LOAD ERROR] user_id=%s", user_id)
@@ -4497,6 +4498,13 @@ async def read_restored_session_status(user_id: str) -> bool:
     return False
 
 
+@app.on_event("startup")
+async def startup_no_user_restore() -> None:
+    logger.info("[STARTUP_RESTORE_DISABLED] no user restore on startup")
+    logger.info("[ON_DEMAND_RESTORE_ONLY] robot restore requires user action")
+    logger.info("[STARTUP_READY] no user restore on startup")
+
+
 @app.on_event("shutdown")
 async def shutdown_robot_workers() -> None:
     for user_id in list(robot_tasks):
@@ -5259,7 +5267,7 @@ async def _bullex_connect_impl(
             active_mode,
         )
         if state.enabled:
-            ensure_robot_worker(user_id)
+            logger.info("[ON_DEMAND_RESTORE_ONLY] user_id=%s worker_start=/robot/start", user_id)
         data = payload.get("data")
         if isinstance(data, dict):
             data["robot"] = build_robot_payload(
