@@ -1158,10 +1158,12 @@ async def call_bullex_service(
     user_id: str,
     json_body: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
+    *,
+    allow_session_restore: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     cache_key = build_cache_key(path, params)
     ttl_seconds = request_cache_ttl_seconds(path, params)
-    if method == "GET" and ttl_seconds is not None:
+    if method == "GET" and ttl_seconds is not None and not allow_session_restore:
         cache = get_session_cache(user_id)
         cached = cache.responses.get(cache_key)
         now = utc_now()
@@ -1230,6 +1232,8 @@ async def call_bullex_service(
             return 200, backoff_payload(user_id, remaining)
 
     headers = {"x-user-id": user_id}
+    if allow_session_restore:
+        headers["x-allow-session-restore"] = "true"
     url = f"{config.bullex_service_url}{path}"
     timeout_seconds = (
         BULLEX_CONNECT_TIMEOUT_SECONDS
@@ -1670,8 +1674,17 @@ async def reconcile_robot_connection_from_payload(
     return state, connected, active_mode, resolved_source
 
 
-async def fetch_and_sync_robot_connection(user_id: str) -> tuple[int, dict[str, Any], Any, bool, str | None, str]:
-    status_code, payload = await call_bullex_service("GET", "/sessions/status", user_id)
+async def fetch_and_sync_robot_connection(
+    user_id: str,
+    *,
+    allow_session_restore: bool = False,
+) -> tuple[int, dict[str, Any], Any, bool, str | None, str]:
+    status_code, payload = await call_bullex_service(
+        "GET",
+        "/sessions/status",
+        user_id,
+        allow_session_restore=allow_session_restore,
+    )
     state, connected, active_mode, source = await reconcile_robot_connection_from_payload(user_id, payload)
     return status_code, payload, state, connected, active_mode, source
 
@@ -4484,37 +4497,6 @@ async def read_restored_session_status(user_id: str) -> bool:
     return False
 
 
-@app.on_event("startup")
-async def restore_robot_states() -> None:
-    persistence_debug_registered = any(
-        getattr(route, "path", None) == "/sessions/persistence-debug"
-        for route in app.routes
-    )
-    logger.info(
-        "[SESSION_PERSISTENCE_ROUTE] service=backend-gateway "
-        "path=/sessions/persistence-debug registered=%s",
-        persistence_debug_registered,
-    )
-    try:
-        persisted_states = robot_persistence.load_states()
-    except Exception:
-        logger.exception("[ROBOT_RESTORE] status=failed reason=load_error")
-        return
-
-    restorable_robot_states.clear()
-    robot_state_hydrated_users.clear()
-    for user_id, payload in persisted_states:
-        restorable_robot_states[user_id] = deepcopy(payload)
-    logger.info(
-        "[STARTUP_SESSION_METADATA_LOADED] component=robot count=%s",
-        len(restorable_robot_states),
-    )
-    logger.info(
-        "[ROBOT_RESTORE] status=metadata_only restorable_robots=%s workers_created=0",
-        len(restorable_robot_states),
-    )
-
-
 @app.on_event("shutdown")
 async def shutdown_robot_workers() -> None:
     for user_id in list(robot_tasks):
@@ -4970,7 +4952,10 @@ async def _robot_start_impl(auth: dict[str, str]) -> JSONResponse:
         connected = True
         active_mode = state.active_mode
     else:
-        _, _, state, connected, active_mode, _ = await fetch_and_sync_robot_connection(user_id)
+        _, _, state, connected, active_mode, _ = await fetch_and_sync_robot_connection(
+            user_id,
+            allow_session_restore=True,
+        )
     if robot_connection_unavailable(connected, active_mode):
         state = auto_trader.disconnect_account(user_id)
         persist_robot(user_id)

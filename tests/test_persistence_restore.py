@@ -67,8 +67,9 @@ class SessionPersistenceTests(unittest.TestCase):
             self.assertNotIn("session_data", columns)
             self.assertNotEqual(encrypted_token, "sensitive-ssid-token")
             with self.assertLogs("bullex-service", level="INFO") as logs:
-                restored = store.load_connected()
-            self.assertEqual(restored[0].session_token, "sensitive-ssid-token")
+                restored = store.load_connected_user("user-session")
+            self.assertIsNotNone(restored)
+            self.assertEqual(restored.session_token, "sensitive-ssid-token")
             self.assertIn("ssid_length=20", "\n".join(logs.output))
 
     def test_session_manager_restores_with_persisted_ssid(self) -> None:
@@ -93,7 +94,6 @@ class SessionPersistenceTests(unittest.TestCase):
                 patch.object(bullex_main, "Bullex", return_value=fake_client),
                 patch.object(manager, "_session_context", side_effect=lambda session: _FakeContext(session)),
             ):
-                manager.restore_sessions()
                 self.assertIsNone(manager.get("user-session"))
                 restored = manager.restore_on_demand("user-session")
 
@@ -122,7 +122,6 @@ class SessionPersistenceTests(unittest.TestCase):
                 patch.object(bullex_main, "Bullex", return_value=fake_client),
                 self.assertLogs("bullex-service", level="WARNING") as logs,
             ):
-                manager.restore_sessions()
                 with self.assertRaises(bullex_main.ServiceError):
                     manager.restore_on_demand("user-session")
 
@@ -148,7 +147,6 @@ class SessionPersistenceTests(unittest.TestCase):
                 patch.object(manager, "_session_context", side_effect=lambda session: _FakeContext(session)),
                 self.assertLogs("bullex-service", level="WARNING") as logs,
             ):
-                manager.restore_sessions()
                 with self.assertRaises(bullex_main.ServiceError):
                     manager.restore_on_demand("user-session")
 
@@ -316,7 +314,7 @@ class SessionPersistenceTests(unittest.TestCase):
             store = SessionStore(str(Path(directory) / "sessions.db"), "test-secret")
             with self.assertLogs("bullex-service", level="INFO") as logs:
                 store.save_connected("user-session", "user@example.com", "PRACTICE", "persisted-ssid")
-                store.load_connected()
+                store.load_connected_user("user-session")
 
             messages = "\n".join(logs.output)
             fingerprint = hashlib.sha256(b"persisted-ssid").hexdigest()[:12]
@@ -644,90 +642,41 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(restored_trader.history(user_id)["trades"][0]["order_id"], "order-1")
             self.assertEqual(restored_trader.source(user_id), "memory")
 
-    async def test_startup_only_catalogs_enabled_robot_without_worker_or_session_probe(self) -> None:
+    async def test_startup_has_no_user_restore_handler(self) -> None:
+        from backend import main
+
+        self.assertEqual(main.app.router.on_startup, [])
+        self.assertNotIn("restore_robot_states", vars(main))
+
+    async def test_empty_startup_does_not_load_users_or_create_workers(self) -> None:
         from backend import main
 
         persistence = SimpleNamespace(
-            load_states=lambda: [("user-restore", {"enabled": True, "status": "STOPPED"})],
-            load_state=lambda _user_id: None,
-            load_trades=lambda _user_id: [],
-            save_restore_status=unittest.mock.Mock(),
+            load_states=Mock(side_effect=AssertionError("startup must not load users")),
         )
         old_trader = main.auto_trader
         old_persistence = main.robot_persistence
         old_tasks = main.robot_tasks
+        old_restorable = dict(main.restorable_robot_states)
         main.auto_trader = AutoTrader()
         main.robot_persistence = persistence
         main.robot_tasks = {}
+        main.restorable_robot_states.clear()
         try:
-            with (
-                patch.object(main, "read_restored_session_status", new=AsyncMock()) as session_probe,
-                patch.object(main, "ensure_robot_worker") as ensure_worker,
-                self.assertLogs("backend-gateway", level="INFO") as logs,
-            ):
-                await main.restore_robot_states()
+            for handler in main.app.router.on_startup:
+                result = handler()
+                if asyncio.iscoroutine(result):
+                    await result
 
-            self.assertFalse(main.auto_trader.has_state("user-restore"))
-            self.assertIn("user-restore", main.restorable_robot_states)
-            session_probe.assert_not_awaited()
-            ensure_worker.assert_not_called()
-            persistence.save_restore_status.assert_not_called()
-            output = "\n".join(logs.output)
-            self.assertIn("[STARTUP_SESSION_METADATA_LOADED]", output)
-            self.assertNotIn("[USER_BACKOFF_ACTIVE]", output)
-            self.assertNotIn("[ROBOT_WORKER_BLOCKED_DISCONNECTED]", output)
+            persistence.load_states.assert_not_called()
+            self.assertEqual(main.robot_tasks, {})
+            self.assertEqual(main.restorable_robot_states, {})
         finally:
             main.auto_trader = old_trader
             main.robot_persistence = old_persistence
             main.robot_tasks = old_tasks
-
-    async def test_startup_does_not_resume_pending_signal_or_create_worker(self) -> None:
-        from backend import main
-        from backend.auto_trader import STATUS_SENDING_ORDER
-
-        persistence = SimpleNamespace(
-            load_states=lambda: [
-                (
-                    "user-pending-restore",
-                    {
-                        "enabled": True,
-                        "status": "SENDING_ORDER",
-                        "pending_signal": {
-                            "symbol": "EURUSD-OTC",
-                            "signal": "CALL",
-                            "direction": "CALL",
-                            "confidence": 94,
-                            "payout": 88,
-                            "strategy_score": 94,
-                        },
-                    },
-                )
-            ],
-            load_state=lambda _user_id: None,
-            load_trades=lambda _user_id: [],
-            save_restore_status=unittest.mock.Mock(),
-        )
-        old_trader = main.auto_trader
-        old_persistence = main.robot_persistence
-        old_tasks = main.robot_tasks
-        main.auto_trader = AutoTrader()
-        main.robot_persistence = persistence
-        main.robot_tasks = {}
-        try:
-            with (
-                patch.object(main, "read_restored_session_status", new=AsyncMock()) as session_probe,
-                patch.object(main, "ensure_robot_worker") as ensure_worker,
-            ):
-                await main.restore_robot_states()
-
-            self.assertFalse(main.auto_trader.has_state("user-pending-restore"))
-            self.assertIn("user-pending-restore", main.restorable_robot_states)
-            session_probe.assert_not_awaited()
-            ensure_worker.assert_not_called()
-        finally:
-            main.auto_trader = old_trader
-            main.robot_persistence = old_persistence
-            main.robot_tasks = old_tasks
+            main.restorable_robot_states.clear()
+            main.restorable_robot_states.update(old_restorable)
 
     async def test_robot_state_returns_memory_default_without_restoring_connection(self) -> None:
         from backend import main

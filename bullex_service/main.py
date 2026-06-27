@@ -15,11 +15,7 @@ from pydantic import BaseModel, Field
 
 import bullexapi.global_value as global_value
 from bullexapi.stable_api import Bullex
-from bullex_service.session_store import (
-    PersistedSessionMetadata,
-    SessionStore,
-    create_session_store,
-)
+from bullex_service.session_store import SessionStore, create_session_store
 from websocket._exceptions import WebSocketConnectionClosedException
 
 
@@ -175,7 +171,6 @@ class SessionManager:
         self.locks: dict[str, RLock] = {}
         self.last_account_cache: dict[str, dict[str, Any]] = {}
         self.last_status_cache: dict[str, dict[str, Any]] = {}
-        self.restorable_sessions: dict[str, PersistedSessionMetadata] = {}
         self._probe_cache: dict[str, SessionProbeState] = {}
         self._login_progress: dict[str, LoginProgress] = {}
         self.store = store
@@ -536,15 +531,13 @@ class SessionManager:
             if not is_2fa_continuation:
                 existing = self.get(user_id)
                 logger.info(
-                    "[CONNECT_CLEAR_OLD_SESSION] user_id=%s had_active_session=%s had_restorable_session=%s",
+                    "[CONNECT_CLEAR_OLD_SESSION] user_id=%s had_active_session=%s",
                     user_id,
                     existing is not None,
-                    user_id in self.restorable_sessions,
                 )
                 if existing is not None:
                     self._close_session(existing)
                 self.remove(user_id)
-                self.restorable_sessions.pop(user_id, None)
                 self.last_account_cache.pop(user_id, None)
                 self.last_status_cache.pop(user_id, None)
                 if self.store is not None:
@@ -648,7 +641,6 @@ class SessionManager:
         with self.user_lock(user_id):
             session = self.get(user_id)
             if session is None:
-                self.restorable_sessions.pop(user_id, None)
                 self.remove(user_id)
                 if self.store is not None:
                     self.store.mark_disconnected(user_id, revoke_token=True)
@@ -666,7 +658,6 @@ class SessionManager:
                 except Exception:
                     logger.exception("falha ao fechar websocket da sessao %s", session.user_id)
             self.remove(user_id)
-            self.restorable_sessions.pop(user_id, None)
             if self.store is not None:
                 self.store.mark_disconnected(user_id, revoke_token=True)
             self._mark_probe_failure(user_id, offline=True)
@@ -677,7 +668,7 @@ class SessionManager:
     def reconnect(self, user_id: str) -> ManagedSession:
         with self.user_lock(user_id):
             if self.get(user_id) is None:
-                return self.restore_on_demand(user_id)
+                raise ServiceError(SESSION_NOT_FOUND, 404)
             session = self.require(user_id)
             return self._attempt_reconnect(session, "MANUAL")
 
@@ -760,24 +751,6 @@ class SessionManager:
             logger.warning("[SESSION-RECONNECT-FAILED] %s %s", user_id, exc.message)
             self._mark_disconnected(user_id, exc.message)
 
-    def restore_sessions(self) -> None:
-        if self.store is None:
-            logger.warning("[SESSION_RESTORE] status=disabled reason=missing_encryption_key")
-            return
-
-        self.restorable_sessions = {
-            persisted.user_id: persisted
-            for persisted in self.store.load_connected_metadata()
-        }
-        logger.info(
-            "[STARTUP_SESSION_METADATA_LOADED] component=bullex-service count=%s",
-            len(self.restorable_sessions),
-        )
-        logger.info(
-            "[SESSION_RESTORE] status=metadata_only restorable_sessions=%s active_sessions=0",
-            len(self.restorable_sessions),
-        )
-
     def restore_on_demand(self, user_id: str) -> ManagedSession:
         existing = self.get(user_id)
         if existing is not None:
@@ -796,18 +769,11 @@ class SessionManager:
                 )
                 return existing
 
-            metadata = self.restorable_sessions.get(user_id)
-            if metadata is None:
-                logger.info(
-                    "[SESSION_RESTORE_SKIPPED] user_id=%s reason=not_restorable",
-                    user_id,
-                )
-                raise ServiceError(SESSION_NOT_FOUND, 404)
-
             logger.info("[SESSION_RESTORE_ON_DEMAND] user_id=%s", user_id)
+            if self.store is None:
+                raise ServiceError(SESSION_NOT_FOUND, 404)
             persisted = self.store.load_connected_user(user_id)
             if persisted is None:
-                self.restorable_sessions.pop(user_id, None)
                 raise ServiceError(SESSION_NOT_FOUND, 404)
             session = ManagedSession(
                 user_id=persisted.user_id,
@@ -819,7 +785,6 @@ class SessionManager:
             restore_with_ssid = getattr(session.client, "restore_with_ssid", None)
             if not callable(restore_with_ssid):
                 self.store.mark_disconnected(session.user_id)
-                self.restorable_sessions.pop(session.user_id, None)
                 logger.warning(
                     "[SESSION_RESTORE] status=unsupported reason=no_ssid_restore_method user_id=%s",
                     session.user_id,
@@ -841,7 +806,6 @@ class SessionManager:
                 self._close_session(session)
                 self.remove(session.user_id)
                 self.store.mark_disconnected(session.user_id)
-                self.restorable_sessions.pop(session.user_id, None)
                 if restore_failure_reason == "invalid_ssid":
                     logger.warning(
                         "[SESSION_RESTORE] user_id=%s status=unsupported reason=broker_invalidates_ssid",
@@ -1149,19 +1113,6 @@ app.add_middleware(
 session_manager = SessionManager(create_session_store())
 
 
-@app.on_event("startup")
-def restore_persisted_sessions() -> None:
-    persistence_debug_registered = any(
-        getattr(route, "path", None) == "/sessions/persistence-debug"
-        for route in app.routes
-    )
-    logger.info(
-        "[SESSION_PERSISTENCE_ROUTE] path=/sessions/persistence-debug registered=%s",
-        persistence_debug_registered,
-    )
-    session_manager.restore_sessions()
-
-
 def ensure_session_alive(user_id: str) -> ManagedSession:
     return session_manager.ensure_session_alive(user_id)
 
@@ -1213,10 +1164,22 @@ def connect_session(payload: ConnectRequest, x_user_id: str | None = Header(defa
 
 
 @app.get("/sessions/status")
-def session_status(x_user_id: str | None = Header(default=None)) -> JSONResponse:
+def session_status(
+    x_user_id: str | None = Header(default=None),
+    x_allow_session_restore: str | None = Header(default=None),
+) -> JSONResponse:
     user_id = require_user_id(x_user_id)
-    if session_manager.get(user_id) is None and user_id in session_manager.restorable_sessions:
-        session_manager.restore_on_demand(user_id)
+    allow_session_restore = str(x_allow_session_restore or "").strip().lower() == "true"
+    try:
+        if session_manager.get(user_id) is None and allow_session_restore:
+            session_manager.restore_on_demand(user_id)
+    except ServiceError as exc:
+        if exc.message in {SESSION_NOT_FOUND, SESSION_DISCONNECTED}:
+            status_code = 404 if exc.message == SESSION_NOT_FOUND else 409
+            payload = {"ok": False, "data": {"connected": False}, "error": exc.message}
+            session_manager._mark_probe_failure(user_id, offline=True)
+            return JSONResponse(status_code=status_code, content=with_login_progress(payload, user_id))
+        raise
     cached = session_manager.get_cached_probe(user_id, "/sessions/status", path="/sessions/status")
     if cached is not None:
         status_code, payload = cached
@@ -1292,8 +1255,6 @@ def account_balance(x_user_id: str | None = Header(default=None)) -> dict[str, A
 @app.get("/account")
 def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
-    if session_manager.get(user_id) is None and user_id in session_manager.restorable_sessions:
-        session_manager.restore_on_demand(user_id)
     cached = session_manager.get_cached_probe(user_id, "/account", path="/account")
     if cached is not None:
         _, payload = cached

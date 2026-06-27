@@ -9,7 +9,7 @@ from backend import main
 from backend.auto_trader import AutoTrader, RobotConfigUpdate
 from backend.robot_persistence import SQLiteRobotPersistence
 from bullex_service import main as bullex_main
-from bullex_service.session_store import PersistedSession, PersistedSessionMetadata
+from bullex_service.session_store import PersistedSession
 
 
 class FakeWebSocket:
@@ -128,6 +128,7 @@ class WorkerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         upstream.assert_awaited()
         self.assertEqual(upstream.await_args.args[1], "/sessions/status")
+        self.assertTrue(upstream.await_args.kwargs["allow_session_restore"])
 
 
 class SessionRestoreLifecycleTests(unittest.TestCase):
@@ -141,36 +142,22 @@ class SessionRestoreLifecycleTests(unittest.TestCase):
             last_connected_at=None,
         )
 
-    @staticmethod
-    def metadata() -> PersistedSessionMetadata:
-        return PersistedSessionMetadata(
-            user_id="restorable-user",
-            email="user@example.com",
-            account_mode="PRACTICE",
-            last_connected_at=None,
-        )
-
-    def test_startup_loads_metadata_without_constructing_bullex(self) -> None:
+    def test_manager_starts_empty_without_loading_any_user(self) -> None:
         store = Mock()
-        store.load_connected_metadata.return_value = [self.metadata()]
-        manager = bullex_main.SessionManager(store)
 
-        with (
-            patch.object(bullex_main, "Bullex") as bullex,
-            self.assertLogs("bullex-service", level="INFO") as logs,
-        ):
-            manager.restore_sessions()
+        with patch.object(bullex_main, "Bullex") as bullex:
+            manager = bullex_main.SessionManager(store)
 
+        self.assertEqual(bullex_main.app.router.on_startup, [])
+        self.assertNotIn("restore_persisted_sessions", vars(bullex_main))
         bullex.assert_not_called()
+        store.load_connected_user.assert_not_called()
         self.assertEqual(manager.sessions, {})
-        self.assertIn("restorable-user", manager.restorable_sessions)
-        output = "\n".join(logs.output)
-        self.assertIn("[STARTUP_SESSION_METADATA_LOADED]", output)
-        self.assertNotIn("[LOGIN_WS]", output)
+        self.assertEqual(manager.websockets, {})
+        self.assertEqual(manager.workers, {})
 
     def test_on_demand_restore_reuses_single_session_and_websocket(self) -> None:
         store = Mock()
-        store.load_connected_metadata.return_value = [self.metadata()]
         store.load_connected_user.return_value = self.persisted()
         fake_client = SimpleNamespace(
             restore_with_ssid=Mock(return_value=(True, None)),
@@ -187,7 +174,6 @@ class SessionRestoreLifecycleTests(unittest.TestCase):
             patch.object(bullex_main, "Bullex", return_value=fake_client) as bullex,
             patch.object(manager, "_persist_connected"),
         ):
-            manager.restore_sessions()
             first = manager.restore_on_demand("restorable-user")
             second = manager.restore_on_demand("restorable-user")
 
@@ -196,17 +182,15 @@ class SessionRestoreLifecycleTests(unittest.TestCase):
         self.assertEqual(len(manager.sessions), 1)
         self.assertEqual(len(manager.websockets), 1)
 
-    def test_disconnect_removes_restorable_metadata_without_opening_session(self) -> None:
+    def test_disconnect_does_not_load_persisted_session(self) -> None:
         store = Mock()
-        store.load_connected_metadata.return_value = [self.metadata()]
         manager = bullex_main.SessionManager(store)
 
         with patch.object(bullex_main, "Bullex") as bullex:
-            manager.restore_sessions()
             manager.disconnect("restorable-user")
 
         bullex.assert_not_called()
-        self.assertNotIn("restorable-user", manager.restorable_sessions)
+        store.load_connected_user.assert_not_called()
         self.assertNotIn("restorable-user", manager.sessions)
         self.assertNotIn("restorable-user", manager.websockets)
         store.mark_disconnected.assert_called_with(
@@ -214,9 +198,45 @@ class SessionRestoreLifecycleTests(unittest.TestCase):
             revoke_token=True,
         )
 
+    def test_status_polling_does_not_restore_persisted_session(self) -> None:
+        store = Mock()
+        manager = bullex_main.SessionManager(store)
+        old_manager = bullex_main.session_manager
+        bullex_main.session_manager = manager
+        try:
+            response = bullex_main.session_status(
+                x_user_id="polling-user",
+                x_allow_session_restore=None,
+            )
+        finally:
+            bullex_main.session_manager = old_manager
+
+        self.assertEqual(response.status_code, 404)
+        store.load_connected_user.assert_not_called()
+        self.assertEqual(manager.sessions, {})
+        self.assertEqual(manager.websockets, {})
+
+    def test_status_restore_returns_controlled_404_when_not_persisted(self) -> None:
+        store = Mock()
+        store.load_connected_user.return_value = None
+        manager = bullex_main.SessionManager(store)
+        old_manager = bullex_main.session_manager
+        bullex_main.session_manager = manager
+        try:
+            response = bullex_main.session_status(
+                x_user_id="missing-restored-user",
+                x_allow_session_restore="true",
+            )
+        finally:
+            bullex_main.session_manager = old_manager
+
+        self.assertEqual(response.status_code, 404)
+        store.load_connected_user.assert_called_once_with("missing-restored-user")
+        self.assertEqual(manager.sessions, {})
+        self.assertEqual(manager.websockets, {})
+
     def test_fresh_connect_clears_only_current_users_old_session(self) -> None:
         store = Mock()
-        store.load_connected_metadata.return_value = []
         old_api = SimpleNamespace(close=Mock())
         old_client = SimpleNamespace(api=old_api)
         other_client = SimpleNamespace(api=SimpleNamespace(close=Mock()))
