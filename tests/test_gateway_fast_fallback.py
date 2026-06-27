@@ -28,10 +28,14 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.old_trader = main.auto_trader
         main.auto_trader = AutoTrader()
         main.session_response_cache.clear()
+        main.recent_connect_users.clear()
+        main.robot_start_requested_users.clear()
 
     def tearDown(self) -> None:
         main.auto_trader = self.old_trader
         main.session_response_cache.clear()
+        main.recent_connect_users.clear()
+        main.robot_start_requested_users.clear()
 
     @staticmethod
     def cache_account(user_id: str, *, balance: float = 42.5) -> None:
@@ -57,6 +61,7 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_account_timeout_returns_last_valid_cache_quickly(self) -> None:
         user_id = "fast-timeout-account"
         self.cache_account(user_id)
+        main.mark_connect_activity(user_id)
 
         started = time.monotonic()
         with (
@@ -81,6 +86,65 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[ACCOUNT_FETCH_TIMEOUT]", output)
         self.assertIn("[ACCOUNT_FETCH_FALLBACK]", output)
         self.assertIn("[UPSTREAM_ERROR_HANDLED]", output)
+
+    async def test_offline_account_and_status_skip_upstream_and_backoff(self) -> None:
+        user_id = "offline-polling-user"
+
+        with (
+            patch("backend.main.httpx.AsyncClient") as upstream_client,
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            account = await main.bullex_account({"user_id": user_id})
+            status = await main.bullex_status({"user_id": user_id})
+
+        for response in (account, status):
+            payload = json.loads(response.body)
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertFalse(payload["data"]["connected"])
+        upstream_client.assert_not_called()
+        cache = main.get_session_cache(user_id)
+        self.assertEqual(cache.failure_count, 0)
+        self.assertIsNone(cache.next_retry_at)
+        output = "\n".join(logs.output)
+        self.assertIn("[OFFLINE_USER_SKIPPED]", output)
+        self.assertIn("[BACKOFF_SKIPPED_OFFLINE_USER]", output)
+
+    async def test_active_user_in_backoff_gets_controlled_200_payload(self) -> None:
+        user_id = "active-backoff-user"
+        main.mark_connect_activity(user_id)
+        cache = main.get_session_cache(user_id)
+        cache.next_retry_at = main.utc_now() + timedelta(seconds=42)
+
+        with patch("backend.main.httpx.AsyncClient") as upstream_client:
+            response = await main.bullex_status({"user_id": user_id})
+
+        payload = json.loads(response.body)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["status"], "backoff")
+        self.assertGreater(payload["data"]["retry_in"], 0)
+        upstream_client.assert_not_called()
+
+    def test_offline_failure_does_not_create_user_backoff(self) -> None:
+        user_id = "offline-backoff-user"
+
+        with self.assertLogs("backend-gateway", level="INFO") as logs:
+            main.mark_session_failure(user_id)
+
+        cache = main.get_session_cache(user_id)
+        self.assertEqual(cache.failure_count, 0)
+        self.assertIsNone(cache.next_retry_at)
+        output = "\n".join(logs.output)
+        self.assertIn("[BACKOFF_SKIPPED_OFFLINE_USER]", output)
+        self.assertNotIn("[USER_BACKOFF_ACTIVE]", output)
+
+    def test_connect_activity_expires_after_five_minutes(self) -> None:
+        user_id = "expired-active-user"
+        main.recent_connect_users[user_id] = main.utc_now() - timedelta(seconds=301)
+
+        self.assertFalse(main.is_user_active(user_id))
+        self.assertNotIn(user_id, main.recent_connect_users)
 
     async def test_account_uses_ten_second_cache_without_upstream_call(self) -> None:
         user_id = "fast-account-cache-hit"
@@ -172,12 +236,16 @@ class GatewayControlledErrorCorsTests(unittest.TestCase):
         main.config.panel_api_key = "test-key"
         main.auto_trader = AutoTrader()
         main.session_response_cache.clear()
+        main.recent_connect_users.clear()
+        main.robot_start_requested_users.clear()
         self.client = TestClient(main.app)
 
     def tearDown(self) -> None:
         main.config.panel_api_key = self.old_api_key
         main.auto_trader = self.old_trader
         main.session_response_cache.clear()
+        main.recent_connect_users.clear()
+        main.robot_start_requested_users.clear()
 
     def test_account_exception_is_controlled_json_with_cors_headers(self) -> None:
         with patch.object(
@@ -195,9 +263,38 @@ class GatewayControlledErrorCorsTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["ok"])
-        self.assertFalse(response.json()["data"]["connected"])
-        self.assertIsNone(response.json()["error"])
+        self.assertFalse(response.json()["ok"])
+        self.assertIsNone(response.json()["data"])
+        self.assertEqual(
+            response.json()["error"],
+            main.BULLEX_TEMPORARY_UNAVAILABLE,
+        )
+        self.assertEqual(
+            response.headers.get("access-control-allow-origin"),
+            "https://elcapobot.online",
+        )
+
+    def test_status_exception_is_controlled_json_with_cors_headers(self) -> None:
+        with patch.object(
+            main,
+            "call_bullex_service",
+            new=AsyncMock(side_effect=RuntimeError("status upstream down")),
+        ):
+            response = self.client.get(
+                "/bullex/status",
+                headers={
+                    "Origin": "https://elcapobot.online",
+                    "x-api-key": "test-key",
+                    "x-user-id": "cors-status-error",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["ok"])
+        self.assertEqual(
+            response.json()["error"],
+            main.BULLEX_TEMPORARY_UNAVAILABLE,
+        )
         self.assertEqual(
             response.headers.get("access-control-allow-origin"),
             "https://elcapobot.online",
@@ -218,7 +315,7 @@ class GatewayControlledErrorCorsTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json()["error"],
             main.BULLEX_TEMPORARY_UNAVAILABLE,
@@ -250,7 +347,7 @@ class GatewayControlledErrorCorsTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["error"], "LOGIN_FAILED")
+        self.assertEqual(response.json()["error"], main.BULLEX_TEMPORARY_UNAVAILABLE)
         self.assertEqual(
             response.json()["detail"],
             main.BULLEX_TEMPORARY_UNAVAILABLE,
@@ -299,16 +396,13 @@ class GatewayControlledErrorCorsTests(unittest.TestCase):
         for path, body, failure in cases:
             with self.subTest(path=path), failure:
                 response = self.client.post(path, headers=headers, json=body)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json()["error"],
+                    main.BULLEX_TEMPORARY_UNAVAILABLE,
+                )
                 if path == "/bullex/connect":
-                    self.assertEqual(response.status_code, 200)
-                    self.assertEqual(response.json()["error"], "LOGIN_FAILED")
                     self.assertIn("connect failure", response.json()["detail"])
-                else:
-                    self.assertEqual(response.status_code, 503)
-                    self.assertEqual(
-                        response.json()["error"],
-                        main.BULLEX_TEMPORARY_UNAVAILABLE,
-                    )
                 self.assertEqual(
                     response.headers.get("access-control-allow-origin"),
                     "https://elcapobot.online",

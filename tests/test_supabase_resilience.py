@@ -128,12 +128,16 @@ class EndpointResilienceTests(unittest.IsolatedAsyncioTestCase):
         main.auto_trader = AutoTrader()
         main.session_response_cache.clear()
         main.robot_tasks.clear()
+        main.recent_connect_users.clear()
+        main.robot_start_requested_users.clear()
 
     def tearDown(self) -> None:
         main.user_store = self.old_store
         main.auto_trader = self.old_trader
         main.session_response_cache.clear()
         main.robot_tasks.clear()
+        main.recent_connect_users.clear()
+        main.robot_start_requested_users.clear()
 
     async def test_robot_state_stays_200_when_supabase_fails(self) -> None:
         state = main.auto_trader.start("user-robot")
@@ -212,6 +216,7 @@ class EndpointResilienceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sessions_status_is_throttled_for_15_seconds(self) -> None:
         user_id = "user-throttle"
+        main.mark_connect_activity(user_id)
         requests: list[str] = []
 
         def response_factory(**kwargs):
@@ -232,6 +237,7 @@ class EndpointResilienceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sessions_status_returns_last_known_state_when_repeated_within_5_seconds(self) -> None:
         user_id = "user-throttle-stale"
+        main.mark_connect_activity(user_id)
         requests: list[str] = []
 
         def response_factory(**kwargs):

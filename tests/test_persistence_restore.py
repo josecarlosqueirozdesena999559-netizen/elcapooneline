@@ -663,6 +663,7 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.object(main, "read_restored_session_status", new=AsyncMock()) as session_probe,
                 patch.object(main, "ensure_robot_worker") as ensure_worker,
+                self.assertLogs("backend-gateway", level="INFO") as logs,
             ):
                 await main.restore_robot_states()
 
@@ -671,6 +672,10 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             session_probe.assert_not_awaited()
             ensure_worker.assert_not_called()
             persistence.save_restore_status.assert_not_called()
+            output = "\n".join(logs.output)
+            self.assertIn("[STARTUP_SESSION_METADATA_LOADED]", output)
+            self.assertNotIn("[USER_BACKOFF_ACTIVE]", output)
+            self.assertNotIn("[ROBOT_WORKER_BLOCKED_DISCONNECTED]", output)
         finally:
             main.auto_trader = old_trader
             main.robot_persistence = old_persistence

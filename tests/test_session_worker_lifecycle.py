@@ -165,7 +165,7 @@ class SessionRestoreLifecycleTests(unittest.TestCase):
         self.assertEqual(manager.sessions, {})
         self.assertIn("restorable-user", manager.restorable_sessions)
         output = "\n".join(logs.output)
-        self.assertIn("[STARTUP_SESSION_RESTORE_SKIPPED]", output)
+        self.assertIn("[STARTUP_SESSION_METADATA_LOADED]", output)
         self.assertNotIn("[LOGIN_WS]", output)
 
     def test_on_demand_restore_reuses_single_session_and_websocket(self) -> None:
@@ -274,7 +274,9 @@ class SessionRestoreLifecycleTests(unittest.TestCase):
         for marker in (
             "[CONNECT_REQUEST]",
             "[CONNECT_CLEAR_OLD_SESSION]",
+            "[CONNECT_OLD_SESSION_CLOSED]",
             "[CONNECT_BACKOFF_CLEARED]",
+            "[CONNECT_ATTEMPT]",
             "[CONNECT_CREATE_SESSION]",
             "[CONNECT_WS_START]",
             "[CONNECT_SUCCESS]",

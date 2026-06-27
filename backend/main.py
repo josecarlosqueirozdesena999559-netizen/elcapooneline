@@ -170,6 +170,7 @@ ROBOT_SESSION_REFRESH_SECONDS = 15
 SESSION_OFFLINE_TTL_SECONDS = 60
 SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
 SESSION_CACHEABLE_PATHS = {"/sessions/status", "/account"}
+ACTIVE_USER_TTL_SECONDS = 300
 ACCOUNT_CACHE_TTL_SECONDS = 10
 BULLEX_UPSTREAM_TIMEOUT_SECONDS = 5.0
 BULLEX_CONNECT_TIMEOUT_SECONDS = 60.0
@@ -198,11 +199,12 @@ def build_error(message: str) -> dict[str, Any]:
     return {"ok": False, "data": None, "error": message}
 
 
-def build_login_failed(detail: Any) -> dict[str, Any]:
+def build_controlled_upstream_error(detail: Any) -> dict[str, Any]:
     return {
         "ok": False,
-        "error": "LOGIN_FAILED",
-        "detail": str(detail or "BULLEX_TEMPORARY_UNAVAILABLE"),
+        "data": None,
+        "error": BULLEX_TEMPORARY_UNAVAILABLE,
+        "detail": str(detail or BULLEX_TEMPORARY_UNAVAILABLE)[:240],
     }
 
 
@@ -390,6 +392,8 @@ class BullexUserSessionCache:
 session_response_cache: dict[str, BullexUserSessionCache] = {}
 active_cooldowns: dict[str, dict[str, datetime]] = {}
 payout_cooldowns: dict[str, dict[str, datetime]] = {}
+recent_connect_users: dict[str, datetime] = {}
+robot_start_requested_users: dict[str, datetime] = {}
 
 
 def get_session_cache(user_id: str) -> BullexUserSessionCache:
@@ -469,6 +473,17 @@ def temporary_upstream_response(
     *,
     reason: str,
 ) -> tuple[int, dict[str, Any]]:
+    if not is_user_active(user_id):
+        logger.info(
+            "[BACKOFF_SKIPPED_OFFLINE_USER] user_id=%s path=%s reason=%s",
+            user_id,
+            path,
+            reason,
+        )
+        cached = cached_successful_response(user_id, cache_key)
+        if cached is not None:
+            return 200, add_stale_warning(cached.payload)
+        return 200, disconnected_cache_payload(source="offline_user")
     cache = get_session_cache(user_id)
     cache.failure_count += 1
     cache.next_retry_at = utc_now() + timedelta(seconds=SESSION_STATUS_THROTTLE_SECONDS)
@@ -506,6 +521,13 @@ def clear_session_backoff(user_id: str) -> None:
 
 
 def mark_session_failure(user_id: str, *, offline: bool = False) -> None:
+    if not is_user_active(user_id):
+        logger.info(
+            "[BACKOFF_SKIPPED_OFFLINE_USER] user_id=%s offline=%s",
+            user_id,
+            offline,
+        )
+        return
     cache = get_session_cache(user_id)
     cache.failure_count += 1
     now = utc_now()
@@ -791,16 +813,10 @@ async def log_cors_allowed_origin(request: Request, call_next):
             request.url.path,
             exc.__class__.__name__,
         )
-        if request.url.path == "/bullex/connect":
-            response = JSONResponse(
-                status_code=200,
-                content=build_login_failed(exc),
-            )
-        else:
-            response = JSONResponse(
-                status_code=503,
-                content=build_error(BULLEX_TEMPORARY_UNAVAILABLE),
-            )
+        response = JSONResponse(
+            status_code=200,
+            content=build_controlled_upstream_error(exc),
+        )
         if origin in config.cors_origins:
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Access-Control-Allow-Credentials"] = "true"
@@ -816,6 +832,49 @@ robot_worker_last_tick_at: dict[str, datetime] = {}
 restorable_robot_states: dict[str, dict[str, Any]] = {}
 robot_state_hydrated_users: set[str] = set()
 CONNECTION_GRACE_SECONDS = 30
+
+
+def mark_connect_activity(user_id: str) -> None:
+    recent_connect_users[user_id] = utc_now()
+
+
+def mark_robot_start_activity(user_id: str) -> None:
+    robot_start_requested_users[user_id] = utc_now()
+
+
+def clear_robot_start_activity(user_id: str) -> None:
+    robot_start_requested_users.pop(user_id, None)
+
+
+def is_user_active(user_id: str) -> bool:
+    last_connect = recent_connect_users.get(user_id)
+    if last_connect is not None:
+        if (utc_now() - last_connect).total_seconds() <= ACTIVE_USER_TTL_SECONDS:
+            return True
+        recent_connect_users.pop(user_id, None)
+    last_robot_start = robot_start_requested_users.get(user_id)
+    if last_robot_start is not None:
+        if (utc_now() - last_robot_start).total_seconds() <= ACTIVE_USER_TTL_SECONDS:
+            return True
+        robot_start_requested_users.pop(user_id, None)
+    return bool(auto_trader.get(user_id).enabled)
+
+
+def inactive_user_payload(user_id: str, path: str) -> dict[str, Any]:
+    cached = cached_successful_response(user_id, path)
+    if cached is not None:
+        return add_stale_warning(cached.payload)
+    return disconnected_cache_payload(source="offline_user")
+
+
+def backoff_payload(user_id: str, remaining: float) -> dict[str, Any]:
+    return build_success(
+        {
+            "connected": False,
+            "status": "backoff",
+            "retry_in": max(0, int(math.ceil(remaining))),
+        }
+    )
 
 
 def normalize_ws_value(value: Any) -> str:
@@ -1086,12 +1145,10 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
             request.url.path,
             exc.__class__.__name__,
         )
-        if request.url.path == "/bullex/connect":
-            return JSONResponse(
-                status_code=200,
-                content=build_login_failed(exc),
-            )
-        return JSONResponse(status_code=503, content=build_error(BULLEX_TEMPORARY_UNAVAILABLE))
+        return JSONResponse(
+            status_code=200,
+            content=build_controlled_upstream_error(exc),
+        )
     return JSONResponse(status_code=500, content=build_error("INTERNAL_ERROR"))
 
 
@@ -1106,10 +1163,6 @@ async def call_bullex_service(
     ttl_seconds = request_cache_ttl_seconds(path, params)
     if method == "GET" and ttl_seconds is not None:
         cache = get_session_cache(user_id)
-        if path == "/sessions/status" and should_throttle_session_status(user_id, cache_key):
-            throttled = cached_session_status_response(user_id, cache_key)
-            if throttled is not None:
-                return throttled
         cached = cache.responses.get(cache_key)
         now = utc_now()
         if cached is not None and now < cached.expires_at:
@@ -1135,6 +1188,14 @@ async def call_bullex_service(
                     (cached.expires_at - now).total_seconds(),
                 )
             return cached.status_code, deepcopy(cached.payload)
+        if path in SESSION_CACHEABLE_PATHS and not is_user_active(user_id):
+            logger.info("[OFFLINE_USER_SKIPPED] user_id=%s path=%s", user_id, path)
+            logger.info("[BACKOFF_SKIPPED_OFFLINE_USER] user_id=%s path=%s", user_id, path)
+            return 200, inactive_user_payload(user_id, cache_key)
+        if path == "/sessions/status" and should_throttle_session_status(user_id, cache_key):
+            throttled = cached_session_status_response(user_id, cache_key)
+            if throttled is not None:
+                return throttled
         if path == "/sessions/status":
             logger.info("[SESSION_STATUS_CACHE_MISS] user_id=%s path=%s", user_id, path)
         else:
@@ -1166,9 +1227,7 @@ async def call_bullex_service(
                 return 200, add_stale_warning(successful.payload)
             if cached is not None:
                 return cached.status_code, deepcopy(cached.payload)
-            if reason == "offline":
-                return 200, disconnected_cache_payload(source="offline_cache")
-            return 503, build_error(BULLEX_TEMPORARY_UNAVAILABLE)
+            return 200, backoff_payload(user_id, remaining)
 
     headers = {"x-user-id": user_id}
     url = f"{config.bullex_service_url}{path}"
@@ -4362,6 +4421,9 @@ async def robot_worker(user_id: str) -> None:
 
 
 def ensure_robot_worker(user_id: str) -> None:
+    if not is_user_active(user_id):
+        logger.info("[OFFLINE_USER_SKIPPED] user_id=%s operation=worker_start", user_id)
+        return
     state = auto_trader.get(user_id)
     if not state.enabled:
         logger.info("[SESSION_RESTORE_SKIPPED] user_id=%s reason=robot_disabled", user_id)
@@ -4443,10 +4505,10 @@ async def restore_robot_states() -> None:
     robot_state_hydrated_users.clear()
     for user_id, payload in persisted_states:
         restorable_robot_states[user_id] = deepcopy(payload)
-        logger.info(
-            "[SESSION_RESTORE_SKIPPED] user_id=%s component=robot reason=awaiting_user_action",
-            user_id,
-        )
+    logger.info(
+        "[STARTUP_SESSION_METADATA_LOADED] component=robot count=%s",
+        len(restorable_robot_states),
+    )
     logger.info(
         "[ROBOT_RESTORE] status=metadata_only restorable_robots=%s workers_created=0",
         len(restorable_robot_states),
@@ -4544,9 +4606,10 @@ async def signals_top_reviewed(auth: dict[str, str] = Depends(require_headers)) 
     return json_response(200, build_success(reviewed))
 
 
-@app.get("/robot/state")
-async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+async def _robot_state_impl(auth: dict[str, str]) -> JSONResponse:
     user_id = auth["user_id"]
+    if not is_user_active(user_id):
+        logger.info("[OFFLINE_USER_SKIPPED] user_id=%s path=/robot/state", user_id)
     # This polling endpoint must remain independent from BullEx, WebSocket and
     # persistence latency. Startup restoration populates auto_trader; a missing
     # entry is represented by its in-memory default state.
@@ -4600,6 +4663,20 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
             real_balance_warning=real_balance_warning,
         ),
     )
+
+
+@app.get("/robot/state")
+async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    try:
+        return await _robot_state_impl(auth)
+    except Exception as exc:
+        logger.warning(
+            "[BAD_GATEWAY_PREVENTED] user_id=%s path=/robot/state reason=%s",
+            auth.get("user_id"),
+            exc.__class__.__name__,
+            exc_info=True,
+        )
+        return json_response(200, build_controlled_upstream_error(exc))
 
 
 def build_robot_stats(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -4883,9 +4960,9 @@ async def robot_settings(
     return await robot_config(body, auth)
 
 
-@app.post("/robot/start")
-async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+async def _robot_start_impl(auth: dict[str, str]) -> JSONResponse:
     user_id = auth["user_id"]
+    mark_robot_start_activity(user_id)
     state = get_user_robot_state(user_id)
     if is_stop_status(state.status):
         return json_response(409, build_error("RESET_CYCLE_REQUIRED"))
@@ -4949,15 +5026,44 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     return json_response(200, build_robot_payload(state))
 
 
-@app.post("/robot/stop")
-async def robot_stop(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+@app.post("/robot/start")
+async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    try:
+        return await _robot_start_impl(auth)
+    except Exception as exc:
+        logger.warning(
+            "[BAD_GATEWAY_PREVENTED] user_id=%s path=/robot/start reason=%s",
+            auth.get("user_id"),
+            exc.__class__.__name__,
+            exc_info=True,
+        )
+        return json_response(200, build_controlled_upstream_error(exc))
+
+
+async def _robot_stop_impl(auth: dict[str, str]) -> JSONResponse:
     user_id = auth["user_id"]
     logger.info("[ROBOT_STOP_REQUEST] user_id=%s", user_id)
     state = auto_trader.stop(user_id)
+    clear_robot_start_activity(user_id)
     persist_robot(user_id)
     await stop_robot_worker(user_id)
     logger.info("[ROBOT STOP] user_id=%s", user_id)
     return json_response(200, build_robot_payload(state, user_id=user_id))
+
+
+@app.post("/robot/stop")
+async def robot_stop(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    try:
+        return await _robot_stop_impl(auth)
+    except Exception as exc:
+        clear_robot_start_activity(auth.get("user_id", ""))
+        logger.warning(
+            "[BAD_GATEWAY_PREVENTED] user_id=%s path=/robot/stop reason=%s",
+            auth.get("user_id"),
+            exc.__class__.__name__,
+            exc_info=True,
+        )
+        return json_response(200, build_controlled_upstream_error(exc))
 
 
 @app.post("/robot/reset-cycle")
@@ -5098,15 +5204,16 @@ async def ws_market(websocket: WebSocket) -> None:
         logger.info("[MARKET WS DISCONNECTED] user_id=%s active=%s", user_id, active)
 
 
-@app.post("/bullex/connect")
-async def bullex_connect(
+async def _bullex_connect_impl(
     body: dict[str, Any],
-    auth: dict[str, str] = Depends(require_headers),
+    auth: dict[str, str],
 ) -> JSONResponse:
     user_id = auth["user_id"]
     logger.info("[CONNECT_REQUEST] user_id=%s", user_id)
+    mark_connect_activity(user_id)
     clear_session_backoff(user_id)
     logger.info("[CONNECT_BACKOFF_CLEARED] user_id=%s", user_id)
+    logger.info("[CONNECT_ATTEMPT] user_id=%s", user_id)
     status_code, payload = await call_bullex_service(
         "POST",
         "/sessions/connect",
@@ -5129,12 +5236,12 @@ async def bullex_connect(
         )
         return json_response(
             200,
-            build_login_failed(error or BULLEX_TEMPORARY_UNAVAILABLE),
+            build_controlled_upstream_error(error or BULLEX_TEMPORARY_UNAVAILABLE),
         )
     if not payload.get("ok"):
         detail = payload.get("error") or "LOGIN_FAILED"
         logger.warning("[CONNECT_FAILED_HANDLED] user_id=%s detail=%s", user_id, detail)
-        return json_response(200, build_login_failed(detail))
+        return json_response(200, build_controlled_upstream_error(detail))
     sync_user_store_from_payload(
         user_id,
         payload,
@@ -5183,8 +5290,29 @@ async def bullex_connect(
     return json_response(status_code, payload)
 
 
-@app.get("/bullex/status")
-async def bullex_status(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+@app.post("/bullex/connect")
+async def bullex_connect(
+    body: dict[str, Any],
+    auth: dict[str, str] = Depends(require_headers),
+) -> JSONResponse:
+    try:
+        return await _bullex_connect_impl(body, auth)
+    except Exception as exc:
+        logger.warning(
+            "[CONNECT_FAILED_HANDLED] user_id=%s detail=%s",
+            auth.get("user_id"),
+            exc.__class__.__name__,
+        )
+        logger.warning(
+            "[BAD_GATEWAY_PREVENTED] user_id=%s path=/bullex/connect reason=%s",
+            auth.get("user_id"),
+            exc.__class__.__name__,
+            exc_info=True,
+        )
+        return json_response(200, build_controlled_upstream_error(exc))
+
+
+async def _bullex_status_impl(auth: dict[str, str]) -> JSONResponse:
     user_id = auth["user_id"]
     try:
         status_code, payload = await call_bullex_service("GET", "/sessions/status", user_id)
@@ -5196,10 +5324,11 @@ async def bullex_status(auth: dict[str, str] = Depends(require_headers)) -> JSON
             exc_info=True,
         )
         fallback = memory_status_fallback(user_id)
-        return json_response(
-            200,
-            fallback or build_success({"connected": False}),
-        )
+        if fallback is not None:
+            return json_response(200, fallback)
+        return json_response(200, build_controlled_upstream_error(exc))
+    if payload.get("ok") and isinstance(payload.get("data"), dict) and payload["data"].get("status") == "backoff":
+        return json_response(200, payload)
     connected, active_mode = extract_account_status(payload)
     if payload.get("ok") and connected:
         state = auto_trader.sync_connection(
@@ -5232,7 +5361,24 @@ async def bullex_status(auth: dict[str, str] = Depends(require_headers)) -> JSON
         return json_response(200, fallback)
     if status_code == 404 or is_session_disconnected(payload) or payload_connected_state(payload) is False:
         return json_response(200, build_success({"connected": False}))
-    return json_response(200, build_success({"connected": False}))
+    return json_response(
+        200,
+        build_controlled_upstream_error(payload.get("error") or BULLEX_TEMPORARY_UNAVAILABLE),
+    )
+
+
+@app.get("/bullex/status")
+async def bullex_status(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    try:
+        return await _bullex_status_impl(auth)
+    except Exception as exc:
+        logger.warning(
+            "[BAD_GATEWAY_PREVENTED] user_id=%s path=/bullex/status reason=%s",
+            auth.get("user_id"),
+            exc.__class__.__name__,
+            exc_info=True,
+        )
+        return json_response(200, build_controlled_upstream_error(exc))
 
 
 @app.get("/bullex/balance")
@@ -5507,8 +5653,7 @@ async def bullex_reconnect(auth: dict[str, str] = Depends(require_headers)) -> J
     return json_response(status_code, payload)
 
 
-@app.get("/bullex/account")
-async def bullex_account(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+async def _bullex_account_impl(auth: dict[str, str]) -> JSONResponse:
     user_id = auth["user_id"]
     try:
         status_code, payload = await call_bullex_service("GET", "/account", user_id)
@@ -5526,10 +5671,11 @@ async def bullex_account(auth: dict[str, str] = Depends(require_headers)) -> JSO
                 user_id,
                 exc.__class__.__name__,
             )
-        return json_response(
-            200,
-            fallback or build_success({"connected": False}),
-        )
+        if fallback is not None:
+            return json_response(200, fallback)
+        return json_response(200, build_controlled_upstream_error(exc))
+    if payload.get("ok") and isinstance(payload.get("data"), dict) and payload["data"].get("status") == "backoff":
+        return json_response(200, payload)
     if payload.get("ok") and payload_connected_state(payload) is not False:
         connected, active_mode = extract_account_status(payload)
         if connected:
@@ -5551,7 +5697,24 @@ async def bullex_account(auth: dict[str, str] = Depends(require_headers)) -> JSO
         return json_response(200, fallback)
     if status_code == 404 or is_session_disconnected(payload) or payload_connected_state(payload) is False:
         return json_response(200, build_success({"connected": False}))
-    return json_response(200, build_success({"connected": False}))
+    return json_response(
+        200,
+        build_controlled_upstream_error(payload.get("error") or BULLEX_TEMPORARY_UNAVAILABLE),
+    )
+
+
+@app.get("/bullex/account")
+async def bullex_account(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    try:
+        return await _bullex_account_impl(auth)
+    except Exception as exc:
+        logger.warning(
+            "[BAD_GATEWAY_PREVENTED] user_id=%s path=/bullex/account reason=%s",
+            auth.get("user_id"),
+            exc.__class__.__name__,
+            exc_info=True,
+        )
+        return json_response(200, build_controlled_upstream_error(exc))
 
 
 @app.get("/bullex/order-result/{order_id}")

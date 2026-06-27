@@ -549,8 +549,14 @@ class SessionManager:
                 self.last_status_cache.pop(user_id, None)
                 if self.store is not None:
                     self.store.mark_disconnected(user_id, revoke_token=True)
+                logger.info(
+                    "[CONNECT_OLD_SESSION_CLOSED] user_id=%s had_active_session=%s",
+                    user_id,
+                    existing is not None,
+                )
 
             try:
+                logger.info("[CONNECT_ATTEMPT] user_id=%s", user_id)
                 session = self._connect_unlocked(user_id, payload)
                 logger.info("[CONNECT_SUCCESS] user_id=%s", user_id)
                 return session
@@ -763,15 +769,10 @@ class SessionManager:
             persisted.user_id: persisted
             for persisted in self.store.load_connected_metadata()
         }
-        for user_id in self.restorable_sessions:
-            logger.info(
-                "[SESSION_RESTORE_SKIPPED] user_id=%s reason=awaiting_on_demand_restore",
-                user_id,
-            )
-            logger.info(
-                "[STARTUP_SESSION_RESTORE_SKIPPED] user_id=%s metadata_only=true",
-                user_id,
-            )
+        logger.info(
+            "[STARTUP_SESSION_METADATA_LOADED] component=bullex-service count=%s",
+            len(self.restorable_sessions),
+        )
         logger.info(
             "[SESSION_RESTORE] status=metadata_only restorable_sessions=%s active_sessions=0",
             len(self.restorable_sessions),
