@@ -195,12 +195,9 @@ class GatewayControlledErrorCorsTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(response.json()["ok"])
+        self.assertTrue(response.json()["ok"])
         self.assertFalse(response.json()["data"]["connected"])
-        self.assertEqual(
-            response.json()["error"],
-            "ACCOUNT_UNAVAILABLE",
-        )
+        self.assertIsNone(response.json()["error"])
         self.assertEqual(
             response.headers.get("access-control-allow-origin"),
             "https://elcapobot.online",
@@ -224,6 +221,38 @@ class GatewayControlledErrorCorsTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(
             response.json()["error"],
+            main.BULLEX_TEMPORARY_UNAVAILABLE,
+        )
+        self.assertEqual(
+            response.headers.get("access-control-allow-origin"),
+            "https://elcapobot.online",
+        )
+
+    def test_connect_converts_upstream_502_to_login_failed_with_cors(self) -> None:
+        with patch.object(
+            main,
+            "call_bullex_service",
+            new=AsyncMock(
+                return_value=(
+                    502,
+                    {"ok": False, "error": main.BULLEX_TEMPORARY_UNAVAILABLE},
+                )
+            ),
+        ):
+            response = self.client.post(
+                "/bullex/connect",
+                headers={
+                    "Origin": "https://elcapobot.online",
+                    "x-api-key": "test-key",
+                    "x-user-id": "connect-upstream-502",
+                },
+                json={"email": "user@example.com", "password": "secret"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["error"], "LOGIN_FAILED")
+        self.assertEqual(
+            response.json()["detail"],
             main.BULLEX_TEMPORARY_UNAVAILABLE,
         )
         self.assertEqual(
@@ -270,11 +299,16 @@ class GatewayControlledErrorCorsTests(unittest.TestCase):
         for path, body, failure in cases:
             with self.subTest(path=path), failure:
                 response = self.client.post(path, headers=headers, json=body)
-                self.assertEqual(response.status_code, 503)
-                self.assertEqual(
-                    response.json()["error"],
-                    main.BULLEX_TEMPORARY_UNAVAILABLE,
-                )
+                if path == "/bullex/connect":
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json()["error"], "LOGIN_FAILED")
+                    self.assertIn("connect failure", response.json()["detail"])
+                else:
+                    self.assertEqual(response.status_code, 503)
+                    self.assertEqual(
+                        response.json()["error"],
+                        main.BULLEX_TEMPORARY_UNAVAILABLE,
+                    )
                 self.assertEqual(
                     response.headers.get("access-control-allow-origin"),
                     "https://elcapobot.online",

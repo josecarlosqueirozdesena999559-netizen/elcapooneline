@@ -159,9 +159,10 @@ class SessionPersistenceTests(unittest.TestCase):
                 "\n".join(logs.output),
             )
 
-    def test_session_manager_reuses_existing_valid_session_without_new_login(self) -> None:
+    def test_session_manager_replaces_existing_session_on_fresh_login(self) -> None:
         manager = bullex_main.SessionManager(None)
         existing_client = SimpleNamespace(
+            api=SimpleNamespace(close=Mock()),
             check_connect=lambda: True,
             websocket_alive=lambda: True,
             get_balance_mode=lambda: "PRACTICE",
@@ -176,14 +177,25 @@ class SessionPersistenceTests(unittest.TestCase):
             desired_mode="PRACTICE",
         )
         manager.upsert(existing)
+        new_client = SimpleNamespace(
+            api=SimpleNamespace(close=Mock()),
+            connect=Mock(return_value=(True, None)),
+            check_connect=lambda: True,
+            websocket_alive=lambda: True,
+            get_balance_mode=lambda: "PRACTICE",
+            get_balance=lambda: 100.0,
+            get_currency=lambda: "USD",
+        )
 
-        with patch.object(bullex_main, "Bullex", side_effect=AssertionError("should not create new session")):
+        with patch.object(bullex_main, "Bullex", return_value=new_client):
             session = manager.connect(
                 "user-reuse",
                 bullex_main.ConnectRequest(email="user@example.com", password="secret", account_mode="PRACTICE"),
             )
 
-        self.assertIs(session, existing)
+        self.assertIsNot(session, existing)
+        self.assertIs(session.client, new_client)
+        existing_client.api.close.assert_called_once()
         self.assertEqual(manager.login_progress_payload("user-reuse")["state"], "READY")
 
     def test_session_manager_retries_login_after_timeout(self) -> None:

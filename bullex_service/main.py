@@ -15,7 +15,11 @@ from pydantic import BaseModel, Field
 
 import bullexapi.global_value as global_value
 from bullexapi.stable_api import Bullex
-from bullex_service.session_store import PersistedSession, SessionStore, create_session_store
+from bullex_service.session_store import (
+    PersistedSessionMetadata,
+    SessionStore,
+    create_session_store,
+)
 from websocket._exceptions import WebSocketConnectionClosedException
 
 
@@ -171,7 +175,7 @@ class SessionManager:
         self.locks: dict[str, RLock] = {}
         self.last_account_cache: dict[str, dict[str, Any]] = {}
         self.last_status_cache: dict[str, dict[str, Any]] = {}
-        self.restorable_sessions: dict[str, PersistedSession] = {}
+        self.restorable_sessions: dict[str, PersistedSessionMetadata] = {}
         self._probe_cache: dict[str, SessionProbeState] = {}
         self._login_progress: dict[str, LoginProgress] = {}
         self.store = store
@@ -515,17 +519,48 @@ class SessionManager:
 
     def connect(self, user_id: str, payload: ConnectRequest) -> ManagedSession:
         with self.user_lock(user_id):
-            if self.get(user_id) is None and user_id in self.restorable_sessions:
-                try:
-                    self.restore_on_demand(user_id)
-                except ServiceError:
-                    # Explicit credentials below still get a chance to create a
-                    # fresh session when a persisted SSID is no longer valid.
-                    logger.warning(
-                        "[SESSION_RESTORE_SKIPPED] user_id=%s reason=connect_fallback_to_credentials",
-                        user_id,
-                    )
-            return self._connect_unlocked(user_id, payload)
+            logger.info("[CONNECT_REQUEST] user_id=%s", user_id)
+            probe = self.get_probe_state(user_id)
+            probe.failure_count = 0
+            probe.next_retry_at = 0.0
+            probe.offline_until = 0.0
+            self.clear_probe_cache(user_id)
+            logger.info("[CONNECT_BACKOFF_CLEARED] user_id=%s", user_id)
+
+            is_2fa_continuation = bool(
+                payload.sms_code
+                and self.get(user_id) is not None
+                and not payload.email
+                and not payload.password
+            )
+            if not is_2fa_continuation:
+                existing = self.get(user_id)
+                logger.info(
+                    "[CONNECT_CLEAR_OLD_SESSION] user_id=%s had_active_session=%s had_restorable_session=%s",
+                    user_id,
+                    existing is not None,
+                    user_id in self.restorable_sessions,
+                )
+                if existing is not None:
+                    self._close_session(existing)
+                self.remove(user_id)
+                self.restorable_sessions.pop(user_id, None)
+                self.last_account_cache.pop(user_id, None)
+                self.last_status_cache.pop(user_id, None)
+                if self.store is not None:
+                    self.store.mark_disconnected(user_id, revoke_token=True)
+
+            try:
+                session = self._connect_unlocked(user_id, payload)
+                logger.info("[CONNECT_SUCCESS] user_id=%s", user_id)
+                return session
+            except Exception as exc:
+                logger.warning(
+                    "[CONNECT_FAILED_HANDLED] user_id=%s detail=%s",
+                    user_id,
+                    getattr(exc, "message", None) or type(exc).__name__,
+                )
+                raise
 
     def _connect_unlocked(self, user_id: str, payload: ConnectRequest) -> ManagedSession:
         probe = self.get_probe_state(user_id)
@@ -573,6 +608,7 @@ class SessionManager:
         desired_mode = normalize_mode(payload.account_mode)
 
         def connect_new_session(attempt: int) -> ManagedSession:
+            logger.info("[CONNECT_CREATE_SESSION] user_id=%s attempt=%s", user_id, attempt)
             new_session = ManagedSession(
                 user_id=user_id,
                 client=Bullex(payload.email, payload.password),
@@ -586,6 +622,7 @@ class SessionManager:
             self.upsert(new_session)
             self._set_login_progress(user_id, "AUTHENTICATING", attempt=attempt, active=True)
             logger.info("[LOGIN_AUTH] user_id=%s attempt=%s mode=password", user_id, attempt)
+            logger.info("[CONNECT_WS_START] user_id=%s attempt=%s", user_id, attempt)
             try:
                 with self._session_context(new_session):
                     ok, reason = self._run_with_timeout(
@@ -724,11 +761,15 @@ class SessionManager:
 
         self.restorable_sessions = {
             persisted.user_id: persisted
-            for persisted in self.store.load_connected()
+            for persisted in self.store.load_connected_metadata()
         }
         for user_id in self.restorable_sessions:
             logger.info(
                 "[SESSION_RESTORE_SKIPPED] user_id=%s reason=awaiting_on_demand_restore",
+                user_id,
+            )
+            logger.info(
+                "[STARTUP_SESSION_RESTORE_SKIPPED] user_id=%s metadata_only=true",
                 user_id,
             )
         logger.info(
@@ -754,8 +795,8 @@ class SessionManager:
                 )
                 return existing
 
-            persisted = self.restorable_sessions.get(user_id)
-            if persisted is None:
+            metadata = self.restorable_sessions.get(user_id)
+            if metadata is None:
                 logger.info(
                     "[SESSION_RESTORE_SKIPPED] user_id=%s reason=not_restorable",
                     user_id,
@@ -763,6 +804,10 @@ class SessionManager:
                 raise ServiceError(SESSION_NOT_FOUND, 404)
 
             logger.info("[SESSION_RESTORE_ON_DEMAND] user_id=%s", user_id)
+            persisted = self.store.load_connected_user(user_id)
+            if persisted is None:
+                self.restorable_sessions.pop(user_id, None)
+                raise ServiceError(SESSION_NOT_FOUND, 404)
             session = ManagedSession(
                 user_id=persisted.user_id,
                 client=Bullex(persisted.email, ""),

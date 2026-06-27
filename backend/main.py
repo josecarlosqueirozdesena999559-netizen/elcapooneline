@@ -198,11 +198,11 @@ def build_error(message: str) -> dict[str, Any]:
     return {"ok": False, "data": None, "error": message}
 
 
-def build_account_unavailable() -> dict[str, Any]:
+def build_login_failed(detail: Any) -> dict[str, Any]:
     return {
         "ok": False,
-        "data": {"connected": False},
-        "error": "ACCOUNT_UNAVAILABLE",
+        "error": "LOGIN_FAILED",
+        "detail": str(detail or "BULLEX_TEMPORARY_UNAVAILABLE"),
     }
 
 
@@ -791,10 +791,16 @@ async def log_cors_allowed_origin(request: Request, call_next):
             request.url.path,
             exc.__class__.__name__,
         )
-        response = JSONResponse(
-            status_code=503,
-            content=build_error(BULLEX_TEMPORARY_UNAVAILABLE),
-        )
+        if request.url.path == "/bullex/connect":
+            response = JSONResponse(
+                status_code=200,
+                content=build_login_failed(exc),
+            )
+        else:
+            response = JSONResponse(
+                status_code=503,
+                content=build_error(BULLEX_TEMPORARY_UNAVAILABLE),
+            )
         if origin in config.cors_origins:
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Access-Control-Allow-Credentials"] = "true"
@@ -1080,10 +1086,12 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
             request.url.path,
             exc.__class__.__name__,
         )
-        return JSONResponse(
-            status_code=503,
-            content=build_error(BULLEX_TEMPORARY_UNAVAILABLE),
-        )
+        if request.url.path == "/bullex/connect":
+            return JSONResponse(
+                status_code=200,
+                content=build_login_failed(exc),
+            )
+        return JSONResponse(status_code=503, content=build_error(BULLEX_TEMPORARY_UNAVAILABLE))
     return JSONResponse(status_code=500, content=build_error("INTERNAL_ERROR"))
 
 
@@ -5096,7 +5104,9 @@ async def bullex_connect(
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
     user_id = auth["user_id"]
+    logger.info("[CONNECT_REQUEST] user_id=%s", user_id)
     clear_session_backoff(user_id)
+    logger.info("[CONNECT_BACKOFF_CLEARED] user_id=%s", user_id)
     status_code, payload = await call_bullex_service(
         "POST",
         "/sessions/connect",
@@ -5112,8 +5122,19 @@ async def bullex_connect(
         )
         if error == "LOGIN_TIMEOUT":
             logger.warning("[CONNECT_TIMEOUT_HANDLED] user_id=%s source=gateway_endpoint", user_id)
-            return json_response(504, build_error("LOGIN_TIMEOUT"))
-        return json_response(503, build_error(BULLEX_TEMPORARY_UNAVAILABLE))
+        logger.warning(
+            "[CONNECT_FAILED_HANDLED] user_id=%s detail=%s",
+            user_id,
+            error or BULLEX_TEMPORARY_UNAVAILABLE,
+        )
+        return json_response(
+            200,
+            build_login_failed(error or BULLEX_TEMPORARY_UNAVAILABLE),
+        )
+    if not payload.get("ok"):
+        detail = payload.get("error") or "LOGIN_FAILED"
+        logger.warning("[CONNECT_FAILED_HANDLED] user_id=%s detail=%s", user_id, detail)
+        return json_response(200, build_login_failed(detail))
     sync_user_store_from_payload(
         user_id,
         payload,
@@ -5158,6 +5179,7 @@ async def bullex_connect(
                 else None,
                 connection_status_source=state.connection_status_source,
             )["data"]
+        logger.info("[CONNECT_SUCCESS] user_id=%s active_mode=%s", user_id, active_mode)
     return json_response(status_code, payload)
 
 
@@ -5176,7 +5198,7 @@ async def bullex_status(auth: dict[str, str] = Depends(require_headers)) -> JSON
         fallback = memory_status_fallback(user_id)
         return json_response(
             200,
-            fallback or build_account_unavailable(),
+            fallback or build_success({"connected": False}),
         )
     connected, active_mode = extract_account_status(payload)
     if payload.get("ok") and connected:
@@ -5209,8 +5231,8 @@ async def bullex_status(auth: dict[str, str] = Depends(require_headers)) -> JSON
         )
         return json_response(200, fallback)
     if status_code == 404 or is_session_disconnected(payload) or payload_connected_state(payload) is False:
-        return json_response(200, build_account_unavailable())
-    return json_response(200, build_account_unavailable())
+        return json_response(200, build_success({"connected": False}))
+    return json_response(200, build_success({"connected": False}))
 
 
 @app.get("/bullex/balance")
@@ -5506,7 +5528,7 @@ async def bullex_account(auth: dict[str, str] = Depends(require_headers)) -> JSO
             )
         return json_response(
             200,
-            fallback or build_account_unavailable(),
+            fallback or build_success({"connected": False}),
         )
     if payload.get("ok") and payload_connected_state(payload) is not False:
         connected, active_mode = extract_account_status(payload)
@@ -5528,8 +5550,8 @@ async def bullex_account(auth: dict[str, str] = Depends(require_headers)) -> JSO
         )
         return json_response(200, fallback)
     if status_code == 404 or is_session_disconnected(payload) or payload_connected_state(payload) is False:
-        return json_response(200, build_account_unavailable())
-    return json_response(200, build_account_unavailable())
+        return json_response(200, build_success({"connected": False}))
+    return json_response(200, build_success({"connected": False}))
 
 
 @app.get("/bullex/order-result/{order_id}")

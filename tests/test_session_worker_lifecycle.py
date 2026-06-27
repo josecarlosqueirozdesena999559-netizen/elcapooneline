@@ -9,7 +9,7 @@ from backend import main
 from backend.auto_trader import AutoTrader, RobotConfigUpdate
 from backend.robot_persistence import SQLiteRobotPersistence
 from bullex_service import main as bullex_main
-from bullex_service.session_store import PersistedSession
+from bullex_service.session_store import PersistedSession, PersistedSessionMetadata
 
 
 class FakeWebSocket:
@@ -141,21 +141,37 @@ class SessionRestoreLifecycleTests(unittest.TestCase):
             last_connected_at=None,
         )
 
+    @staticmethod
+    def metadata() -> PersistedSessionMetadata:
+        return PersistedSessionMetadata(
+            user_id="restorable-user",
+            email="user@example.com",
+            account_mode="PRACTICE",
+            last_connected_at=None,
+        )
+
     def test_startup_loads_metadata_without_constructing_bullex(self) -> None:
         store = Mock()
-        store.load_connected.return_value = [self.persisted()]
+        store.load_connected_metadata.return_value = [self.metadata()]
         manager = bullex_main.SessionManager(store)
 
-        with patch.object(bullex_main, "Bullex") as bullex:
+        with (
+            patch.object(bullex_main, "Bullex") as bullex,
+            self.assertLogs("bullex-service", level="INFO") as logs,
+        ):
             manager.restore_sessions()
 
         bullex.assert_not_called()
         self.assertEqual(manager.sessions, {})
         self.assertIn("restorable-user", manager.restorable_sessions)
+        output = "\n".join(logs.output)
+        self.assertIn("[STARTUP_SESSION_RESTORE_SKIPPED]", output)
+        self.assertNotIn("[LOGIN_WS]", output)
 
     def test_on_demand_restore_reuses_single_session_and_websocket(self) -> None:
         store = Mock()
-        store.load_connected.return_value = [self.persisted()]
+        store.load_connected_metadata.return_value = [self.metadata()]
+        store.load_connected_user.return_value = self.persisted()
         fake_client = SimpleNamespace(
             restore_with_ssid=Mock(return_value=(True, None)),
             check_connect=lambda: True,
@@ -182,7 +198,7 @@ class SessionRestoreLifecycleTests(unittest.TestCase):
 
     def test_disconnect_removes_restorable_metadata_without_opening_session(self) -> None:
         store = Mock()
-        store.load_connected.return_value = [self.persisted()]
+        store.load_connected_metadata.return_value = [self.metadata()]
         manager = bullex_main.SessionManager(store)
 
         with patch.object(bullex_main, "Bullex") as bullex:
@@ -197,6 +213,73 @@ class SessionRestoreLifecycleTests(unittest.TestCase):
             "restorable-user",
             revoke_token=True,
         )
+
+    def test_fresh_connect_clears_only_current_users_old_session(self) -> None:
+        store = Mock()
+        store.load_connected_metadata.return_value = []
+        old_api = SimpleNamespace(close=Mock())
+        old_client = SimpleNamespace(api=old_api)
+        other_client = SimpleNamespace(api=SimpleNamespace(close=Mock()))
+        new_client = SimpleNamespace(
+            api=SimpleNamespace(close=Mock()),
+            connect=Mock(return_value=(True, None)),
+            check_connect=lambda: True,
+            websocket_alive=lambda: True,
+            get_balance_mode=lambda: "PRACTICE",
+            get_balance=lambda: 100.0,
+            get_currency=lambda: "USD",
+        )
+        manager = bullex_main.SessionManager(store)
+        manager.upsert(
+            bullex_main.ManagedSession(
+                user_id="current-user",
+                client=old_client,
+                email="old@example.com",
+            )
+        )
+        other_session = manager.upsert(
+            bullex_main.ManagedSession(
+                user_id="other-user",
+                client=other_client,
+                email="other@example.com",
+            )
+        )
+        probe = manager.get_probe_state("current-user")
+        probe.failure_count = 3
+        probe.next_retry_at = 9999999999
+
+        with (
+            patch.object(bullex_main, "Bullex", return_value=new_client) as bullex,
+            self.assertLogs("bullex-service", level="INFO") as logs,
+        ):
+            connected = manager.connect(
+                "current-user",
+                bullex_main.ConnectRequest(
+                    email="new@example.com",
+                    password="secret",
+                    account_mode="PRACTICE",
+                ),
+            )
+
+        self.assertIs(manager.get("current-user"), connected)
+        self.assertIs(manager.get("other-user"), other_session)
+        self.assertEqual(len(manager.sessions), 2)
+        self.assertEqual(len(manager.websockets), 2)
+        self.assertEqual(manager.get_probe_state("current-user").failure_count, 0)
+        self.assertEqual(manager.get_probe_state("current-user").next_retry_at, 0.0)
+        old_api.close.assert_called_once()
+        other_client.api.close.assert_not_called()
+        bullex.assert_called_once_with("new@example.com", "secret")
+        output = "\n".join(logs.output)
+        for marker in (
+            "[CONNECT_REQUEST]",
+            "[CONNECT_CLEAR_OLD_SESSION]",
+            "[CONNECT_BACKOFF_CLEARED]",
+            "[CONNECT_CREATE_SESSION]",
+            "[CONNECT_WS_START]",
+            "[CONNECT_SUCCESS]",
+        ):
+            self.assertIn(marker, output)
 
 
 class MaxEntriesPersistenceTests(unittest.TestCase):

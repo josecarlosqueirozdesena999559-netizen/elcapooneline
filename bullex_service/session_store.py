@@ -24,6 +24,14 @@ class PersistedSession:
     last_connected_at: str | None
 
 
+@dataclass
+class PersistedSessionMetadata:
+    user_id: str
+    email: str
+    account_mode: str
+    last_connected_at: str | None
+
+
 class SessionStore:
     def __init__(self, database_path: str, encryption_secret: str) -> None:
         self.database_path = database_path
@@ -102,6 +110,54 @@ class SessionStore:
                 )
             )
         return sessions
+
+    def load_connected_metadata(self) -> list[PersistedSessionMetadata]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select user_id, email, account_mode, last_connected_at
+                from bullex_sessions
+                where connected = 1 and encrypted_session_token is not null
+                order by user_id
+                """
+            ).fetchall()
+        return [
+            PersistedSessionMetadata(
+                user_id=row["user_id"],
+                email=row["email"],
+                account_mode=row["account_mode"],
+                last_connected_at=row["last_connected_at"],
+            )
+            for row in rows
+        ]
+
+    def load_connected_user(self, user_id: str) -> PersistedSession | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select user_id, email, account_mode, encrypted_session_token, last_connected_at
+                from bullex_sessions
+                where user_id = ? and connected = 1 and encrypted_session_token is not null
+                limit 1
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            token = self._fernet.decrypt(row["encrypted_session_token"].encode("ascii")).decode("utf-8")
+        except (InvalidToken, UnicodeError):
+            self._log_session_value("SESSION_LOAD", user_id, None)
+            self.mark_disconnected(user_id)
+            return None
+        self._log_session_value("SESSION_LOAD", user_id, token)
+        return PersistedSession(
+            user_id=row["user_id"],
+            email=row["email"],
+            account_mode=row["account_mode"],
+            session_token=token,
+            last_connected_at=row["last_connected_at"],
+        )
 
     def persistence_debug(self) -> dict[str, object]:
         with self._connect() as connection:
