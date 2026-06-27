@@ -2156,7 +2156,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["data"]["connection_status_source"], "disconnected")
         scan.assert_not_awaited()
 
-    async def test_robot_state_disconnects_after_three_failed_checks_and_account_disconnected(self) -> None:
+    async def test_robot_state_does_not_poll_or_disconnect_on_upstream_false_negative(self) -> None:
         user_id = "user-state-disconnected"
         state = main.auto_trader.start(user_id)
         main.auto_trader.set_pending_signal(
@@ -2171,51 +2171,18 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         state.entry_window_open = True
         state.quality_score = 91
 
-        with (
-            patch.object(
-                main,
-                "call_bullex_service",
-                new=AsyncMock(
-                    return_value=(
-                        200,
-                        main.build_success({"connected": False, "active_mode": "PRACTICE"}),
-                    )
-                ),
-            ),
-            patch.object(main, "sync_user_store_from_payload"),
-        ):
-            first_response = await main.robot_state({"user_id": user_id})
-            second_response = await main.robot_state({"user_id": user_id})
+        with patch.object(main, "call_bullex_service", new=AsyncMock()) as upstream:
             response = await main.robot_state({"user_id": user_id})
 
-        first_payload = json.loads(first_response.body)["data"]
-        second_payload = json.loads(second_response.body)["data"]
         payload = json.loads(response.body)["data"]
-        self.assertEqual(first_response.status_code, 200)
-        self.assertFalse(first_payload["connected"])
-        self.assertEqual(first_payload["connection_failure_count"], 1)
-        self.assertEqual(first_payload["connection_status_source"], "disconnected")
-        self.assertNotEqual(first_payload["status"], STATUS_ACCOUNT_DISCONNECTED)
-        self.assertIsNotNone(first_payload["pending_signal"])
-        self.assertEqual(second_response.status_code, 200)
-        self.assertFalse(second_payload["connected"])
-        self.assertEqual(second_payload["connection_failure_count"], 2)
-        self.assertNotEqual(second_payload["status"], STATUS_ACCOUNT_DISCONNECTED)
         self.assertEqual(response.status_code, 200)
         self.assertFalse(payload["connected"])
-        self.assertEqual(payload["status"], STATUS_ACCOUNT_DISCONNECTED)
-        self.assertEqual(payload["rejection_reason"], STATUS_ACCOUNT_DISCONNECTED)
-        self.assertEqual(payload["operation_message"], "Conta BullEx desconectada")
-        self.assertFalse(payload["enabled"])
-        self.assertFalse(payload["worker_running"])
-        self.assertFalse(payload["result_waiting"])
-        self.assertEqual(payload["connection_failure_count"], 3)
-        self.assertEqual(payload["connection_status_source"], "disconnected")
-        self.assertEqual(payload["seconds_until_next_cycle"], 0)
-        self.assertIsNone(payload["pending_signal"])
-        self.assertIsNone(payload["last_signal"])
+        self.assertEqual(payload["connection_failure_count"], 0)
+        self.assertNotEqual(payload["status"], STATUS_ACCOUNT_DISCONNECTED)
+        self.assertIsNotNone(payload["pending_signal"])
+        upstream.assert_not_awaited()
 
-    async def test_robot_state_keeps_cached_grace_after_temporary_account_failures(self) -> None:
+    async def test_robot_state_returns_cached_connection_without_upstream_poll(self) -> None:
         user_id = "user-state-grace"
         state = main.auto_trader.start(user_id)
         state = main.auto_trader.sync_connection(
@@ -2226,29 +2193,24 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         )
         state.connection_checked_at = utc_now() - timedelta(seconds=5)
 
-        async def fake_bullex(method: str, path: str, user_id_arg: str, **kwargs: Any) -> tuple[int, dict[str, Any]]:
-            if path in {"/sessions/status", "/account"}:
-                return 200, main.build_success({"connected": False, "active_mode": "PRACTICE"})
-            raise AssertionError(f"unexpected path {path}")
-
         with (
-            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
-            patch.object(main, "sync_user_store_from_payload"),
-            self.assertLogs("backend-gateway", level="WARNING") as logs,
+            patch.object(main, "call_bullex_service", new=AsyncMock()) as upstream,
+            self.assertLogs("backend-gateway", level="INFO") as logs,
         ):
             response = await main.robot_state({"user_id": user_id})
 
         payload = json.loads(response.body)["data"]
         self.assertEqual(response.status_code, 200)
         self.assertTrue(payload["connected"])
-        self.assertEqual(payload["connection_failure_count"], 1)
-        self.assertEqual(payload["connection_status_source"], "cached_grace")
+        self.assertEqual(payload["connection_failure_count"], 0)
+        self.assertEqual(payload["connection_status_source"], "bullex_service")
         self.assertIsNotNone(payload["last_connected_at"])
         self.assertIsNotNone(payload["connection_grace_until"])
         self.assertNotEqual(payload["status"], STATUS_ACCOUNT_DISCONNECTED)
-        self.assertIn("[CONNECTION_GRACE_ACTIVE]", "\n".join(logs.output))
+        self.assertIn("[ROBOT_STATE_FAST_RETURN]", "\n".join(logs.output))
+        upstream.assert_not_awaited()
 
-    async def test_robot_state_confirms_disconnected_only_after_grace_and_three_failures(self) -> None:
+    async def test_robot_state_does_not_revalidate_expired_grace_inline(self) -> None:
         user_id = "user-state-grace-expired"
         state = main.auto_trader.start(user_id)
         state = main.auto_trader.sync_connection(
@@ -2263,46 +2225,23 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         state.connection_grace_until = old_connected_at + timedelta(seconds=30)
         state.connection_failure_count = 2
 
-        async def fake_bullex(method: str, path: str, user_id_arg: str, **kwargs: Any) -> tuple[int, dict[str, Any]]:
-            if path in {"/sessions/status", "/account"}:
-                return 200, main.build_success({"connected": False, "active_mode": "PRACTICE"})
-            raise AssertionError(f"unexpected path {path}")
-
-        with (
-            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
-            patch.object(main, "sync_user_store_from_payload"),
-            self.assertLogs("backend-gateway", level="WARNING") as logs,
-        ):
+        with patch.object(main, "call_bullex_service", new=AsyncMock()) as upstream:
             response = await main.robot_state({"user_id": user_id})
 
         payload = json.loads(response.body)["data"]
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(payload["connected"])
-        self.assertEqual(payload["connection_failure_count"], 3)
-        self.assertEqual(payload["status"], STATUS_ACCOUNT_DISCONNECTED)
-        self.assertEqual(payload["connection_status_source"], "disconnected")
-        self.assertIn("[CONNECTION_CONFIRMED_DISCONNECTED]", "\n".join(logs.output))
+        self.assertTrue(payload["connected"])
+        self.assertEqual(payload["connection_failure_count"], 2)
+        self.assertNotEqual(payload["status"], STATUS_ACCOUNT_DISCONNECTED)
+        upstream.assert_not_awaited()
 
-    async def test_robot_state_ignores_session_false_negative_when_account_connected(self) -> None:
+    async def test_robot_state_uses_memory_without_requesting_session_or_account(self) -> None:
         user_id = "user-state-account-connected"
         state = main.auto_trader.start(user_id)
         state.connected = True
         state.active_mode = "PRACTICE"
-        calls: list[str] = []
 
-        async def fake_bullex(method: str, path: str, user_id_arg: str, **kwargs: Any) -> tuple[int, dict[str, Any]]:
-            calls.append(path)
-            if path == "/sessions/status":
-                return 409, {"ok": False, "data": {"connected": False}, "error": "SESSION_DISCONNECTED"}
-            if path == "/account":
-                return 200, main.build_success({"connected": True, "active_mode": "PRACTICE"})
-            raise AssertionError(f"unexpected path {path}")
-
-        with (
-            patch.object(main, "call_bullex_service", side_effect=fake_bullex),
-            patch.object(main, "sync_user_store_from_payload"),
-            self.assertLogs("backend-gateway", level="WARNING") as logs,
-        ):
+        with patch.object(main, "call_bullex_service", new=AsyncMock()) as upstream:
             response = await main.robot_state({"user_id": user_id})
 
         payload = json.loads(response.body)["data"]
@@ -2311,9 +2250,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["active_mode"], "PRACTICE")
         self.assertNotEqual(payload["status"], STATUS_ACCOUNT_DISCONNECTED)
         self.assertEqual(payload["connection_failure_count"], 0)
-        self.assertEqual(payload["connection_status_source"], "bullex_service")
-        self.assertEqual(calls[:2], ["/sessions/status", "/account"])
-        self.assertIn("[CONNECTION_FALSE_NEGATIVE_IGNORED]", "\n".join(logs.output))
+        upstream.assert_not_awaited()
 
     async def test_bullex_connect_syncs_robot_connection_immediately(self) -> None:
         user_id = "user-connect-sync"

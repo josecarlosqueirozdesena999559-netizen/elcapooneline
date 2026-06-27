@@ -139,7 +139,7 @@ class RobotConfigUpdate(BaseModel):
     min_payout: float | None = Field(default=None, ge=0, le=100, validation_alias=AliasChoices("min_payout", "minPayout"))
     stop_win: float | None = Field(default=None, ge=0, validation_alias=AliasChoices("stop_win", "stopWin"))
     stop_loss: float | None = Field(default=None, ge=0, validation_alias=AliasChoices("stop_loss", "stopLoss"))
-    max_entries_per_cycle: int | None = Field(default=None, ge=1, le=1, validation_alias=AliasChoices("max_entries_per_cycle", "maxEntriesPerCycle"))
+    max_entries_per_cycle: int | None = Field(default=None, ge=1, validation_alias=AliasChoices("max_entries_per_cycle", "maxEntriesPerCycle"))
     allow_real: bool | None = Field(default=None, validation_alias=AliasChoices("allow_real", "allowReal"))
     confirm_real: bool | None = Field(default=None, validation_alias=AliasChoices("confirm_real", "confirmReal"))
     martingale_enabled: bool | None = Field(default=None, validation_alias=AliasChoices("martingale_enabled", "martingaleEnabled"))

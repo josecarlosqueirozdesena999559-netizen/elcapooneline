@@ -196,8 +196,9 @@ class EndpointResilienceTests(unittest.IsolatedAsyncioTestCase):
 
         body = json.loads(response.body)
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(body["ok"])
+        self.assertFalse(body["ok"])
         self.assertFalse(body["data"]["connected"])
+        self.assertEqual(body["error"], "ACCOUNT_UNAVAILABLE")
 
     async def test_worker_is_not_started_while_user_is_offline(self) -> None:
         user_id = "user-offline-worker"

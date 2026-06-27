@@ -85,6 +85,8 @@ class SessionPersistenceTests(unittest.TestCase):
                 connect=Mock(side_effect=AssertionError("restore must not login with password")),
                 restore_with_ssid=Mock(return_value=(True, None)),
                 get_balance_mode=lambda: "PRACTICE",
+                get_balance=lambda: 100.0,
+                get_currency=lambda: "USD",
             )
             manager = bullex_main.SessionManager(store)
             with (
@@ -92,8 +94,9 @@ class SessionPersistenceTests(unittest.TestCase):
                 patch.object(manager, "_session_context", side_effect=lambda session: _FakeContext(session)),
             ):
                 manager.restore_sessions()
+                self.assertIsNone(manager.get("user-session"))
+                restored = manager.restore_on_demand("user-session")
 
-            restored = manager.get("user-session")
             self.assertIsNotNone(restored)
             self.assertEqual(restored.password, None)
             self.assertEqual(restored.state.SSID, "persisted-ssid")
@@ -120,6 +123,8 @@ class SessionPersistenceTests(unittest.TestCase):
                 self.assertLogs("bullex-service", level="WARNING") as logs,
             ):
                 manager.restore_sessions()
+                with self.assertRaises(bullex_main.ServiceError):
+                    manager.restore_on_demand("user-session")
 
             self.assertIsNone(manager.get("user-session"))
             fake_client.connect.assert_not_called()
@@ -144,6 +149,8 @@ class SessionPersistenceTests(unittest.TestCase):
                 self.assertLogs("bullex-service", level="WARNING") as logs,
             ):
                 manager.restore_sessions()
+                with self.assertRaises(bullex_main.ServiceError):
+                    manager.restore_on_demand("user-session")
 
             self.assertIsNone(manager.get("user-session"))
             fake_client.connect.assert_not_called()
@@ -625,7 +632,7 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(restored_trader.history(user_id)["trades"][0]["order_id"], "order-1")
             self.assertEqual(restored_trader.source(user_id), "memory")
 
-    async def test_startup_reactivates_enabled_robot_and_records_diagnostic(self) -> None:
+    async def test_startup_only_catalogs_enabled_robot_without_worker_or_session_probe(self) -> None:
         from backend import main
 
         persistence = SimpleNamespace(
@@ -642,32 +649,22 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
         main.robot_tasks = {}
         try:
             with (
-                patch.object(main, "read_restored_session_status", new=AsyncMock(return_value=True)),
+                patch.object(main, "read_restored_session_status", new=AsyncMock()) as session_probe,
                 patch.object(main, "ensure_robot_worker") as ensure_worker,
             ):
                 await main.restore_robot_states()
 
-            state = main.auto_trader.get("user-restore")
-            self.assertTrue(state.enabled)
-            self.assertNotEqual(state.status, "STOPPED")
-            self.assertTrue(state.connected)
-            self.assertEqual(state.connection_status_source, "bullex_service")
-            self.assertEqual(state.entry_value, 2)
-            self.assertEqual(state.min_confidence, 80)
-            self.assertEqual(state.min_payout, 80)
-            self.assertEqual(main.auto_trader.source("user-restore"), "memory")
-            ensure_worker.assert_called_once_with("user-restore")
-            persistence.save_restore_status.assert_called_once_with(
-                "user-restore",
-                session_restored=True,
-                robot_restored=True,
-            )
+            self.assertFalse(main.auto_trader.has_state("user-restore"))
+            self.assertIn("user-restore", main.restorable_robot_states)
+            session_probe.assert_not_awaited()
+            ensure_worker.assert_not_called()
+            persistence.save_restore_status.assert_not_called()
         finally:
             main.auto_trader = old_trader
             main.robot_persistence = old_persistence
             main.robot_tasks = old_tasks
 
-    async def test_restore_pending_signal_resumes_sending_order_worker(self) -> None:
+    async def test_startup_does_not_resume_pending_signal_or_create_worker(self) -> None:
         from backend import main
         from backend.auto_trader import STATUS_SENDING_ORDER
 
@@ -701,49 +698,48 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
         main.robot_tasks = {}
         try:
             with (
-                patch.object(main, "read_restored_session_status", new=AsyncMock(return_value=True)),
+                patch.object(main, "read_restored_session_status", new=AsyncMock()) as session_probe,
                 patch.object(main, "ensure_robot_worker") as ensure_worker,
             ):
                 await main.restore_robot_states()
 
-            state = main.auto_trader.get("user-pending-restore")
-            self.assertTrue(state.enabled)
-            self.assertTrue(state.connected)
-            self.assertEqual(state.status, STATUS_SENDING_ORDER)
-            self.assertIsNotNone(state.pending_signal)
-            ensure_worker.assert_called_once_with("user-pending-restore")
+            self.assertFalse(main.auto_trader.has_state("user-pending-restore"))
+            self.assertIn("user-pending-restore", main.restorable_robot_states)
+            session_probe.assert_not_awaited()
+            ensure_worker.assert_not_called()
         finally:
             main.auto_trader = old_trader
             main.robot_persistence = old_persistence
             main.robot_tasks = old_tasks
 
-    async def test_robot_state_reports_restored_connection(self) -> None:
+    async def test_robot_state_returns_memory_default_without_restoring_connection(self) -> None:
         from backend import main
 
         old_trader = main.auto_trader
         main.auto_trader = AutoTrader()
-        main.auto_trader.start("user-state")
         try:
+            service_call = AsyncMock(
+                return_value=(
+                    200,
+                    main.build_success(
+                        {"connected": True, "active_mode": "PRACTICE"}
+                    ),
+                )
+            )
             with (
                 patch.object(
                     main,
                     "call_bullex_service",
-                    new=AsyncMock(
-                        return_value=(
-                            200,
-                            main.build_success(
-                                {"connected": True, "active_mode": "PRACTICE"}
-                            ),
-                        )
-                    ),
+                    new=service_call,
                 ),
                 patch.object(main, "sync_user_store_from_payload"),
             ):
                 response = await main.robot_state({"user_id": "user-state"})
 
             payload = json.loads(response.body)
-            self.assertTrue(payload["data"]["enabled"])
-            self.assertNotEqual(payload["data"]["status"], "STOPPED")
-            self.assertTrue(payload["data"]["connected"])
+            self.assertFalse(payload["data"]["enabled"])
+            self.assertEqual(payload["data"]["status"], "STOPPED")
+            self.assertFalse(payload["data"]["connected"])
+            service_call.assert_not_awaited()
         finally:
             main.auto_trader = old_trader

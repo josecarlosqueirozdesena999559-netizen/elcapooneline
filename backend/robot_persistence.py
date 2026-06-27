@@ -51,6 +51,23 @@ SUPABASE_ROBOT_SETTING_FIELDS = (
     "max_entries_per_cycle",
 )
 
+ROBOT_SETTING_DEFAULTS: dict[str, Any] = {
+    "entry_value": 2,
+    "stop_win": 50,
+    "stop_loss": 30,
+    "cycle_minutes": 5,
+    "min_confidence": 80,
+    "min_payout": 80,
+    "strategy_mode": "conservative",
+    "account_mode": "DEMO",
+    "allow_real": False,
+    "confirm_real": False,
+    "max_entries_per_cycle": 1,
+    "martingale_enabled": False,
+    "martingale_steps": 1,
+    "martingale_multiplier": 2,
+}
+
 
 def require_user_id(user_id: str) -> str:
     normalized = str(user_id or "").strip()
@@ -213,9 +230,21 @@ class SQLiteRobotPersistence(RobotPersistence):
 
     def save_settings(self, user_id: str, settings: dict[str, Any]) -> None:
         user_id = require_user_id(user_id)
-        values = extract_local_robot_settings(settings)
+        incoming = extract_local_robot_settings(settings)
         now = utc_iso()
         with self._connect() as connection:
+            existing_row = connection.execute(
+                """
+                select entry_value, stop_win, stop_loss, cycle_minutes,
+                       min_confidence, min_payout, strategy_mode, account_mode,
+                       allow_real, confirm_real, max_entries_per_cycle,
+                       martingale_enabled, martingale_steps, martingale_multiplier
+                from robot_user_settings where user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            existing = dict(existing_row) if existing_row is not None else {}
+            values = {**ROBOT_SETTING_DEFAULTS, **existing, **incoming}
             connection.execute(
                 """
                 insert into robot_user_settings (
