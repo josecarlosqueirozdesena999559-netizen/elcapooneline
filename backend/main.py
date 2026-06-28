@@ -471,7 +471,18 @@ def temporary_upstream_response(
     cache_key: str,
     *,
     reason: str,
+    allow_failure_backoff: bool = True,
 ) -> tuple[int, dict[str, Any]]:
+    if not allow_failure_backoff:
+        logger.info(
+            "[BACKOFF_SKIPPED_RESTORE] user_id=%s path=%s",
+            user_id,
+            path,
+        )
+        cached = cached_successful_response(user_id, cache_key)
+        if cached is not None:
+            return 200, add_stale_warning(cached.payload)
+        return 503, build_error(BULLEX_TEMPORARY_UNAVAILABLE)
     if not is_user_active(user_id):
         logger.info(
             "[BACKOFF_SKIPPED_OFFLINE_USER] user_id=%s path=%s reason=%s",
@@ -1148,6 +1159,7 @@ async def call_bullex_service(
     params: dict[str, Any] | None = None,
     *,
     allow_session_restore: bool = False,
+    allow_failure_backoff: bool = True,
 ) -> tuple[int, dict[str, Any]]:
     cache_key = build_cache_key(path, params)
     ttl_seconds = request_cache_ttl_seconds(path, params)
@@ -1271,6 +1283,7 @@ async def call_bullex_service(
                 path,
                 cache_key,
                 reason="timeout",
+                allow_failure_backoff=allow_failure_backoff,
             )
         logger.warning(
             "[UPSTREAM_ERROR_HANDLED] user_id=%s path=%s reason=timeout",
@@ -1297,6 +1310,7 @@ async def call_bullex_service(
                 path,
                 cache_key,
                 reason=exc.__class__.__name__,
+                allow_failure_backoff=allow_failure_backoff,
             )
         logger.warning(
             "[UPSTREAM_ERROR_HANDLED] user_id=%s path=%s reason=%s",
@@ -1319,6 +1333,7 @@ async def call_bullex_service(
                 path,
                 cache_key,
                 reason=exc.__class__.__name__,
+                allow_failure_backoff=allow_failure_backoff,
             )
         return 503, build_error(BULLEX_TEMPORARY_UNAVAILABLE)
 
@@ -1346,6 +1361,7 @@ async def call_bullex_service(
             path,
             cache_key,
             reason=f"status_{response.status_code}",
+            allow_failure_backoff=allow_failure_backoff,
         )
 
     if response.status_code >= 500:
@@ -1391,9 +1407,23 @@ async def call_bullex_service(
         if payload.get("ok") and payload_connected_state(payload) is True:
             clear_session_backoff(user_id)
         elif payload_indicates_offline(response.status_code, payload):
-            mark_session_failure(user_id, offline=True)
+            if allow_failure_backoff:
+                mark_session_failure(user_id, offline=True)
+            else:
+                logger.info(
+                    "[BACKOFF_SKIPPED_RESTORE] user_id=%s path=%s",
+                    user_id,
+                    path,
+                )
         else:
-            mark_session_failure(user_id)
+            if allow_failure_backoff:
+                mark_session_failure(user_id)
+            else:
+                logger.info(
+                    "[BACKOFF_SKIPPED_RESTORE] user_id=%s path=%s",
+                    user_id,
+                    path,
+                )
 
     if method == "GET" and path in {"/candles", "/payouts"}:
         symbol = normalize_binary_active(str((params or {}).get("active") or ""))
@@ -4476,7 +4506,12 @@ async def stop_robot_worker(user_id: str) -> None:
 
 async def read_restored_session_status(user_id: str) -> bool:
     for attempt in range(5):
-        _, payload = await call_bullex_service("GET", "/sessions/status", user_id)
+        _, payload = await call_bullex_service(
+            "GET",
+            "/sessions/status",
+            user_id,
+            allow_failure_backoff=False,
+        )
         connected, _ = extract_account_status(payload)
         if connected:
             sync_user_store_from_payload(user_id, payload)

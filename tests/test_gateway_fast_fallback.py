@@ -42,6 +42,31 @@ class RecordingClientContext:
         )
 
 
+class StaticClientContext:
+    def __init__(self, response: httpx.Response) -> None:
+        self.response = response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def request(self, **_kwargs):
+        return self.response
+
+
+class HttpErrorClientContext:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def request(self, **_kwargs):
+        raise httpx.ConnectError("upstream unavailable")
+
+
 class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.old_trader = main.auto_trader
@@ -160,6 +185,57 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(logs.output)
         self.assertIn("[BACKOFF_SKIPPED_OFFLINE_USER]", output)
         self.assertNotIn("[USER_BACKOFF_ACTIVE]", output)
+
+    async def test_restore_requests_never_create_failure_backoff(self) -> None:
+        cases = (
+            (
+                "restore-http-error",
+                HttpErrorClientContext(),
+            ),
+            (
+                "restore-offline-response",
+                StaticClientContext(
+                    httpx.Response(
+                        404,
+                        json={
+                            "ok": False,
+                            "data": {"connected": False},
+                            "error": "SESSION_NOT_FOUND",
+                        },
+                    )
+                ),
+            ),
+            (
+                "restore-other-failure",
+                StaticClientContext(
+                    httpx.Response(
+                        400,
+                        json=main.build_error("INVALID_REQUEST"),
+                    )
+                ),
+            ),
+        )
+
+        for user_id, client_context in cases:
+            with self.subTest(user_id=user_id):
+                main.mark_user_active(user_id)
+                with (
+                    patch("backend.main.httpx.AsyncClient", return_value=client_context),
+                    self.assertLogs("backend-gateway", level="INFO") as logs,
+                ):
+                    await main.call_bullex_service(
+                        "GET",
+                        "/sessions/status",
+                        user_id,
+                        allow_failure_backoff=False,
+                    )
+
+                cache = main.get_session_cache(user_id)
+                self.assertEqual(cache.failure_count, 0)
+                self.assertIsNone(cache.next_retry_at)
+                output = "\n".join(logs.output)
+                self.assertIn("[BACKOFF_SKIPPED_RESTORE]", output)
+                self.assertNotIn("[USER_BACKOFF_ACTIVE]", output)
 
     def test_connect_activity_expires_after_five_minutes(self) -> None:
         user_id = "expired-active-user"
