@@ -23,6 +23,7 @@ from backend.auto_trader import (
     STATUS_ACCOUNT_DISCONNECTED,
     STATUS_ANALYZING,
     STATUS_CONNECTION_BACKOFF,
+    STATUS_BULLEX_ACTIVE_MODE_NOT_REAL,
     STATUS_INSUFFICIENT_BALANCE,
     STATUS_ORDER_REJECTED,
     STATUS_PENDING_GALE_RESULT,
@@ -69,7 +70,7 @@ CORS_ALLOWED_HEADERS = [
     "authorization",
 ]
 ROBOT_CONFIG_DEFAULTS = {
-    "account_mode": "DEMO",
+    "account_mode": "REAL",
     "timeframe": "M1",
     "strategy_mode": "conservative",
     "entry_value": 2.0,
@@ -1535,6 +1536,7 @@ def build_connection_payload(data: dict[str, Any], fallback_email: str | None = 
         "currency": "currency",
         "mode": "account_mode",
         "active_mode": "account_mode",
+        "active_mode_from_bullex": "account_mode",
         "requires_2fa": "requires_2fa",
     }
     for source_field, target_field in field_map.items():
@@ -1543,6 +1545,52 @@ def build_connection_payload(data: dict[str, Any], fallback_email: str | None = 
     if updates.get("connected") is True:
         updates["last_connected_at"] = datetime.now(timezone.utc).isoformat()
     return updates
+
+
+def build_real_account_contract(payload: dict[str, Any]) -> dict[str, Any]:
+    payload = normalize_service_payload(
+        payload,
+        error="REAL_BALANCE_NOT_DETECTED",
+    )
+    raw_data = payload.get("data")
+    data = deepcopy(raw_data) if isinstance(raw_data, dict) else {}
+    connected = bool(data.get("connected"))
+    active_mode = str(
+        data.get("active_mode_from_bullex")
+        or data.get("active_mode")
+        or data.get("mode")
+        or ""
+    ).strip().upper() or None
+    balance_real = number_or_none(data.get("balance_real"))
+    balance_practice = number_or_none(data.get("balance_practice"))
+    current_balance = number_or_none(data.get("balance"))
+    if active_mode == "REAL" and balance_real is None:
+        balance_real = current_balance
+    elif active_mode == "PRACTICE" and balance_practice is None:
+        balance_practice = current_balance
+
+    data.update(
+        {
+            "connected": connected,
+            "active_mode_real_detected": active_mode == "REAL",
+            "active_mode_from_bullex": active_mode,
+            "balance_real": balance_real,
+            "balance_practice": balance_practice,
+            "balance": balance_real,
+            "mode": active_mode,
+        }
+    )
+    if active_mode == "REAL" and balance_real is not None:
+        logger.info("[REAL_BALANCE_DETECTED] balance=%s", balance_real)
+        return build_success(data)
+    if balance_practice is not None:
+        logger.warning("[PRACTICE_BALANCE_IGNORED] balance=%s", balance_practice)
+    logger.warning("[REAL_MODE_NOT_CONFIRMED] active_mode=%s", active_mode)
+    return {
+        "ok": False,
+        "data": data,
+        "error": "REAL_BALANCE_NOT_DETECTED",
+    }
 
 
 def sync_user_store_from_payload(
@@ -2358,7 +2406,6 @@ def is_stop_status(status: Any) -> bool:
     return str(status or "").strip().upper() in {
         STATUS_STOP_WIN_HIT,
         STATUS_STOP_LOSS_HIT,
-        STATUS_INSUFFICIENT_BALANCE,
     }
 
 
@@ -2401,7 +2448,7 @@ def get_cached_account_snapshot(user_id: str) -> dict[str, Any]:
             "mode": None,
             "connected": None,
         }
-    mode = data.get("active_mode") or data.get("mode")
+    mode = data.get("active_mode_from_bullex") or data.get("active_mode") or data.get("mode")
     return {
         "email": data.get("email"),
         "balance": data.get("balance"),
@@ -2486,6 +2533,15 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         data["pending_signal"] = None
         data["operation_message"] = "Saldo insuficiente na conta REAL"
         data["status_message"] = "Saldo insuficiente na conta REAL"
+    if data.get("status") == STATUS_BULLEX_ACTIVE_MODE_NOT_REAL:
+        data["enabled"] = False
+        data["worker_running"] = False
+        data["operation_in_progress"] = False
+        data["result_waiting"] = False
+        data["analysis_message"] = None
+        data["pending_signal"] = None
+        data["operation_message"] = "Entre na conta REAL da BullEx para iniciar o robô."
+        data["status_message"] = "Entre na conta REAL da BullEx para iniciar o robô."
     if is_stop_status(data.get("status")):
         data["enabled"] = False
         data["worker_running"] = False
@@ -2781,6 +2837,7 @@ def get_user_robot_state(user_id: str) -> Any:
             }
             if settings is not None:
                 payload = {**payload, **settings}
+            payload["account_mode"] = "REAL"
             trades = robot_persistence.load_trades(user_id)
             state = auto_trader.restore(
                 user_id,
@@ -2794,8 +2851,9 @@ def get_user_robot_state(user_id: str) -> Any:
         if settings is not None:
             state = auto_trader.get(user_id)
             for field, value in settings.items():
-                if hasattr(state, field):
+                if field != "account_mode" and hasattr(state, field):
                     setattr(state, field, value)
+            state.account_mode = "REAL"
             state.enabled = False
             auto_trader.mark_source(user_id, robot_persistence_source())
             robot_state_hydrated_users.add(user_id)
@@ -3569,7 +3627,7 @@ async def execute_robot_cycle(
                     )
                     return 403, build_error(block_reason)
 
-            expected_bullex_mode = "PRACTICE" if state.account_mode == "DEMO" else "REAL"
+            expected_bullex_mode = "REAL"
             if active_mode != expected_bullex_mode:
                 state = auto_trader.reject(user_id, f"ACCOUNT_MODE_MUST_BE_{expected_bullex_mode}")
                 logger.info(
@@ -4046,9 +4104,7 @@ async def execute_robot_cycle(
                 state.gale_pending = False
                 state.gale_active = False
                 return 200, build_robot_payload(state)
-            order_path = "/bullex/buy-demo"
-            if state.account_mode == "REAL":
-                order_path = "/bullex/buy-real"
+            order_path = "/bullex/buy-real"
 
             skipped_candidates = 0
             last_order_status = 409
@@ -4612,6 +4668,7 @@ async def restore_robot_states() -> None:
             session_restored = False
             payload = {
                 **payload,
+                "account_mode": "REAL",
                 "connected": session_restored,
                 "active_mode": None,
                 "connection_checked_at": None,
@@ -4963,8 +5020,9 @@ async def debug_bullex_connection_schema(
             "email": "user@example.com",
             "connected": True,
             "requires_2fa": False,
-            "active_mode": "PRACTICE",
-            "currency": "USD",
+            "active_mode": "REAL",
+            "active_mode_from_bullex": "REAL",
+            "currency": "BRL",
             "balance": 0,
         }
     )
@@ -5025,6 +5083,7 @@ async def robot_config(
         )
         return json_response(409, CONFIG_LOCK_ERROR)
     raw_body = dict(body or {})
+    raw_body["account_mode"] = "REAL"
     logger.warning("[ROBOT_CONFIG_PAYLOAD] user_id=%s payload=%s", user_id, raw_body)
     logger.info("[REAL_CONFIG_RECEIVED] user_id=%s payload=%s", user_id, raw_body)
     ignored_ai_fields = ignored_ai_config_fields(raw_body)
@@ -5087,6 +5146,7 @@ async def _robot_start_impl(auth: dict[str, str]) -> JSONResponse:
     user_id = auth["user_id"]
     mark_user_active(user_id)
     state = get_user_robot_state(user_id)
+    state.account_mode = "REAL"
     if is_stop_status(state.status):
         return json_response(409, build_error("RESET_CYCLE_REQUIRED"))
     if fresh_robot_connection(state) and state.connected and state.active_mode is not None:
@@ -5102,33 +5162,59 @@ async def _robot_start_impl(auth: dict[str, str]) -> JSONResponse:
         persist_robot(user_id)
         await stop_robot_worker(user_id)
         return json_response(409, build_error("BULLEX_NOT_CONNECTED"))
-    if active_mode == "REAL":
-        snapshot = await refresh_account_snapshot_if_needed(
+    if active_mode != "REAL":
+        logger.warning(
+            "[REAL_MODE_NOT_CONFIRMED] user_id=%s active_mode=%s",
             user_id,
-            connected=connected,
-            active_mode=active_mode,
+            active_mode,
         )
-        try:
-            real_balance = float(snapshot["balance"]) if snapshot.get("balance") is not None else None
-        except (TypeError, ValueError):
-            real_balance = None
-        if real_balance is not None and real_balance <= 0:
-            state = auto_trader.insufficient_balance(user_id)
-            persist_robot(user_id)
-            await stop_robot_worker(user_id)
-            logger.warning(
-                "[ROBOT_START_BLOCKED_INSUFFICIENT_BALANCE] user_id=%s balance=%s",
-                user_id,
-                real_balance,
-            )
-            return json_response(
-                200,
-                build_robot_payload(
-                    state,
-                    user_id=user_id,
-                    balance=real_balance,
-                ),
-            )
+        state = auto_trader.require_real_mode(user_id)
+        persist_robot(user_id)
+        await stop_robot_worker(user_id)
+        return json_response(200, build_robot_payload(state, user_id=user_id))
+
+    try:
+        _, account_payload = await call_bullex_service("GET", "/account", user_id)
+    except Exception as exc:
+        logger.warning(
+            "[REAL_MODE_NOT_CONFIRMED] user_id=%s reason=%s",
+            user_id,
+            exc.__class__.__name__,
+        )
+        state = auto_trader.require_real_mode(user_id)
+        persist_robot(user_id)
+        await stop_robot_worker(user_id)
+        contract = build_real_account_contract(build_success({"connected": False}))
+        contract["data"]["robot"] = build_robot_payload(state, user_id=user_id)["data"]
+        return json_response(200, contract)
+    account_contract = build_real_account_contract(account_payload)
+    account_data = account_contract["data"]
+    if not account_contract.get("ok"):
+        state = auto_trader.require_real_mode(user_id)
+        persist_robot(user_id)
+        await stop_robot_worker(user_id)
+        account_data["robot"] = build_robot_payload(state, user_id=user_id)["data"]
+        return json_response(200, account_contract)
+    real_balance = number_or_none(account_data.get("balance_real"))
+    if real_balance is None or float(real_balance) <= 0 or float(real_balance) < float(state.entry_value):
+        state = auto_trader.insufficient_balance(user_id)
+        persist_robot(user_id)
+        await stop_robot_worker(user_id)
+        logger.warning(
+            "[ROBOT_START_BLOCKED_INSUFFICIENT_BALANCE] user_id=%s balance=%s entry_value=%s",
+            user_id,
+            real_balance,
+            state.entry_value,
+        )
+        return json_response(
+            200,
+            build_robot_payload(
+                state,
+                user_id=user_id,
+                balance=real_balance,
+                balance_real=real_balance,
+            ),
+        )
     if state.account_mode == "REAL":
         logger.info(
             "[REAL MODE DETECTED] user_id=%s active_mode=%s confirm_real=%s",
@@ -5293,8 +5379,7 @@ async def robot_sync_connection(auth: dict[str, str] = Depends(require_headers))
 
 @app.post("/robot/execute-demo")
 async def robot_execute_demo(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    status_code, payload = await execute_robot_cycle(auth["user_id"], required_mode="DEMO")
-    return json_response(status_code, payload)
+    return json_response(409, build_error("REAL_MODE_ONLY"))
 
 
 @app.post("/robot/execute-real")
@@ -5366,11 +5451,16 @@ async def _bullex_connect_impl(
     clear_session_backoff(user_id)
     logger.info("[CONNECT_BACKOFF_CLEARED] user_id=%s", user_id)
     logger.info("[CONNECT_ATTEMPT] user_id=%s", user_id)
+    logger.info("[REAL_MODE_REQUESTED] user_id=%s", user_id)
+    connect_body = {
+        **body,
+        "account_mode": "REAL",
+    }
     status_code, payload = await call_bullex_service(
         "POST",
         "/sessions/connect",
         user_id,
-        json_body=body,
+        json_body=connect_body,
     )
     payload = normalize_service_payload(payload)
     if status_code >= 500:
@@ -5394,19 +5484,56 @@ async def _bullex_connect_impl(
     if not payload.get("ok"):
         detail = payload.get("error") or "LOGIN_FAILED"
         logger.warning("[CONNECT_FAILED_HANDLED] user_id=%s detail=%s", user_id, detail)
+        if detail in {
+            "BULLEX_ACCOUNT_STILL_PRACTICE",
+            "REAL_BALANCE_NOT_DETECTED",
+        }:
+            state = auto_trader.require_real_mode(user_id)
+            persist_robot(user_id)
+            await stop_robot_worker(user_id)
+            return json_response(
+                200,
+                {
+                    **payload,
+                    "data": {
+                        **(payload.get("data") if isinstance(payload.get("data"), dict) else {}),
+                        "robot": build_robot_payload(state, user_id=user_id)["data"],
+                    },
+                },
+            )
         return json_response(200, build_controlled_upstream_error(detail))
     sync_user_store_from_payload(
         user_id,
         payload,
-        body.get("email"),
+        connect_body.get("email"),
         is_new_connection=True,
     )
     connected, active_mode = extract_account_status(payload)
-    if active_mode is None:
-        requested_mode = body.get("active_mode") or body.get("mode")
-        active_mode = str(requested_mode).strip().upper() if requested_mode else "PRACTICE"
+    if connected and active_mode != "REAL":
+        logger.warning(
+            "[REAL_MODE_NOT_CONFIRMED] user_id=%s active_mode=%s",
+            user_id,
+            active_mode,
+        )
+        state = auto_trader.require_real_mode(user_id)
+        persist_robot(user_id)
+        await stop_robot_worker(user_id)
+        return json_response(
+            200,
+            {
+                "ok": False,
+                "data": {
+                    "connected": connected,
+                    "active_mode_from_bullex": active_mode,
+                    "robot": build_robot_payload(state, user_id=user_id)["data"],
+                },
+                "error": "BULLEX_ACCOUNT_STILL_PRACTICE",
+            },
+        )
     if payload.get("ok") and connected:
+        logger.info("[REAL_MODE_CONFIRMED] user_id=%s active_mode=%s", user_id, active_mode)
         state = auto_trader.get(user_id)
+        state.account_mode = "REAL"
         state = auto_trader.sync_connection(
             user_id,
             connected=True,
@@ -5486,13 +5613,25 @@ async def _bullex_status_impl(auth: dict[str, str]) -> JSONResponse:
         return json_response(200, payload)
     connected, active_mode = extract_account_status(payload)
     if payload.get("ok") and connected:
-        state = auto_trader.sync_connection(
-            user_id,
-            connected=True,
-            active_mode=active_mode,
-            source=connection_source_from_payload(payload),
-            align_status=True,
-        )
+        if active_mode != "REAL":
+            logger.warning(
+                "[REAL_MODE_NOT_CONFIRMED] user_id=%s active_mode=%s",
+                user_id,
+                active_mode,
+            )
+            state = auto_trader.require_real_mode(user_id)
+            state.connected = True
+            state.active_mode = active_mode
+            persist_robot(user_id)
+            await stop_robot_worker(user_id)
+        else:
+            state = auto_trader.sync_connection(
+                user_id,
+                connected=True,
+                active_mode=active_mode,
+                source=connection_source_from_payload(payload),
+                align_status=True,
+            )
         data = payload.get("data")
         if isinstance(data, dict):
             data["robot"] = build_robot_payload(
@@ -5538,9 +5677,7 @@ async def bullex_status(auth: dict[str, str] = Depends(require_headers)) -> JSON
 
 @app.get("/bullex/balance")
 async def bullex_balance(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    status_code, payload = await call_bullex_service("GET", "/account/balance", auth["user_id"])
-    sync_user_store_from_payload(auth["user_id"], payload)
-    return json_response(status_code, payload)
+    return await _bullex_account_impl(auth)
 
 
 @app.post("/bullex/change-mode")
@@ -5552,7 +5689,7 @@ async def bullex_change_mode(
         "POST",
         "/account/change-mode",
         auth["user_id"],
-        json_body=body,
+        json_body={"mode": "REAL", "confirm_real": True},
     )
     sync_user_store_from_payload(auth["user_id"], payload)
     return json_response(status_code, payload)
@@ -5844,13 +5981,7 @@ async def bullex_buy_demo(
     body: dict[str, Any],
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
-    status_code, payload = await call_bullex_service(
-        "POST",
-        "/orders/buy-demo",
-        auth["user_id"],
-        json_body=body,
-    )
-    return json_response(status_code, payload)
+    return json_response(409, build_error("REAL_MODE_ONLY"))
 
 
 @app.post("/bullex/buy-real")
@@ -5942,22 +6073,35 @@ async def _bullex_account_impl(auth: dict[str, str]) -> JSONResponse:
                 user_id,
                 exc.__class__.__name__,
             )
-        if fallback is not None:
-            return json_response(200, fallback)
-        return json_response(200, build_controlled_upstream_error(exc))
+            contract = build_real_account_contract(fallback)
+        else:
+            contract = build_real_account_contract(build_success({"connected": False}))
+        if not contract.get("ok"):
+            state = auto_trader.require_real_mode(user_id)
+            persist_robot(user_id)
+            await stop_robot_worker(user_id)
+            contract["data"]["robot"] = build_robot_payload(state, user_id=user_id)["data"]
+        return json_response(200, contract)
     if payload.get("ok") and isinstance(payload.get("data"), dict) and payload["data"].get("status") == "backoff":
         return json_response(200, payload)
-    if payload.get("ok") and payload_connected_state(payload) is not False:
-        connected, active_mode = extract_account_status(payload)
-        if connected:
+    if isinstance(payload.get("data"), dict):
+        contract = build_real_account_contract(payload)
+        data = contract["data"]
+        if contract.get("ok"):
+            sync_user_store_from_payload(user_id, contract)
             auto_trader.sync_connection(
                 user_id,
                 connected=True,
-                active_mode=active_mode,
+                active_mode="REAL",
                 source=connection_source_from_payload(payload),
                 align_status=True,
             )
-        return json_response(200, payload)
+        else:
+            state = auto_trader.require_real_mode(user_id)
+            persist_robot(user_id)
+            await stop_robot_worker(user_id)
+            data["robot"] = build_robot_payload(state, user_id=user_id)["data"]
+        return json_response(200, contract)
     fallback = memory_account_fallback(user_id)
     if fallback is not None:
         logger.warning(
@@ -5965,13 +6109,22 @@ async def _bullex_account_impl(auth: dict[str, str]) -> JSONResponse:
             user_id,
             payload.get("error") or "connected_false",
         )
-        return json_response(200, fallback)
+        contract = build_real_account_contract(fallback)
+        if not contract.get("ok"):
+            state = auto_trader.require_real_mode(user_id)
+            persist_robot(user_id)
+            await stop_robot_worker(user_id)
+            contract["data"]["robot"] = build_robot_payload(state, user_id=user_id)["data"]
+        return json_response(200, contract)
     if status_code == 404 or is_session_disconnected(payload) or payload_connected_state(payload) is False:
-        return json_response(200, build_success({"connected": False}))
-    return json_response(
-        200,
-        build_controlled_upstream_error(payload.get("error") or BULLEX_TEMPORARY_UNAVAILABLE),
-    )
+        contract = build_real_account_contract(build_success({"connected": False}))
+    else:
+        contract = build_real_account_contract(payload)
+    state = auto_trader.require_real_mode(user_id)
+    persist_robot(user_id)
+    await stop_robot_worker(user_id)
+    contract["data"]["robot"] = build_robot_payload(state, user_id=user_id)["data"]
+    return json_response(200, contract)
 
 
 @app.get("/bullex/account")

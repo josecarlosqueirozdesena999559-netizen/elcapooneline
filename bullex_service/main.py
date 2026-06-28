@@ -99,7 +99,7 @@ class ConnectRequest(BaseModel):
     email: str | None = None
     password: str | None = None
     sms_code: str | None = None
-    account_mode: str = Field(default="PRACTICE")
+    account_mode: str = Field(default="REAL")
 
 
 class ChangeModeRequest(BaseModel):
@@ -133,7 +133,7 @@ class ManagedSession:
     email: str | None = None
     password: str | None = None
     sms_code: str | None = None
-    desired_mode: str = "PRACTICE"
+    desired_mode: str = "REAL"
     requires_2fa: bool = False
     state: SessionState = field(default_factory=SessionState)
 
@@ -472,10 +472,23 @@ class SessionManager:
             current_mode = normalize_mode(session.client.get_balance_mode())
             logger.info("[LOGIN_AUTH] user_id=%s attempt=%s mode=%s", user_id, attempt, current_mode)
             if session.desired_mode != current_mode:
+                logger.info(
+                    "[REAL_MODE_SWITCH_ATTEMPT] user_id=%s from_mode=%s to_mode=%s",
+                    user_id,
+                    current_mode,
+                    session.desired_mode,
+                )
                 session.client.change_balance(session.desired_mode)
                 current_mode = normalize_mode(session.client.get_balance_mode())
             if current_mode != session.desired_mode:
-                raise ServiceError("nao foi possivel ativar o modo solicitado", 409)
+                logger.warning(
+                    "[REAL_MODE_NOT_CONFIRMED] user_id=%s active_mode=%s",
+                    user_id,
+                    current_mode,
+                )
+                raise ServiceError("BULLEX_ACCOUNT_STILL_PRACTICE", 409)
+            if current_mode == "REAL":
+                logger.info("[REAL_MODE_CONFIRMED] user_id=%s", user_id)
             self._set_login_progress(user_id, "LOADING_BALANCE", attempt=attempt, active=True)
             session.client.get_balance()
             session.client.get_currency()
@@ -544,6 +557,8 @@ class SessionManager:
 
     def connect(self, user_id: str, payload: ConnectRequest) -> ManagedSession:
         with self.user_lock(user_id):
+            payload.account_mode = "REAL"
+            logger.info("[REAL_MODE_REQUESTED] user_id=%s", user_id)
             logger.info("[CONNECT_REQUEST] user_id=%s", user_id)
             probe = self.get_probe_state(user_id)
             probe.failure_count = 0
@@ -752,7 +767,7 @@ class SessionManager:
                 email=session.email,
                 password=session.password,
                 sms_code=session.sms_code,
-                desired_mode=session.desired_mode,
+                desired_mode="REAL",
                 requires_2fa=session.requires_2fa,
                 state=SessionState(SSID=session.state.SSID),
             )
@@ -827,7 +842,7 @@ class SessionManager:
                 user_id=persisted.user_id,
                 client=Bullex(persisted.email, ""),
                 email=persisted.email,
-                desired_mode=normalize_mode(persisted.account_mode),
+                desired_mode="REAL",
                 state=SessionState(SSID=persisted.session_token),
             )
             restore_with_ssid = getattr(session.client, "restore_with_ssid", None)
@@ -1055,6 +1070,25 @@ def normalize_balance_value(balance: Any) -> float | None:
     return float(balance)
 
 
+def read_separated_balances(client: Bullex) -> tuple[float | None, float | None]:
+    real_balance = None
+    practice_balance = None
+    get_balances = getattr(client, "get_balances", None)
+    if callable(get_balances):
+        raw = get_balances()
+        items = raw.get("msg") if isinstance(raw, dict) else None
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                amount = normalize_balance_value(item.get("amount"))
+                if item.get("type") == 1:
+                    real_balance = amount
+                elif item.get("type") == 4:
+                    practice_balance = amount
+    return real_balance, practice_balance
+
+
 def build_account_payload(session: ManagedSession) -> dict[str, Any]:
     connected = bool(session.client.check_connect())
     account = {
@@ -1064,20 +1098,42 @@ def build_account_payload(session: ManagedSession) -> dict[str, Any]:
         "mode": None,
         "email": session.email,
         "requires_2fa": session.requires_2fa,
+        "active_mode_real_detected": False,
+        "active_mode_from_bullex": None,
+        "balance_real": None,
+        "balance_practice": None,
     }
 
     if connected and not session.requires_2fa:
-        balance = normalize_balance_value(session.client.get_balance())
         mode = normalize_mode(session.client.get_balance_mode())
+        balance_real, balance_practice = read_separated_balances(session.client)
+        if balance_real is None and balance_practice is None:
+            current_balance = normalize_balance_value(session.client.get_balance())
+            if mode == "REAL":
+                balance_real = current_balance
+            elif mode == "PRACTICE":
+                balance_practice = current_balance
+        balance = balance_real if mode == "REAL" else balance_practice
         currency = session.client.get_currency() or ("BRL" if mode == "REAL" else None)
         account["balance"] = balance
         account["currency"] = currency
         account["mode"] = mode
+        account["active_mode_real_detected"] = mode == "REAL"
+        account["active_mode_from_bullex"] = mode
+        account["balance_real"] = balance_real
+        account["balance_practice"] = balance_practice
         if mode == "REAL":
             logger.info("[ACCOUNT_REAL_CONNECTED] user_id=%s email=%s", session.user_id, session.email)
+            logger.info("[REAL_BALANCE_DETECTED] user_id=%s balance=%s", session.user_id, balance_real)
             if balance == 0:
                 account["real_balance_warning"] = "BALANCE_ZERO"
                 logger.info("[BALANCE_ZERO_NOT_DISCONNECTED] user_id=%s mode=REAL", session.user_id)
+        elif practice_balance is not None:
+            logger.warning(
+                "[PRACTICE_BALANCE_IGNORED] user_id=%s balance=%s",
+                session.user_id,
+                practice_balance,
+            )
 
     return account
 
@@ -1223,7 +1279,18 @@ def connect_session(
         active_mode = None
         if not session.requires_2fa:
             with session_manager._session_context(session):
-                active_mode = session.client.get_balance_mode()
+                active_mode = normalize_mode(session.client.get_balance_mode())
+            if active_mode != "REAL":
+                logger.warning(
+                    "[REAL_MODE_NOT_CONFIRMED] user_id=%s active_mode=%s",
+                    user_id,
+                    active_mode,
+                )
+                return JSONResponse(
+                    status_code=409,
+                    content=build_error("BULLEX_ACCOUNT_STILL_PRACTICE"),
+                )
+            logger.info("[REAL_MODE_CONFIRMED] user_id=%s", user_id)
             connected = True
 
         return with_login_progress(build_success(
@@ -1232,6 +1299,8 @@ def connect_session(
                 "connected": connected,
                 "requires_2fa": session.requires_2fa,
                 "active_mode": active_mode,
+                "active_mode_from_bullex": active_mode,
+                "active_mode_real_detected": active_mode == "REAL",
             }
         ), user_id)
     except ServiceError as exc:
@@ -1350,16 +1419,7 @@ def reconnect_session(x_user_id: str | None = Header(default=None)) -> dict[str,
 @app.get("/account/balance")
 def account_balance(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
-
-    def operation(session: ManagedSession) -> dict[str, Any]:
-        ensure_session_ready(session)
-        return {
-            "balance": session.client.get_balance(),
-            "currency": session.client.get_currency(),
-            "mode": session.client.get_balance_mode(),
-        }
-
-    return build_success(session_manager.run(user_id, operation))
+    return build_success(session_manager.run(user_id, build_account_payload))
 
 
 @app.get("/account")
@@ -1416,9 +1476,7 @@ def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, 
 @app.post("/account/change-mode")
 def account_change_mode(payload: ChangeModeRequest, x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
-    target_mode = normalize_mode(payload.mode)
-    if target_mode == "REAL" and not payload.confirm_real:
-        raise ServiceError("operacao REAL bloqueada sem confirm_real=true", 403)
+    target_mode = "REAL"
 
     def operation(session: ManagedSession) -> dict[str, Any]:
         ensure_session_ready(session)
@@ -1580,25 +1638,8 @@ def get_payouts(active: str | None = None, x_user_id: str | None = Header(defaul
 
 @app.post("/orders/buy-demo")
 def buy_demo(payload: BuyOrderRequest, x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
-    user_id = require_user_id(x_user_id)
-    payload.action = normalize_action(payload.action)
-
-    def operation(session: ManagedSession) -> dict[str, Any]:
-        ensure_session_ready(session)
-        ensure_mode_matches(session.client, "PRACTICE")
-        ok, order_id = session.client.buy(payload.amount, payload.active, payload.action, payload.expiration)
-        if not ok:
-            raise ServiceError(f"falha ao criar ordem demo: {order_id}", 409)
-        return {
-            "mode": "PRACTICE",
-            "order_id": order_id,
-            "active": payload.active,
-            "amount": payload.amount,
-            "action": payload.action,
-            "expiration": payload.expiration,
-        }
-
-    return build_success(session_manager.run(user_id, operation))
+    require_user_id(x_user_id)
+    raise ServiceError("REAL_MODE_ONLY", 409)
 
 
 @app.post("/orders/buy-real")

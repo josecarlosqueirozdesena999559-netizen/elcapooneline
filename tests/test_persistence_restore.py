@@ -22,6 +22,76 @@ from bullex_service.session_store import SessionStore
 
 
 class SessionPersistenceTests(unittest.TestCase):
+    def test_ready_state_switches_bullex_to_real_and_confirms_it(self) -> None:
+        active_mode = {"value": "PRACTICE"}
+        change_balance = Mock(
+            side_effect=lambda mode: active_mode.update(value=mode)
+        )
+        session = bullex_main.ManagedSession(
+            user_id="switch-to-real",
+            client=SimpleNamespace(
+                get_balance_mode=lambda: active_mode["value"],
+                change_balance=change_balance,
+                get_balance=lambda: 50,
+                get_currency=lambda: "BRL",
+            ),
+            desired_mode="REAL",
+        )
+        manager = bullex_main.SessionManager(None)
+
+        with self.assertLogs("bullex-service", level="INFO") as logs:
+            manager._populate_ready_state(session, user_id=session.user_id, attempt=1)
+
+        change_balance.assert_called_once_with("REAL")
+        self.assertEqual(active_mode["value"], "REAL")
+        output = "\n".join(logs.output)
+        self.assertIn("[REAL_MODE_SWITCH_ATTEMPT]", output)
+        self.assertIn("[REAL_MODE_CONFIRMED]", output)
+
+    def test_ready_state_rejects_unconfirmed_real_mode(self) -> None:
+        session = bullex_main.ManagedSession(
+            user_id="still-practice",
+            client=SimpleNamespace(
+                get_balance_mode=lambda: "PRACTICE",
+                change_balance=Mock(),
+                get_balance=lambda: 10000,
+                get_currency=lambda: "USD",
+            ),
+            desired_mode="REAL",
+        )
+        manager = bullex_main.SessionManager(None)
+
+        with self.assertRaisesRegex(
+            bullex_main.ServiceError,
+            "BULLEX_ACCOUNT_STILL_PRACTICE",
+        ):
+            manager._populate_ready_state(session, user_id=session.user_id, attempt=1)
+
+    def test_account_payload_keeps_real_and_practice_balances_separate(self) -> None:
+        session = bullex_main.ManagedSession(
+            user_id="separate-balances",
+            client=SimpleNamespace(
+                check_connect=lambda: True,
+                get_balance_mode=lambda: "REAL",
+                get_balances=lambda: {
+                    "msg": [
+                        {"type": 1, "amount": 42.5},
+                        {"type": 4, "amount": 10000},
+                    ]
+                },
+                get_currency=lambda: "BRL",
+            ),
+            email="real@example.com",
+        )
+
+        payload = bullex_main.build_account_payload(session)
+
+        self.assertTrue(payload["active_mode_real_detected"])
+        self.assertEqual(payload["active_mode_from_bullex"], "REAL")
+        self.assertEqual(payload["balance_real"], 42.5)
+        self.assertEqual(payload["balance_practice"], 10000.0)
+        self.assertEqual(payload["balance"], 42.5)
+
     def test_build_account_payload_keeps_real_connected_with_zero_balance(self) -> None:
         session = bullex_main.ManagedSession(
             user_id="user-real-zero",
@@ -85,7 +155,7 @@ class SessionPersistenceTests(unittest.TestCase):
             fake_client = SimpleNamespace(
                 connect=Mock(side_effect=AssertionError("restore must not login with password")),
                 restore_with_ssid=Mock(return_value=(True, None)),
-                get_balance_mode=lambda: "PRACTICE",
+                get_balance_mode=lambda: "REAL",
                 get_balance=lambda: 100.0,
                 get_currency=lambda: "USD",
             )
@@ -180,7 +250,7 @@ class SessionPersistenceTests(unittest.TestCase):
             connect=Mock(return_value=(True, None)),
             check_connect=lambda: True,
             websocket_alive=lambda: True,
-            get_balance_mode=lambda: "PRACTICE",
+            get_balance_mode=lambda: "REAL",
             get_balance=lambda: 100.0,
             get_currency=lambda: "USD",
         )
@@ -199,7 +269,7 @@ class SessionPersistenceTests(unittest.TestCase):
     def test_session_manager_retries_login_after_timeout(self) -> None:
         first_client = SimpleNamespace(api=SimpleNamespace(close=Mock()))
         second_client = SimpleNamespace(
-            get_balance_mode=lambda: "PRACTICE",
+            get_balance_mode=lambda: "REAL",
             get_balance=lambda: 100.0,
             get_currency=lambda: "USD",
             check_connect=lambda: True,
@@ -243,7 +313,7 @@ class SessionPersistenceTests(unittest.TestCase):
         )
         fake_client = SimpleNamespace(
             restore_with_ssid=Mock(return_value=(True, None)),
-            get_balance_mode=lambda: "PRACTICE",
+            get_balance_mode=lambda: "REAL",
             get_balance=lambda: 50.0,
             get_currency=lambda: "USD",
             check_connect=lambda: True,
@@ -586,7 +656,7 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(stub.saved_state)
             self.assertTrue(stub.saved_trade)
-            self.assertEqual(stub.saved_settings_payload["account_mode"], "DEMO")
+            self.assertEqual(stub.saved_settings_payload["account_mode"], "REAL")
             self.assertIn("step=save_settings", "\n".join(logs.output))
         finally:
             main.auto_trader = old_trader

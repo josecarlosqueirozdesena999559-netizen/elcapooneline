@@ -174,7 +174,7 @@ class SessionRestoreLifecycleTests(unittest.TestCase):
             restore_with_ssid=Mock(return_value=(True, None)),
             check_connect=lambda: True,
             websocket_alive=lambda: True,
-            get_balance_mode=lambda: "PRACTICE",
+            get_balance_mode=lambda: "REAL",
             get_balance=lambda: 100.0,
             get_currency=lambda: "USD",
             api=SimpleNamespace(close=Mock()),
@@ -256,7 +256,7 @@ class SessionRestoreLifecycleTests(unittest.TestCase):
             connect=Mock(return_value=(True, None)),
             check_connect=lambda: True,
             websocket_alive=lambda: True,
-            get_balance_mode=lambda: "PRACTICE",
+            get_balance_mode=lambda: "REAL",
             get_balance=lambda: 100.0,
             get_currency=lambda: "USD",
         )

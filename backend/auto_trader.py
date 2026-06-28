@@ -54,6 +54,7 @@ STATUS_WAITING_RECOVERY = "WAITING_RECOVERY"
 STATUS_ACTIVE_COOLDOWN = "ACTIVE_COOLDOWN"
 STATUS_PAYOUT_COOLDOWN = "PAYOUT_COOLDOWN"
 STATUS_INSUFFICIENT_BALANCE = "INSUFFICIENT_BALANCE"
+STATUS_BULLEX_ACTIVE_MODE_NOT_REAL = "BULLEX_ACTIVE_MODE_NOT_REAL"
 
 TEMPORARY_WAIT_STATUSES = {
     STATUS_CONNECTION_BACKOFF,
@@ -70,6 +71,7 @@ DISCONNECTED_MESSAGE = "Conta BullEx desconectada"
 STOP_WIN_MESSAGE = "Stop Win atingido. Clique em Reiniciar ciclo para continuar."
 STOP_LOSS_MESSAGE = "Stop Loss atingido. Clique em Reiniciar ciclo para continuar."
 INSUFFICIENT_BALANCE_MESSAGE = "Saldo insuficiente na conta REAL"
+REAL_MODE_REQUIRED_MESSAGE = "Entre na conta REAL da BullEx para iniciar o robô."
 SIGNAL_EXPIRED_MESSAGE = "Entrada perdida por atraso. Aguardando novo sinal."
 ANALYSIS_TIMEOUT_SECONDS = 10
 SYNC_TIMEOUT_SECONDS = 30
@@ -152,7 +154,7 @@ class RobotConfigUpdate(BaseModel):
 @dataclass
 class RobotState:
     enabled: bool = False
-    account_mode: AccountMode = "DEMO"
+    account_mode: AccountMode = "REAL"
     timeframe: Timeframe = "M1"
     strategy_mode: StrategyMode = "conservative"
     entry_value: float = 2.0
@@ -376,6 +378,15 @@ class RobotState:
             data["result_waiting"] = False
             data["operation_message"] = INSUFFICIENT_BALANCE_MESSAGE
             data["status_message"] = INSUFFICIENT_BALANCE_MESSAGE
+            data["analysis_message"] = None
+            data["pending_signal"] = None
+            data["entry_window_open"] = False
+        elif self.status == STATUS_BULLEX_ACTIVE_MODE_NOT_REAL:
+            data["enabled"] = False
+            data["operation_in_progress"] = False
+            data["result_waiting"] = False
+            data["operation_message"] = REAL_MODE_REQUIRED_MESSAGE
+            data["status_message"] = REAL_MODE_REQUIRED_MESSAGE
             data["analysis_message"] = None
             data["pending_signal"] = None
             data["entry_window_open"] = False
@@ -776,6 +787,21 @@ class AutoTrader:
         state.pending_signal = None
         state.analysis_result = None
         state.last_analysis_result = STATUS_INSUFFICIENT_BALANCE
+        state.analysis_message = None
+        self._clear_gale_state(state)
+        return state
+
+    def require_real_mode(self, user_id: str) -> RobotState:
+        state = self.stop(user_id)
+        state.account_mode = "REAL"
+        state.status = STATUS_BULLEX_ACTIVE_MODE_NOT_REAL
+        state.rejection_reason = STATUS_BULLEX_ACTIVE_MODE_NOT_REAL
+        state.last_rejection_reason = STATUS_BULLEX_ACTIVE_MODE_NOT_REAL
+        state.last_order_error = STATUS_BULLEX_ACTIVE_MODE_NOT_REAL
+        state.operation_in_progress = False
+        state.pending_signal = None
+        state.analysis_result = None
+        state.last_analysis_result = STATUS_BULLEX_ACTIVE_MODE_NOT_REAL
         state.analysis_message = None
         self._clear_gale_state(state)
         return state

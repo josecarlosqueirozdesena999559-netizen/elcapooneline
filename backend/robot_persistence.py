@@ -59,7 +59,7 @@ ROBOT_SETTING_DEFAULTS: dict[str, Any] = {
     "min_confidence": 80,
     "min_payout": 80,
     "strategy_mode": "conservative",
-    "account_mode": "DEMO",
+    "account_mode": "REAL",
     "allow_real": False,
     "confirm_real": False,
     "max_entries_per_cycle": 1,
@@ -280,7 +280,7 @@ class SQLiteRobotPersistence(RobotPersistence):
                     values.get("min_confidence", 80),
                     values.get("min_payout", 80),
                     values.get("strategy_mode", "conservative"),
-                    values.get("account_mode", "DEMO"),
+                    values.get("account_mode", "REAL"),
                     int(bool(values.get("allow_real", False))),
                     int(bool(values.get("confirm_real", False))),
                     values.get("max_entries_per_cycle", 1),
@@ -467,7 +467,7 @@ class SQLiteRobotPersistence(RobotPersistence):
                     min_confidence integer not null default 80,
                     min_payout real not null default 80,
                     strategy_mode text not null default 'conservative',
-                    account_mode text not null default 'DEMO',
+                    account_mode text not null default 'REAL',
                     allow_real integer not null default 0,
                     confirm_real integer not null default 0,
                     max_entries_per_cycle integer not null default 1,
@@ -530,6 +530,13 @@ class SQLiteRobotPersistence(RobotPersistence):
             self._ensure_column(connection, "robot_trade_history", "final_result", "text")
             self._ensure_column(connection, "robot_trade_history", "original_amount", "real not null default 0")
             self._ensure_column(connection, "robot_trade_history", "gale_amount", "real not null default 0")
+            connection.execute(
+                """
+                update robot_user_settings
+                set account_mode = 'REAL'
+                where upper(coalesce(account_mode, '')) in ('DEMO', 'PRACTICE')
+                """
+            )
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         existing = {
@@ -566,7 +573,7 @@ class SupabaseRobotPersistence(RobotPersistence):
         body = {
             "user_id": user_id,
             "enabled": state.get("enabled", False),
-            "account_mode": state.get("account_mode", "DEMO"),
+            "account_mode": state.get("account_mode", "REAL"),
             "entry_value": state.get("entry_value", 2),
             "cycle_minutes": state.get("cycle_minutes", 5),
             "min_confidence": state.get("min_confidence", 80),
@@ -799,7 +806,7 @@ def build_trade_history_item(user_id: str, trade: dict[str, Any]) -> dict[str, A
     return {
         "user_id": user_id,
         "created_at": finished_at,
-        "account_mode": str(trade.get("mode") or trade.get("account_mode") or "DEMO").upper(),
+        "account_mode": str(trade.get("mode") or trade.get("account_mode") or "REAL").upper(),
         "active": str(trade.get("active") or ""),
         "direction": str(trade.get("direction") or "").upper(),
         "amount": float(trade.get("amount") or 0),

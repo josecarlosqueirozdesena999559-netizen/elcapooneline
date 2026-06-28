@@ -47,7 +47,7 @@ create table if not exists public.robot_states (
   user_id text not null references public.users(id) on delete cascade,
   state jsonb not null default '{}'::jsonb,
   enabled boolean not null default false,
-  account_mode text not null default 'DEMO',
+  account_mode text not null default 'REAL',
   strategy_mode text not null default 'conservative',
   entry_value numeric not null default 2,
   cycle_minutes integer not null default 5,
@@ -73,7 +73,7 @@ alter table public.robot_states
   add column if not exists id uuid default gen_random_uuid(),
   add column if not exists state jsonb not null default '{}'::jsonb,
   add column if not exists enabled boolean not null default false,
-  add column if not exists account_mode text not null default 'DEMO',
+  add column if not exists account_mode text not null default 'REAL',
   add column if not exists strategy_mode text not null default 'conservative',
   add column if not exists entry_value numeric not null default 2,
   add column if not exists cycle_minutes integer not null default 5,
@@ -95,6 +95,13 @@ alter table public.robot_states
   add column if not exists updated_at timestamptz not null default timezone('utc'::text, now());
 
 alter table public.robot_states
+  alter column account_mode set default 'REAL';
+
+update public.robot_states
+set account_mode = 'REAL'
+where upper(coalesce(account_mode, '')) in ('DEMO', 'PRACTICE');
+
+alter table public.robot_states
   alter column cycle_minutes set default 5,
   alter column min_confidence set default 80,
   alter column min_payout set default 80;
@@ -108,7 +115,7 @@ create table if not exists public.robot_user_settings (
   min_confidence integer not null default 80,
   min_payout numeric not null default 80,
   strategy_mode text not null default 'conservative',
-  account_mode text not null default 'DEMO',
+  account_mode text not null default 'REAL',
   allow_real boolean not null default false,
   confirm_real boolean not null default false,
   max_entries_per_cycle integer not null default 1,
@@ -127,7 +134,7 @@ alter table public.robot_user_settings
   add column if not exists min_confidence integer not null default 80,
   add column if not exists min_payout numeric not null default 80,
   add column if not exists strategy_mode text not null default 'conservative',
-  add column if not exists account_mode text not null default 'DEMO',
+  add column if not exists account_mode text not null default 'REAL',
   add column if not exists allow_real boolean not null default false,
   add column if not exists confirm_real boolean not null default false,
   add column if not exists max_entries_per_cycle integer not null default 1,
@@ -136,6 +143,13 @@ alter table public.robot_user_settings
   add column if not exists martingale_multiplier numeric not null default 2,
   add column if not exists created_at timestamptz not null default timezone('utc'::text, now()),
   add column if not exists updated_at timestamptz not null default timezone('utc'::text, now());
+
+alter table public.robot_user_settings
+  alter column account_mode set default 'REAL';
+
+update public.robot_user_settings
+set account_mode = 'REAL'
+where upper(coalesce(account_mode, '')) in ('DEMO', 'PRACTICE');
 
 alter table public.robot_states
   alter column id set default gen_random_uuid();

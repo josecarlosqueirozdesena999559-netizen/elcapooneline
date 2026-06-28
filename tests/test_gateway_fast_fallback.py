@@ -148,11 +148,16 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
             account = await main.bullex_account({"user_id": user_id})
             status = await main.bullex_status({"user_id": user_id})
 
-        for response in (account, status):
-            payload = json.loads(response.body)
-            self.assertEqual(response.status_code, 200)
-            self.assertTrue(payload["ok"])
-            self.assertFalse(payload["data"]["connected"])
+        account_payload = json.loads(account.body)
+        self.assertEqual(account.status_code, 200)
+        self.assertFalse(account_payload["ok"])
+        self.assertFalse(account_payload["data"]["connected"])
+        self.assertEqual(account_payload["error"], "REAL_BALANCE_NOT_DETECTED")
+
+        status_payload = json.loads(status.body)
+        self.assertEqual(status.status_code, 200)
+        self.assertTrue(status_payload["ok"])
+        self.assertFalse(status_payload["data"]["connected"])
         self.assertEqual(service_call.await_count, 2)
         self.assertTrue(main.is_user_active(user_id))
 
@@ -327,14 +332,22 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(
                 main,
-                "refresh_account_snapshot_if_needed",
+                "call_bullex_service",
                 new=AsyncMock(
-                    return_value={
-                        "connected": True,
-                        "mode": "REAL",
-                        "balance": 0,
-                        "currency": "BRL",
-                    }
+                    return_value=(
+                        200,
+                        main.build_success(
+                            {
+                                "connected": True,
+                                "active_mode_real_detected": True,
+                                "active_mode_from_bullex": "REAL",
+                                "balance_real": 0,
+                                "balance_practice": 10000,
+                                "balance": 0,
+                                "mode": "REAL",
+                            }
+                        ),
+                    )
                 ),
             ),
             patch.object(main, "ensure_robot_worker") as worker_start,
@@ -358,7 +371,7 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         user_id = "fast-status-fallback"
         state = main.auto_trader.start(user_id)
         state.connected = True
-        state.active_mode = "PRACTICE"
+        state.active_mode = "REAL"
 
         with patch.object(
             main,
@@ -371,6 +384,49 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(payload["data"]["connected"])
         self.assertEqual(payload["warning"], main.BULLEX_TEMPORARY_UNAVAILABLE)
+
+    async def test_account_ignores_practice_balance_and_blocks_robot(self) -> None:
+        user_id = "practice-balance-must-not-leak"
+        state = main.auto_trader.get(user_id)
+        state.connected = True
+        state.active_mode = "PRACTICE"
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success(
+                            {
+                                "connected": True,
+                                "active_mode_from_bullex": "PRACTICE",
+                                "balance_real": 25,
+                                "balance_practice": 10000,
+                                "balance": 10000,
+                                "mode": "PRACTICE",
+                            }
+                        ),
+                    )
+                ),
+            ),
+            patch.object(main, "persist_robot"),
+        ):
+            response = await main.bullex_account({"user_id": user_id})
+
+        payload = json.loads(response.body)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "REAL_BALANCE_NOT_DETECTED")
+        self.assertEqual(payload["data"]["balance"], 25)
+        self.assertEqual(payload["data"]["balance_real"], 25)
+        self.assertEqual(payload["data"]["balance_practice"], 10000)
+        self.assertFalse(payload["data"]["active_mode_real_detected"])
+        self.assertEqual(
+            payload["data"]["robot"]["status"],
+            "BULLEX_ACTIVE_MODE_NOT_REAL",
+        )
 
     async def test_connect_uses_sixty_second_policy_and_maps_timeout(self) -> None:
         with (
@@ -425,10 +481,12 @@ class GatewayControlledErrorCorsTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["ok"])
-        self.assertIsNone(response.json()["data"])
+        self.assertFalse(response.json()["data"]["connected"])
+        self.assertIsNone(response.json()["data"]["balance"])
+        self.assertIsNone(response.json()["data"]["balance_real"])
         self.assertEqual(
             response.json()["error"],
-            main.BULLEX_TEMPORARY_UNAVAILABLE,
+            "REAL_BALANCE_NOT_DETECTED",
         )
         self.assertEqual(
             response.headers.get("access-control-allow-origin"),
