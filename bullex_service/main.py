@@ -41,6 +41,7 @@ ALLOWED_BALANCE_MODES = {"PRACTICE", "REAL", "TOURNAMENT"}
 ALLOWED_ACTIONS = {"call", "put"}
 SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
 SESSION_DISCONNECTED = "SESSION_DISCONNECTED"
+BULLEX_ACTIVE_MODE_NOT_REAL = "BULLEX_ACTIVE_MODE_NOT_REAL"
 ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
 BINARY_ALLOWED_ASSETS = [
     "EURUSD-OTC",
@@ -89,9 +90,15 @@ LOGIN_PROGRESS_STATES = (
 
 
 class ServiceError(Exception):
-    def __init__(self, message: str, status_code: int = 400):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 400,
+        data: dict[str, Any] | None = None,
+    ):
         self.message = message
         self.status_code = status_code
+        self.data = data
         super().__init__(message)
 
 
@@ -469,9 +476,35 @@ class SessionManager:
         with self._session_context(session):
             self._wait_until_session_ready(session)
             self._set_login_progress(user_id, "LOADING_PROFILE", attempt=attempt, active=True)
+            real_balance_id, practice_balance_id, balances_discovered = discover_balance_ids(
+                session.client
+            )
+            if real_balance_id is not None:
+                logger.info(
+                    "[REAL_BALANCE_ID_FOUND] user_id=%s real_balance_id=%s practice_balance_id=%s",
+                    user_id,
+                    real_balance_id,
+                    practice_balance_id,
+                )
             current_mode = normalize_mode(session.client.get_balance_mode())
             logger.info("[LOGIN_AUTH] user_id=%s attempt=%s mode=%s", user_id, attempt, current_mode)
             if session.desired_mode != current_mode:
+                if balances_discovered and real_balance_id is None:
+                    logger.warning(
+                        "[REAL_MODE_NOT_CONFIRMED] user_id=%s active_mode=%s reason=real_balance_id_missing",
+                        user_id,
+                        current_mode,
+                    )
+                    raise ServiceError(
+                        BULLEX_ACTIVE_MODE_NOT_REAL,
+                        409,
+                        {
+                            "connected": True,
+                            "active_mode": current_mode,
+                            "mode": current_mode,
+                            "balance": None,
+                        },
+                    )
                 logger.info(
                     "[REAL_MODE_SWITCH_ATTEMPT] user_id=%s from_mode=%s to_mode=%s",
                     user_id,
@@ -486,7 +519,16 @@ class SessionManager:
                     user_id,
                     current_mode,
                 )
-                raise ServiceError("BULLEX_ACCOUNT_STILL_PRACTICE", 409)
+                raise ServiceError(
+                    BULLEX_ACTIVE_MODE_NOT_REAL,
+                    409,
+                    {
+                        "connected": True,
+                        "active_mode": current_mode,
+                        "mode": current_mode,
+                        "balance": None,
+                    },
+                )
             if current_mode == "REAL":
                 logger.info("[REAL_MODE_CONFIRMED] user_id=%s", user_id)
             self._set_login_progress(user_id, "LOADING_BALANCE", attempt=attempt, active=True)
@@ -1018,8 +1060,11 @@ def build_success(data: Any) -> dict[str, Any]:
     return {"ok": True, "data": data, "error": None}
 
 
-def build_error(message: str) -> dict[str, Any]:
-    return {"ok": False, "data": None, "error": message}
+def build_error(
+    message: str,
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {"ok": False, "data": data, "error": message}
 
 
 def with_login_progress(payload: dict[str, Any], user_id: str) -> dict[str, Any]:
@@ -1070,6 +1115,34 @@ def normalize_balance_value(balance: Any) -> float | None:
     return float(balance)
 
 
+def discover_balance_ids(client: Bullex) -> tuple[Any, Any, bool]:
+    balances: Any = None
+    balances_discovered = False
+    get_profile = getattr(client, "get_profile_ansyc", None)
+    if callable(get_profile):
+        profile = get_profile()
+        balances = profile.get("balances") if isinstance(profile, dict) else None
+        balances_discovered = isinstance(balances, list)
+    if not isinstance(balances, list):
+        get_balances = getattr(client, "get_balances", None)
+        if callable(get_balances):
+            raw = get_balances()
+            balances = raw.get("msg") if isinstance(raw, dict) else None
+            balances_discovered = isinstance(balances, list)
+
+    real_balance_id = None
+    practice_balance_id = None
+    for balance in balances if isinstance(balances, list) else []:
+        if not isinstance(balance, dict):
+            continue
+        balance_type = balance.get("type")
+        if balance_type == 1:
+            real_balance_id = balance.get("id")
+        elif balance_type == 4:
+            practice_balance_id = balance.get("id")
+    return real_balance_id, practice_balance_id, balances_discovered
+
+
 def read_separated_balances(client: Bullex) -> tuple[float | None, float | None]:
     real_balance = None
     practice_balance = None
@@ -1089,6 +1162,41 @@ def read_separated_balances(client: Bullex) -> tuple[float | None, float | None]
     return real_balance, practice_balance
 
 
+def build_real_only_account_response(account: dict[str, Any]) -> dict[str, Any]:
+    active_mode = str(
+        account.get("active_mode")
+        or account.get("active_mode_from_bullex")
+        or account.get("mode")
+        or ""
+    ).strip().upper() or None
+    if bool(account.get("connected")) and active_mode != "REAL":
+        blocked = {
+            **account,
+            "active_mode": active_mode,
+            "active_mode_from_bullex": active_mode,
+            "mode": active_mode,
+            "balance": None,
+        }
+        logger.warning(
+            "[PRACTICE_BALANCE_BLOCKED] user_id=%s active_mode=%s",
+            account.get("user_id") or "unknown",
+            active_mode,
+        )
+        return {
+            "ok": False,
+            "data": blocked,
+            "error": BULLEX_ACTIVE_MODE_NOT_REAL,
+        }
+    return build_success(account)
+
+
+def normalize_real_only_account_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if isinstance(data, dict):
+        return build_real_only_account_response(data)
+    return payload
+
+
 def build_account_payload(session: ManagedSession) -> dict[str, Any]:
     connected = bool(session.client.check_connect())
     account = {
@@ -1096,6 +1204,7 @@ def build_account_payload(session: ManagedSession) -> dict[str, Any]:
         "balance": None,
         "currency": None,
         "mode": None,
+        "user_id": session.user_id,
         "email": session.email,
         "requires_2fa": session.requires_2fa,
         "active_mode_real_detected": False,
@@ -1274,7 +1383,7 @@ def connect_session(
     user_id = str(x_user_id or "").strip()
     try:
         user_id = require_user_id(x_user_id)
-        payload.account_mode = normalize_mode(payload.account_mode)
+        payload.account_mode = "REAL"
         session = session_manager.connect(user_id, payload)
 
         connected = False
@@ -1290,7 +1399,15 @@ def connect_session(
                 )
                 return JSONResponse(
                     status_code=409,
-                    content=build_error("BULLEX_ACCOUNT_STILL_PRACTICE"),
+                    content=build_error(
+                        BULLEX_ACTIVE_MODE_NOT_REAL,
+                        {
+                            "connected": True,
+                            "active_mode": active_mode,
+                            "mode": active_mode,
+                            "balance": None,
+                        },
+                    ),
                 )
             logger.info("[REAL_MODE_CONFIRMED] user_id=%s", user_id)
             connected = True
@@ -1313,7 +1430,7 @@ def connect_session(
         )
         return JSONResponse(
             status_code=exc.status_code,
-            content=build_error(exc.message),
+            content=build_error(exc.message, exc.data),
         )
     except Exception as exc:
         logger.warning(
@@ -1421,7 +1538,9 @@ def reconnect_session(x_user_id: str | None = Header(default=None)) -> dict[str,
 @app.get("/account/balance")
 def account_balance(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
-    return build_success(session_manager.run(user_id, build_account_payload))
+    return build_real_only_account_response(
+        session_manager.run(user_id, build_account_payload)
+    )
 
 
 @app.get("/account")
@@ -1430,11 +1549,17 @@ def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, 
     cached = session_manager.get_cached_probe(user_id, "/account", path="/account")
     if cached is not None:
         _, payload = cached
-        return with_login_progress(payload, user_id)
+        return with_login_progress(
+            normalize_real_only_account_payload(payload),
+            user_id,
+        )
     if session_manager.get(user_id) is None:
         previous = session_manager.get_last_probe(user_id, "/account")
         if previous is not None:
-            return with_login_progress(previous[1], user_id)
+            return with_login_progress(
+                normalize_real_only_account_payload(previous[1]),
+                user_id,
+            )
         payload = with_login_progress(build_success({"connected": False}), user_id)
         return payload
 
@@ -1442,14 +1567,13 @@ def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, 
         return build_account_payload(session)
 
     try:
+        account = session_manager.run(
+            user_id,
+            operation,
+            disconnect_on_error=False,
+        )
         payload = with_login_progress(
-            build_success(
-                session_manager.run(
-                    user_id,
-                    operation,
-                    disconnect_on_error=False,
-                )
-            ),
+            build_real_only_account_response(account),
             user_id,
         )
         if bool((payload.get("data") or {}).get("connected")):
@@ -1467,11 +1591,17 @@ def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, 
         if exc.message in {SESSION_NOT_FOUND, SESSION_DISCONNECTED}:
             cached = session_manager.get_last_probe(user_id, "/account")
             if cached is not None:
-                return with_login_progress(cached[1], user_id)
+                return with_login_progress(
+                    normalize_real_only_account_payload(cached[1]),
+                    user_id,
+                )
             return with_login_progress(build_success({"connected": False}), user_id)
         cached = session_manager.get_last_probe(user_id, "/account")
         if cached is not None:
-            return with_login_progress(cached[1], user_id)
+            return with_login_progress(
+                normalize_real_only_account_payload(cached[1]),
+                user_id,
+            )
         return with_login_progress(build_error("ACCOUNT_TEMPORARY_UNAVAILABLE"), user_id)
 
 

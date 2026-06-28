@@ -30,6 +30,12 @@ class SessionPersistenceTests(unittest.TestCase):
         session = bullex_main.ManagedSession(
             user_id="switch-to-real",
             client=SimpleNamespace(
+                get_profile_ansyc=lambda: {
+                    "balances": [
+                        {"id": 101, "type": 1},
+                        {"id": 202, "type": 4},
+                    ]
+                },
                 get_balance_mode=lambda: active_mode["value"],
                 change_balance=change_balance,
                 get_balance=lambda: 50,
@@ -45,6 +51,7 @@ class SessionPersistenceTests(unittest.TestCase):
         change_balance.assert_called_once_with("REAL")
         self.assertEqual(active_mode["value"], "REAL")
         output = "\n".join(logs.output)
+        self.assertIn("[REAL_BALANCE_ID_FOUND]", output)
         self.assertIn("[REAL_MODE_SWITCH_ATTEMPT]", output)
         self.assertIn("[REAL_MODE_CONFIRMED]", output)
 
@@ -63,9 +70,27 @@ class SessionPersistenceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             bullex_main.ServiceError,
-            "BULLEX_ACCOUNT_STILL_PRACTICE",
+            "BULLEX_ACTIVE_MODE_NOT_REAL",
         ):
             manager._populate_ready_state(session, user_id=session.user_id, attempt=1)
+
+    def test_service_account_blocks_practice_balance(self) -> None:
+        account = {
+            "user_id": "practice-account",
+            "connected": True,
+            "active_mode": "PRACTICE",
+            "mode": "PRACTICE",
+            "balance": 9636.77,
+            "balance_practice": 9636.77,
+        }
+
+        payload = bullex_main.build_real_only_account_response(account)
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "BULLEX_ACTIVE_MODE_NOT_REAL")
+        self.assertEqual(payload["data"]["active_mode"], "PRACTICE")
+        self.assertEqual(payload["data"]["mode"], "PRACTICE")
+        self.assertIsNone(payload["data"]["balance"])
 
     def test_account_payload_keeps_real_and_practice_balances_separate(self) -> None:
         session = bullex_main.ManagedSession(

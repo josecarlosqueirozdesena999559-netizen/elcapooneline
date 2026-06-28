@@ -5520,6 +5520,7 @@ async def _bullex_connect_impl(
         logger.warning("[CONNECT_FAILED_HANDLED] user_id=%s detail=%s", user_id, detail)
         if detail in {
             "BULLEX_ACCOUNT_STILL_PRACTICE",
+            "BULLEX_ACTIVE_MODE_NOT_REAL",
             "REAL_BALANCE_NOT_DETECTED",
         }:
             state = auto_trader.require_real_mode(user_id)
