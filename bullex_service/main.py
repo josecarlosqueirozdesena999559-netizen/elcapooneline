@@ -476,6 +476,8 @@ class SessionManager:
         with self._session_context(session):
             self._wait_until_session_ready(session)
             self._set_login_progress(user_id, "LOADING_PROFILE", attempt=attempt, active=True)
+            session.desired_mode = "REAL"
+            logger.info("[REAL_MODE_FORCED] user_id=%s attempt=%s", user_id, attempt)
             real_balance_id, practice_balance_id, balances_discovered = discover_balance_ids(
                 session.client
             )
@@ -488,49 +490,15 @@ class SessionManager:
                 )
             current_mode = normalize_mode(session.client.get_balance_mode())
             logger.info("[LOGIN_AUTH] user_id=%s attempt=%s mode=%s", user_id, attempt, current_mode)
-            if session.desired_mode != current_mode:
-                if balances_discovered and real_balance_id is None:
-                    logger.warning(
-                        "[REAL_MODE_NOT_CONFIRMED] user_id=%s active_mode=%s reason=real_balance_id_missing",
-                        user_id,
-                        current_mode,
-                    )
-                    raise ServiceError(
-                        BULLEX_ACTIVE_MODE_NOT_REAL,
-                        409,
-                        {
-                            "connected": True,
-                            "active_mode": current_mode,
-                            "mode": current_mode,
-                            "balance": None,
-                        },
-                    )
-                logger.info(
-                    "[REAL_MODE_SWITCH_ATTEMPT] user_id=%s from_mode=%s to_mode=%s",
-                    user_id,
-                    current_mode,
-                    session.desired_mode,
-                )
-                session.client.change_balance(session.desired_mode)
-                current_mode = normalize_mode(session.client.get_balance_mode())
-            if current_mode != session.desired_mode:
+            if balances_discovered and real_balance_id is None:
                 logger.warning(
-                    "[REAL_MODE_NOT_CONFIRMED] user_id=%s active_mode=%s",
+                    "[CHANGE_BALANCE_REAL_FAILED] user_id=%s active_mode=%s reason=real_balance_id_missing",
                     user_id,
                     current_mode,
                 )
-                raise ServiceError(
-                    BULLEX_ACTIVE_MODE_NOT_REAL,
-                    409,
-                    {
-                        "connected": True,
-                        "active_mode": current_mode,
-                        "mode": current_mode,
-                        "balance": None,
-                    },
-                )
-            if current_mode == "REAL":
-                logger.info("[REAL_MODE_CONFIRMED] user_id=%s", user_id)
+                raise real_mode_service_error(current_mode)
+            current_mode = force_real_mode(session, user_id=user_id)
+            logger.info("[REAL_MODE_CONFIRMED] user_id=%s active_mode=%s", user_id, current_mode)
             self._set_login_progress(user_id, "LOADING_BALANCE", attempt=attempt, active=True)
             session.client.get_balance()
             session.client.get_currency()
@@ -1115,6 +1083,48 @@ def normalize_balance_value(balance: Any) -> float | None:
     return float(balance)
 
 
+def real_mode_service_error(active_mode: Any) -> ServiceError:
+    mode = normalize_mode(active_mode)
+    return ServiceError(
+        BULLEX_ACTIVE_MODE_NOT_REAL,
+        409,
+        {
+            "connected": True,
+            "active_mode": mode,
+            "mode": mode,
+            "balance": None,
+        },
+    )
+
+
+def force_real_mode(session: ManagedSession, *, user_id: str) -> str:
+    session.desired_mode = "REAL"
+    logger.info("[REAL_MODE_FORCED] user_id=%s", user_id)
+    before_mode = normalize_mode(session.client.get_balance_mode())
+    logger.info("[CHANGE_BALANCE_REAL_CALL] user_id=%s active_mode=%s", user_id, before_mode)
+    try:
+        session.client.change_balance("REAL")
+    except Exception:
+        logger.warning(
+            "[CHANGE_BALANCE_REAL_FAILED] user_id=%s active_mode=%s reason=exception",
+            user_id,
+            before_mode,
+            exc_info=True,
+        )
+        raise real_mode_service_error(before_mode)
+    time.sleep(1)
+    active_mode = normalize_mode(session.client.get_balance_mode())
+    if active_mode != "REAL":
+        logger.warning(
+            "[CHANGE_BALANCE_REAL_FAILED] user_id=%s active_mode=%s",
+            user_id,
+            active_mode,
+        )
+        raise real_mode_service_error(active_mode)
+    logger.info("[CHANGE_BALANCE_REAL_OK] user_id=%s active_mode=%s", user_id, active_mode)
+    return active_mode
+
+
 def discover_balance_ids(client: Bullex) -> tuple[Any, Any, bool]:
     balances: Any = None
     balances_discovered = False
@@ -1239,11 +1249,11 @@ def build_account_payload(session: ManagedSession) -> dict[str, Any]:
             if balance == 0:
                 account["real_balance_warning"] = "BALANCE_ZERO"
                 logger.info("[BALANCE_ZERO_NOT_DISCONNECTED] user_id=%s mode=REAL", session.user_id)
-        elif practice_balance is not None:
+        elif balance_practice is not None:
             logger.warning(
                 "[PRACTICE_BALANCE_IGNORED] user_id=%s balance=%s",
                 session.user_id,
-                practice_balance,
+                balance_practice,
             )
 
     return account
@@ -1385,6 +1395,7 @@ def connect_session(
         user_id = require_user_id(x_user_id)
         payload.account_mode = "REAL"
         session = session_manager.connect(user_id, payload)
+        session.desired_mode = "REAL"
 
         connected = False
         active_mode = None
@@ -1612,10 +1623,7 @@ def account_change_mode(payload: ChangeModeRequest, x_user_id: str | None = Head
 
     def operation(session: ManagedSession) -> dict[str, Any]:
         ensure_session_ready(session)
-        session.client.change_balance(target_mode)
-        active_mode = session.client.get_balance_mode()
-        if active_mode != target_mode:
-            raise ServiceError("falha ao trocar o modo da conta", 409)
+        active_mode = force_real_mode(session, user_id=user_id)
         session.desired_mode = active_mode
         session_manager._persist_connected(session)
         session_manager.clear_probe_cache(user_id)

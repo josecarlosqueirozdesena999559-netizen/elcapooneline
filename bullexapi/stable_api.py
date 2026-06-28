@@ -532,12 +532,18 @@ class Bullex:
                 tournament_id = balance["id"]
 
         if Balance_MODE == "REAL":
+            if real_id is None:
+                raise ValueError("REAL_BALANCE_NOT_FOUND")
             set_id(real_id)
 
         elif Balance_MODE == "PRACTICE":
+            if practice_id is None:
+                raise ValueError("PRACTICE_BALANCE_NOT_FOUND")
             set_id(practice_id)
 
         elif Balance_MODE == "TOURNAMENT":
+            if tournament_id is None:
+                raise ValueError("TOURNAMENT_BALANCE_NOT_FOUND")
             set_id(tournament_id)
 
         else:

@@ -45,14 +45,17 @@ class SessionPersistenceTests(unittest.TestCase):
         )
         manager = bullex_main.SessionManager(None)
 
-        with self.assertLogs("bullex-service", level="INFO") as logs:
-            manager._populate_ready_state(session, user_id=session.user_id, attempt=1)
+        with patch.object(bullex_main.time, "sleep", return_value=None):
+            with self.assertLogs("bullex-service", level="INFO") as logs:
+                manager._populate_ready_state(session, user_id=session.user_id, attempt=1)
 
         change_balance.assert_called_once_with("REAL")
         self.assertEqual(active_mode["value"], "REAL")
         output = "\n".join(logs.output)
         self.assertIn("[REAL_BALANCE_ID_FOUND]", output)
-        self.assertIn("[REAL_MODE_SWITCH_ATTEMPT]", output)
+        self.assertIn("[REAL_MODE_FORCED]", output)
+        self.assertIn("[CHANGE_BALANCE_REAL_CALL]", output)
+        self.assertIn("[CHANGE_BALANCE_REAL_OK]", output)
         self.assertIn("[REAL_MODE_CONFIRMED]", output)
 
     def test_ready_state_rejects_unconfirmed_real_mode(self) -> None:
@@ -68,11 +71,12 @@ class SessionPersistenceTests(unittest.TestCase):
         )
         manager = bullex_main.SessionManager(None)
 
-        with self.assertRaisesRegex(
-            bullex_main.ServiceError,
-            "BULLEX_ACTIVE_MODE_NOT_REAL",
-        ):
-            manager._populate_ready_state(session, user_id=session.user_id, attempt=1)
+        with patch.object(bullex_main.time, "sleep", return_value=None):
+            with self.assertRaisesRegex(
+                bullex_main.ServiceError,
+                "BULLEX_ACTIVE_MODE_NOT_REAL",
+            ):
+                manager._populate_ready_state(session, user_id=session.user_id, attempt=1)
 
     def test_service_account_blocks_practice_balance(self) -> None:
         account = {
@@ -181,6 +185,7 @@ class SessionPersistenceTests(unittest.TestCase):
                 connect=Mock(side_effect=AssertionError("restore must not login with password")),
                 restore_with_ssid=Mock(return_value=(True, None)),
                 get_balance_mode=lambda: "REAL",
+                change_balance=Mock(),
                 get_balance=lambda: 100.0,
                 get_currency=lambda: "USD",
             )
@@ -188,6 +193,7 @@ class SessionPersistenceTests(unittest.TestCase):
             with (
                 patch.object(bullex_main, "Bullex", return_value=fake_client),
                 patch.object(manager, "_session_context", side_effect=lambda session: _FakeContext(session)),
+                patch.object(bullex_main.time, "sleep", return_value=None),
             ):
                 self.assertIsNone(manager.get("user-session"))
                 restored = manager.restore_on_demand("user-session")
@@ -276,11 +282,15 @@ class SessionPersistenceTests(unittest.TestCase):
             check_connect=lambda: True,
             websocket_alive=lambda: True,
             get_balance_mode=lambda: "REAL",
+            change_balance=Mock(),
             get_balance=lambda: 100.0,
             get_currency=lambda: "USD",
         )
 
-        with patch.object(bullex_main, "Bullex", return_value=new_client):
+        with (
+            patch.object(bullex_main, "Bullex", return_value=new_client),
+            patch.object(bullex_main.time, "sleep", return_value=None),
+        ):
             session = manager.connect(
                 "user-reuse",
                 bullex_main.ConnectRequest(email="user@example.com", password="secret", account_mode="PRACTICE"),
@@ -295,6 +305,7 @@ class SessionPersistenceTests(unittest.TestCase):
         first_client = SimpleNamespace(api=SimpleNamespace(close=Mock()))
         second_client = SimpleNamespace(
             get_balance_mode=lambda: "REAL",
+            change_balance=Mock(),
             get_balance=lambda: 100.0,
             get_currency=lambda: "USD",
             check_connect=lambda: True,
@@ -339,6 +350,7 @@ class SessionPersistenceTests(unittest.TestCase):
         fake_client = SimpleNamespace(
             restore_with_ssid=Mock(return_value=(True, None)),
             get_balance_mode=lambda: "REAL",
+            change_balance=Mock(),
             get_balance=lambda: 50.0,
             get_currency=lambda: "USD",
             check_connect=lambda: True,
@@ -348,6 +360,7 @@ class SessionPersistenceTests(unittest.TestCase):
         with (
             patch.object(bullex_main, "Bullex", return_value=fake_client),
             patch.object(manager, "_session_context", side_effect=lambda current: _FakeContext(current)),
+            patch.object(bullex_main.time, "sleep", return_value=None),
         ):
             restored = manager._attempt_reconnect(session, "SESSION_EXPIRED")
 
