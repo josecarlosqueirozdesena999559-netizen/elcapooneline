@@ -1099,6 +1099,7 @@ def build_account_payload(session: ManagedSession) -> dict[str, Any]:
         "email": session.email,
         "requires_2fa": session.requires_2fa,
         "active_mode_real_detected": False,
+        "active_mode": None,
         "active_mode_from_bullex": None,
         "balance_real": None,
         "balance_practice": None,
@@ -1113,12 +1114,13 @@ def build_account_payload(session: ManagedSession) -> dict[str, Any]:
                 balance_real = current_balance
             elif mode == "PRACTICE":
                 balance_practice = current_balance
-        balance = balance_real if mode == "REAL" else balance_practice
+        balance = balance_real if mode == "REAL" else None
         currency = session.client.get_currency() or ("BRL" if mode == "REAL" else None)
         account["balance"] = balance
         account["currency"] = currency
         account["mode"] = mode
         account["active_mode_real_detected"] = mode == "REAL"
+        account["active_mode"] = mode
         account["active_mode_from_bullex"] = mode
         account["balance_real"] = balance_real
         account["balance_practice"] = balance_practice

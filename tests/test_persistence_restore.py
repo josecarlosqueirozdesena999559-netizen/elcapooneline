@@ -485,8 +485,8 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 "min_confidence": 94,
                 "min_payout": 88.5,
                 "strategy_mode": "balanced",
-                "account_mode": "DEMO",
-                "allow_real": False,
+                "account_mode": "REAL",
+                "allow_real": True,
                 "confirm_real": True,
                 "max_entries_per_cycle": 2,
             },
@@ -512,11 +512,23 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persistence._request.call_count, 2)
         self.assertEqual(
             persistence._request.call_args_list[0].kwargs["json"],
-            {"user_id": "user-a", "entry_value": 10.0, "allow_real": False},
+            {
+                "user_id": "user-a",
+                "entry_value": 10.0,
+                "account_mode": "REAL",
+                "allow_real": True,
+                "confirm_real": True,
+            },
         )
         self.assertEqual(
             persistence._request.call_args_list[1].kwargs["json"],
-            {"user_id": "user-a", "entry_value": 11.0, "allow_real": False},
+            {
+                "user_id": "user-a",
+                "entry_value": 11.0,
+                "account_mode": "REAL",
+                "allow_real": True,
+                "confirm_real": True,
+            },
         )
 
     async def test_extract_robot_settings_normalizes_practice_account_mode(self) -> None:
@@ -528,7 +540,9 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        self.assertEqual(settings["account_mode"], "DEMO")
+        self.assertEqual(settings["account_mode"], "REAL")
+        self.assertTrue(settings["allow_real"])
+        self.assertTrue(settings["confirm_real"])
 
     async def test_robot_user_settings_survive_restart_without_cross_user_leak(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -581,9 +595,15 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(settings_a["stop_loss"], 25)
             self.assertTrue(settings_a["martingale_enabled"])
             self.assertEqual(settings_a["martingale_multiplier"], 2.5)
+            self.assertEqual(settings_a["account_mode"], "REAL")
+            self.assertTrue(settings_a["allow_real"])
+            self.assertTrue(settings_a["confirm_real"])
             self.assertEqual(settings_b["entry_value"], 2)
             self.assertEqual(settings_b["stop_loss"], 12)
             self.assertFalse(settings_b["martingale_enabled"])
+            self.assertEqual(settings_b["account_mode"], "REAL")
+            self.assertTrue(settings_b["allow_real"])
+            self.assertTrue(settings_b["confirm_real"])
             self.assertIsNone(restarted.load_settings("user-new"))
 
     async def test_robot_state_loads_dedicated_settings_after_memory_reset(self) -> None:

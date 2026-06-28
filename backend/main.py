@@ -80,8 +80,8 @@ ROBOT_CONFIG_DEFAULTS = {
     "stop_win": 50.0,
     "stop_loss": 30.0,
     "max_entries_per_cycle": 1,
-    "allow_real": False,
-    "confirm_real": False,
+    "allow_real": True,
+    "confirm_real": True,
     "martingale_enabled": False,
     "martingale_steps": 1,
     "martingale_multiplier": 2.0,
@@ -1573,10 +1573,11 @@ def build_real_account_contract(payload: dict[str, Any]) -> dict[str, Any]:
         {
             "connected": connected,
             "active_mode_real_detected": active_mode == "REAL",
+            "active_mode": active_mode,
             "active_mode_from_bullex": active_mode,
             "balance_real": balance_real,
             "balance_practice": balance_practice,
-            "balance": balance_real,
+            "balance": balance_real if active_mode == "REAL" else None,
             "mode": active_mode,
         }
     )
@@ -1589,7 +1590,11 @@ def build_real_account_contract(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": False,
         "data": data,
-        "error": "REAL_BALANCE_NOT_DETECTED",
+        "error": (
+            "BULLEX_ACTIVE_MODE_NOT_REAL"
+            if active_mode is not None and active_mode != "REAL"
+            else "REAL_BALANCE_NOT_DETECTED"
+        ),
     }
 
 
@@ -2783,7 +2788,17 @@ def persist_robot(user_id: str) -> None:
     last_trade: dict[str, Any] | None = None
     try:
         state = auto_trader.get(user_id)
+        state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = True
         state_payload = strip_ai_fields(state.to_dict())
+        state_payload.update(
+            {
+                "account_mode": "REAL",
+                "allow_real": True,
+                "confirm_real": True,
+            }
+        )
         last_trade = state.last_trade
         robot_state_hydrated_users.add(user_id)
         restorable_robot_states[user_id] = deepcopy(state_payload)
@@ -2818,7 +2833,11 @@ def robot_persistence_source() -> str:
 
 def get_user_robot_state(user_id: str) -> Any:
     if user_id in robot_state_hydrated_users and auto_trader.has_state(user_id):
-        return auto_trader.get(user_id)
+        state = auto_trader.get(user_id)
+        state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = True
+        return state
     robot_state_hydrated_users.discard(user_id)
     try:
         load_settings = getattr(robot_persistence, "load_settings", None)
@@ -2838,6 +2857,8 @@ def get_user_robot_state(user_id: str) -> Any:
             if settings is not None:
                 payload = {**payload, **settings}
             payload["account_mode"] = "REAL"
+            payload["allow_real"] = True
+            payload["confirm_real"] = True
             trades = robot_persistence.load_trades(user_id)
             state = auto_trader.restore(
                 user_id,
@@ -2854,6 +2875,8 @@ def get_user_robot_state(user_id: str) -> Any:
                 if field != "account_mode" and hasattr(state, field):
                     setattr(state, field, value)
             state.account_mode = "REAL"
+            state.allow_real = True
+            state.confirm_real = True
             state.enabled = False
             auto_trader.mark_source(user_id, robot_persistence_source())
             robot_state_hydrated_users.add(user_id)
@@ -2862,7 +2885,11 @@ def get_user_robot_state(user_id: str) -> Any:
     except Exception:
         logger.exception("[ROBOT USER LOAD ERROR] user_id=%s", user_id)
     robot_state_hydrated_users.add(user_id)
-    return auto_trader.get(user_id)
+    state = auto_trader.get(user_id)
+    state.account_mode = "REAL"
+    state.allow_real = True
+    state.confirm_real = True
+    return state
 
 
 async def analyze_active_signal(
@@ -4669,6 +4696,8 @@ async def restore_robot_states() -> None:
             payload = {
                 **payload,
                 "account_mode": "REAL",
+                "allow_real": True,
+                "confirm_real": True,
                 "connected": session_restored,
                 "active_mode": None,
                 "connection_checked_at": None,
@@ -5084,6 +5113,8 @@ async def robot_config(
         return json_response(409, CONFIG_LOCK_ERROR)
     raw_body = dict(body or {})
     raw_body["account_mode"] = "REAL"
+    raw_body["allow_real"] = True
+    raw_body["confirm_real"] = True
     logger.warning("[ROBOT_CONFIG_PAYLOAD] user_id=%s payload=%s", user_id, raw_body)
     logger.info("[REAL_CONFIG_RECEIVED] user_id=%s payload=%s", user_id, raw_body)
     ignored_ai_fields = ignored_ai_config_fields(raw_body)
@@ -5147,6 +5178,8 @@ async def _robot_start_impl(auth: dict[str, str]) -> JSONResponse:
     mark_user_active(user_id)
     state = get_user_robot_state(user_id)
     state.account_mode = "REAL"
+    state.allow_real = True
+    state.confirm_real = True
     if is_stop_status(state.status):
         return json_response(409, build_error("RESET_CYCLE_REQUIRED"))
     if fresh_robot_connection(state) and state.connected and state.active_mode is not None:
@@ -5455,6 +5488,7 @@ async def _bullex_connect_impl(
     connect_body = {
         **body,
         "account_mode": "REAL",
+        "mode": "REAL",
     }
     status_code, payload = await call_bullex_service(
         "POST",

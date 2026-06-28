@@ -60,8 +60,8 @@ ROBOT_SETTING_DEFAULTS: dict[str, Any] = {
     "min_payout": 80,
     "strategy_mode": "conservative",
     "account_mode": "REAL",
-    "allow_real": False,
-    "confirm_real": False,
+    "allow_real": True,
+    "confirm_real": True,
     "max_entries_per_cycle": 1,
     "martingale_enabled": False,
     "martingale_steps": 1,
@@ -77,12 +77,16 @@ def require_user_id(user_id: str) -> str:
 
 
 def normalize_account_mode(value: Any) -> str:
-    normalized = str(value or "DEMO").strip().upper()
-    if normalized == "PRACTICE":
-        return "DEMO"
-    if normalized not in {"DEMO", "REAL"}:
-        return "DEMO"
-    return normalized
+    return "REAL"
+
+
+def enforce_real_state(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **payload,
+        "account_mode": "REAL",
+        "allow_real": True,
+        "confirm_real": True,
+    }
 
 
 def normalize_bool(value: Any) -> bool:
@@ -112,10 +116,12 @@ def normalize_float(value: Any, default: float) -> float:
 
 def _coerce_robot_setting(field: str, value: Any) -> Any:
     if field == "account_mode":
-        return normalize_account_mode(value)
+        return "REAL"
     if field in {"strategy_mode"}:
         return str(value or "").strip() or "conservative"
-    if field in {"allow_real", "confirm_real", "martingale_enabled"}:
+    if field in {"allow_real", "confirm_real"}:
+        return True
+    if field == "martingale_enabled":
         return normalize_bool(value)
     if field in {"cycle_minutes", "min_confidence", "max_entries_per_cycle", "martingale_steps"}:
         return normalize_int(value, 0)
@@ -125,19 +131,35 @@ def _coerce_robot_setting(field: str, value: Any) -> Any:
 
 
 def extract_robot_settings(state: dict[str, Any]) -> dict[str, Any]:
-    return {
+    settings = {
         field: _coerce_robot_setting(field, state[field])
         for field in SUPABASE_ROBOT_SETTING_FIELDS
         if field in state
     }
+    settings.update(
+        {
+            "account_mode": "REAL",
+            "allow_real": True,
+            "confirm_real": True,
+        }
+    )
+    return settings
 
 
 def extract_local_robot_settings(state: dict[str, Any]) -> dict[str, Any]:
-    return {
+    settings = {
         field: _coerce_robot_setting(field, state[field])
         for field in ROBOT_SETTING_FIELDS
         if field in state
     }
+    settings.update(
+        {
+            "account_mode": "REAL",
+            "allow_real": True,
+            "confirm_real": True,
+        }
+    )
+    return settings
 
 
 class RobotPersistence(ABC):
@@ -200,6 +222,7 @@ class SQLiteRobotPersistence(RobotPersistence):
 
     def save_state(self, user_id: str, state: dict[str, Any]) -> None:
         user_id = require_user_id(user_id)
+        state = enforce_real_state(state)
         with self._connect() as connection:
             connection.execute(
                 """
@@ -217,7 +240,10 @@ class SQLiteRobotPersistence(RobotPersistence):
             rows = connection.execute(
                 "select user_id, state_json from robot_states order by user_id"
             ).fetchall()
-        return [(row["user_id"], json.loads(row["state_json"])) for row in rows]
+        return [
+            (row["user_id"], enforce_real_state(json.loads(row["state_json"])))
+            for row in rows
+        ]
 
     def load_state(self, user_id: str) -> dict[str, Any] | None:
         user_id = require_user_id(user_id)
@@ -226,7 +252,7 @@ class SQLiteRobotPersistence(RobotPersistence):
                 "select state_json from robot_states where user_id = ?",
                 (user_id,),
             ).fetchone()
-        return json.loads(row["state_json"]) if row is not None else None
+        return enforce_real_state(json.loads(row["state_json"])) if row is not None else None
 
     def save_settings(self, user_id: str, settings: dict[str, Any]) -> None:
         user_id = require_user_id(user_id)
@@ -281,8 +307,8 @@ class SQLiteRobotPersistence(RobotPersistence):
                     values.get("min_payout", 80),
                     values.get("strategy_mode", "conservative"),
                     values.get("account_mode", "REAL"),
-                    int(bool(values.get("allow_real", False))),
-                    int(bool(values.get("confirm_real", False))),
+                    1,
+                    1,
                     values.get("max_entries_per_cycle", 1),
                     int(bool(values.get("martingale_enabled", False))),
                     values.get("martingale_steps", 1),
@@ -308,8 +334,9 @@ class SQLiteRobotPersistence(RobotPersistence):
         if row is None:
             return None
         settings = dict(row)
-        settings["allow_real"] = bool(settings["allow_real"])
-        settings["confirm_real"] = bool(settings["confirm_real"])
+        settings["account_mode"] = "REAL"
+        settings["allow_real"] = True
+        settings["confirm_real"] = True
         settings["martingale_enabled"] = bool(settings["martingale_enabled"])
         return settings
 
@@ -468,8 +495,8 @@ class SQLiteRobotPersistence(RobotPersistence):
                     min_payout real not null default 80,
                     strategy_mode text not null default 'conservative',
                     account_mode text not null default 'REAL',
-                    allow_real integer not null default 0,
-                    confirm_real integer not null default 0,
+                    allow_real integer not null default 1,
+                    confirm_real integer not null default 1,
                     max_entries_per_cycle integer not null default 1,
                     martingale_enabled integer not null default 0,
                     martingale_steps integer not null default 1,
@@ -533,10 +560,20 @@ class SQLiteRobotPersistence(RobotPersistence):
             connection.execute(
                 """
                 update robot_user_settings
-                set account_mode = 'REAL'
-                where upper(coalesce(account_mode, '')) in ('DEMO', 'PRACTICE')
+                set account_mode = 'REAL',
+                    allow_real = 1,
+                    confirm_real = 1
                 """
             )
+            rows = connection.execute(
+                "select user_id, state_json from robot_states"
+            ).fetchall()
+            for row in rows:
+                state = enforce_real_state(json.loads(row["state_json"]))
+                connection.execute(
+                    "update robot_states set state_json = ? where user_id = ?",
+                    (json.dumps(state), row["user_id"]),
+                )
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         existing = {
@@ -570,10 +607,11 @@ class SupabaseRobotPersistence(RobotPersistence):
     def save_state(self, user_id: str, state: dict[str, Any]) -> None:
         user_id = require_user_id(user_id)
         self._ensure_user(user_id)
+        state = enforce_real_state(state)
         body = {
             "user_id": user_id,
             "enabled": state.get("enabled", False),
-            "account_mode": state.get("account_mode", "REAL"),
+            "account_mode": "REAL",
             "entry_value": state.get("entry_value", 2),
             "cycle_minutes": state.get("cycle_minutes", 5),
             "min_confidence": state.get("min_confidence", 80),
@@ -595,7 +633,10 @@ class SupabaseRobotPersistence(RobotPersistence):
 
     def load_states(self) -> list[tuple[str, dict[str, Any]]]:
         rows = self._request("GET", "/robot_states?select=user_id,state_json")
-        return [(row["user_id"], row.get("state_json") or {}) for row in rows]
+        return [
+            (row["user_id"], enforce_real_state(row.get("state_json") or {}))
+            for row in rows
+        ]
 
     def load_state(self, user_id: str) -> dict[str, Any] | None:
         user_id = require_user_id(user_id)
@@ -606,7 +647,7 @@ class SupabaseRobotPersistence(RobotPersistence):
         )
         if not rows:
             return None
-        return rows[0].get("state_json") or {}
+        return enforce_real_state(rows[0].get("state_json") or {})
 
     def save_settings(self, user_id: str, settings: dict[str, Any]) -> None:
         user_id = require_user_id(user_id)
@@ -672,7 +713,14 @@ class SupabaseRobotPersistence(RobotPersistence):
             f"/robot_user_settings?user_id=eq.{quote(user_id, safe='')}"
             f"&select={fields}&limit=1",
         )
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        return {
+            **rows[0],
+            "account_mode": "REAL",
+            "allow_real": True,
+            "confirm_real": True,
+        }
 
     def save_trade(self, user_id: str, trade: dict[str, Any]) -> None:
         self._ensure_user(user_id)

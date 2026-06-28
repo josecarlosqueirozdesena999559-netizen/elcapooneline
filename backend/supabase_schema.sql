@@ -116,8 +116,8 @@ create table if not exists public.robot_user_settings (
   min_payout numeric not null default 80,
   strategy_mode text not null default 'conservative',
   account_mode text not null default 'REAL',
-  allow_real boolean not null default false,
-  confirm_real boolean not null default false,
+  allow_real boolean not null default true,
+  confirm_real boolean not null default true,
   max_entries_per_cycle integer not null default 1,
   martingale_enabled boolean not null default false,
   martingale_steps integer not null default 1,
@@ -135,8 +135,8 @@ alter table public.robot_user_settings
   add column if not exists min_payout numeric not null default 80,
   add column if not exists strategy_mode text not null default 'conservative',
   add column if not exists account_mode text not null default 'REAL',
-  add column if not exists allow_real boolean not null default false,
-  add column if not exists confirm_real boolean not null default false,
+  add column if not exists allow_real boolean not null default true,
+  add column if not exists confirm_real boolean not null default true,
   add column if not exists max_entries_per_cycle integer not null default 1,
   add column if not exists martingale_enabled boolean not null default false,
   add column if not exists martingale_steps integer not null default 1,
@@ -145,11 +145,30 @@ alter table public.robot_user_settings
   add column if not exists updated_at timestamptz not null default timezone('utc'::text, now());
 
 alter table public.robot_user_settings
-  alter column account_mode set default 'REAL';
+  alter column account_mode set default 'REAL',
+  alter column allow_real set default true,
+  alter column confirm_real set default true;
 
 update public.robot_user_settings
-set account_mode = 'REAL'
-where upper(coalesce(account_mode, '')) in ('DEMO', 'PRACTICE');
+set account_mode = 'REAL',
+    allow_real = true,
+    confirm_real = true;
+
+update public.robot_states
+set state = jsonb_set(
+              jsonb_set(
+                jsonb_set(coalesce(state, '{}'::jsonb), '{account_mode}', '"REAL"'::jsonb, true),
+                '{allow_real}', 'true'::jsonb, true
+              ),
+              '{confirm_real}', 'true'::jsonb, true
+            ),
+    state_json = jsonb_set(
+                   jsonb_set(
+                     jsonb_set(coalesce(state_json, '{}'::jsonb), '{account_mode}', '"REAL"'::jsonb, true),
+                     '{allow_real}', 'true'::jsonb, true
+                   ),
+                   '{confirm_real}', 'true'::jsonb, true
+                 );
 
 alter table public.robot_states
   alter column id set default gen_random_uuid();

@@ -367,6 +367,47 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         worker_start.assert_not_called()
         self.assertNotIn(user_id, main.robot_tasks)
 
+    async def test_real_robot_starts_with_confirmed_mode_and_sufficient_balance(self) -> None:
+        user_id = "real-confirmed-start"
+        state = main.auto_trader.get(user_id)
+        state.connected = True
+        state.active_mode = "REAL"
+        state.connection_checked_at = main.utc_now()
+        state.entry_value = 2
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success(
+                            {
+                                "connected": True,
+                                "active_mode": "REAL",
+                                "active_mode_from_bullex": "REAL",
+                                "balance_real": 25,
+                                "balance_practice": 10000,
+                                "balance": 25,
+                                "mode": "REAL",
+                            }
+                        ),
+                    )
+                ),
+            ),
+            patch.object(main, "ensure_robot_worker") as worker_start,
+            patch.object(main, "persist_robot"),
+        ):
+            response = await main.robot_start({"user_id": user_id})
+
+        payload = json.loads(response.body)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["data"]["enabled"])
+        self.assertTrue(payload["data"]["allow_real"])
+        self.assertTrue(payload["data"]["confirm_real"])
+        worker_start.assert_called_once_with(user_id)
+
     async def test_status_exception_returns_memory_fallback(self) -> None:
         user_id = "fast-status-fallback"
         state = main.auto_trader.start(user_id)
@@ -418,8 +459,9 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(response.body)
         self.assertEqual(response.status_code, 200)
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error"], "REAL_BALANCE_NOT_DETECTED")
-        self.assertEqual(payload["data"]["balance"], 25)
+        self.assertEqual(payload["error"], "BULLEX_ACTIVE_MODE_NOT_REAL")
+        self.assertIsNone(payload["data"]["balance"])
+        self.assertEqual(payload["data"]["active_mode"], "PRACTICE")
         self.assertEqual(payload["data"]["balance_real"], 25)
         self.assertEqual(payload["data"]["balance_practice"], 10000)
         self.assertFalse(payload["data"]["active_mode_real_detected"])

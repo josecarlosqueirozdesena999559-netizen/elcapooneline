@@ -164,8 +164,8 @@ class RobotState:
     stop_win: float = 50.0
     stop_loss: float = 30.0
     max_entries_per_cycle: int = 1
-    allow_real: bool = False
-    confirm_real: bool = False
+    allow_real: bool = True
+    confirm_real: bool = True
     martingale_enabled: bool = False
     martingale_steps: int = 1
     martingale_multiplier: float = 2.0
@@ -585,6 +585,9 @@ class AutoTrader:
             if key in datetime_fields and isinstance(value, str):
                 value = datetime.fromisoformat(value.replace("Z", "+00:00"))
             setattr(state, key, value)
+        state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = True
         if state.status == "WAITING_ENTRY_WINDOW":
             state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
         if state.status == STATUS_PENDING_RESULT and state.gale_active:
@@ -669,6 +672,9 @@ class AutoTrader:
     def update_config(self, user_id: str, update: RobotConfigUpdate) -> RobotState:
         state = self.get(user_id)
         changes = update.model_dump(exclude_none=True)
+        changes["account_mode"] = "REAL"
+        changes["allow_real"] = True
+        changes["confirm_real"] = True
         if "martingale_steps" in changes:
             changes["martingale_steps"] = 1
         for key, value in changes.items():
