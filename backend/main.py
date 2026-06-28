@@ -392,8 +392,7 @@ class BullexUserSessionCache:
 session_response_cache: dict[str, BullexUserSessionCache] = {}
 active_cooldowns: dict[str, dict[str, datetime]] = {}
 payout_cooldowns: dict[str, dict[str, datetime]] = {}
-recent_connect_users: dict[str, datetime] = {}
-robot_start_requested_users: dict[str, datetime] = {}
+active_users: dict[str, datetime] = {}
 
 
 def get_session_cache(user_id: str) -> BullexUserSessionCache:
@@ -834,30 +833,19 @@ robot_state_hydrated_users: set[str] = set()
 CONNECTION_GRACE_SECONDS = 30
 
 
-def mark_connect_activity(user_id: str) -> None:
-    recent_connect_users[user_id] = utc_now()
-
-
-def mark_robot_start_activity(user_id: str) -> None:
-    robot_start_requested_users[user_id] = utc_now()
-
-
-def clear_robot_start_activity(user_id: str) -> None:
-    robot_start_requested_users.pop(user_id, None)
+def mark_user_active(user_id: str) -> None:
+    active_users[user_id] = utc_now()
 
 
 def is_user_active(user_id: str) -> bool:
-    last_connect = recent_connect_users.get(user_id)
-    if last_connect is not None:
-        if (utc_now() - last_connect).total_seconds() <= ACTIVE_USER_TTL_SECONDS:
-            return True
-        recent_connect_users.pop(user_id, None)
-    last_robot_start = robot_start_requested_users.get(user_id)
-    if last_robot_start is not None:
-        if (utc_now() - last_robot_start).total_seconds() <= ACTIVE_USER_TTL_SECONDS:
-            return True
-        robot_start_requested_users.pop(user_id, None)
-    return bool(auto_trader.get(user_id).enabled)
+    last_seen = active_users.get(user_id)
+    if last_seen is None:
+        state = auto_trader.get(user_id)
+        return bool(state.enabled and user_id in robot_tasks)
+    if (utc_now() - last_seen).total_seconds() < ACTIVE_USER_TTL_SECONDS:
+        return True
+    active_users.pop(user_id, None)
+    return False
 
 
 def inactive_user_payload(user_id: str, path: str) -> dict[str, Any]:
@@ -4980,7 +4968,7 @@ async def robot_settings(
 
 async def _robot_start_impl(auth: dict[str, str]) -> JSONResponse:
     user_id = auth["user_id"]
-    mark_robot_start_activity(user_id)
+    mark_user_active(user_id)
     state = get_user_robot_state(user_id)
     if is_stop_status(state.status):
         return json_response(409, build_error("RESET_CYCLE_REQUIRED"))
@@ -5063,9 +5051,9 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
 
 async def _robot_stop_impl(auth: dict[str, str]) -> JSONResponse:
     user_id = auth["user_id"]
+    mark_user_active(user_id)
     logger.info("[ROBOT_STOP_REQUEST] user_id=%s", user_id)
     state = auto_trader.stop(user_id)
-    clear_robot_start_activity(user_id)
     persist_robot(user_id)
     await stop_robot_worker(user_id)
     logger.info("[ROBOT STOP] user_id=%s", user_id)
@@ -5077,7 +5065,6 @@ async def robot_stop(auth: dict[str, str] = Depends(require_headers)) -> JSONRes
     try:
         return await _robot_stop_impl(auth)
     except Exception as exc:
-        clear_robot_start_activity(auth.get("user_id", ""))
         logger.warning(
             "[BAD_GATEWAY_PREVENTED] user_id=%s path=/robot/stop reason=%s",
             auth.get("user_id"),
@@ -5231,7 +5218,7 @@ async def _bullex_connect_impl(
 ) -> JSONResponse:
     user_id = auth["user_id"]
     logger.info("[CONNECT_REQUEST] user_id=%s", user_id)
-    mark_connect_activity(user_id)
+    mark_user_active(user_id)
     clear_session_backoff(user_id)
     logger.info("[CONNECT_BACKOFF_CLEARED] user_id=%s", user_id)
     logger.info("[CONNECT_ATTEMPT] user_id=%s", user_id)
@@ -5335,6 +5322,7 @@ async def bullex_connect(
 
 async def _bullex_status_impl(auth: dict[str, str]) -> JSONResponse:
     user_id = auth["user_id"]
+    mark_user_active(user_id)
     try:
         status_code, payload = await call_bullex_service("GET", "/sessions/status", user_id)
     except Exception as exc:
@@ -5676,6 +5664,7 @@ async def bullex_reconnect(auth: dict[str, str] = Depends(require_headers)) -> J
 
 async def _bullex_account_impl(auth: dict[str, str]) -> JSONResponse:
     user_id = auth["user_id"]
+    mark_user_active(user_id)
     try:
         status_code, payload = await call_bullex_service("GET", "/account", user_id)
     except Exception as exc:

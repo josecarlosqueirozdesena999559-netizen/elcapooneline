@@ -642,38 +642,59 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(restored_trader.history(user_id)["trades"][0]["order_id"], "order-1")
             self.assertEqual(restored_trader.source(user_id), "memory")
 
-    async def test_startup_has_no_user_restore_handler(self) -> None:
+    async def test_startup_uses_memory_only_restore_handler(self) -> None:
         from backend import main
 
         self.assertEqual(len(main.app.router.on_startup), 1)
-        self.assertNotIn("restore_robot_states", vars(main))
+        self.assertIs(main.app.router.on_startup[0], main.restore_robot_states)
 
-    async def test_empty_startup_does_not_load_users_or_create_workers(self) -> None:
+    async def test_startup_loads_memory_without_bullex_backoff_or_workers(self) -> None:
         from backend import main
 
+        user_id = "startup-restored-user"
+        saved_trader = AutoTrader()
+        saved_state = saved_trader.start(user_id)
         persistence = SimpleNamespace(
-            load_states=Mock(side_effect=AssertionError("startup must not load users")),
+            load_states=Mock(return_value=[(user_id, saved_state.to_dict())]),
+            load_trades=Mock(return_value=[]),
         )
         old_trader = main.auto_trader
         old_persistence = main.robot_persistence
         old_tasks = main.robot_tasks
         old_restorable = dict(main.restorable_robot_states)
+        old_active_users = dict(main.active_users)
+        old_hydrated_users = set(main.robot_state_hydrated_users)
         main.auto_trader = AutoTrader()
         main.robot_persistence = persistence
         main.robot_tasks = {}
         main.restorable_robot_states.clear()
+        main.active_users.clear()
         try:
-            with self.assertLogs("backend-gateway", level="INFO") as logs:
+            with (
+                patch.object(main, "call_bullex_service", new=AsyncMock()) as service_call,
+                patch.object(main, "ensure_robot_worker") as worker_start,
+                self.assertLogs("backend-gateway", level="INFO") as logs,
+            ):
                 for handler in main.app.router.on_startup:
                     result = handler()
                     if asyncio.iscoroutine(result):
                         await result
 
-            persistence.load_states.assert_not_called()
+            persistence.load_states.assert_called_once_with()
+            persistence.load_trades.assert_called_once_with(user_id)
+            service_call.assert_not_awaited()
+            worker_start.assert_not_called()
             self.assertEqual(main.robot_tasks, {})
-            self.assertEqual(main.restorable_robot_states, {})
+            self.assertIn(user_id, main.restorable_robot_states)
+            self.assertFalse(main.auto_trader.get(user_id).connected)
+            self.assertFalse(main.is_user_active(user_id))
+            main.mark_session_failure(user_id)
+            cache = main.get_session_cache(user_id)
+            self.assertEqual(cache.failure_count, 0)
+            self.assertIsNone(cache.next_retry_at)
             output = "\n".join(logs.output)
             self.assertIn("[STARTUP_RESTORE_DISABLED]", output)
+            self.assertIn("[USER_STATE_LOADED_NO_WORKER]", output)
             self.assertIn("[ON_DEMAND_RESTORE_ONLY]", output)
             self.assertIn("[STARTUP_READY]", output)
             self.assertNotIn("[USER_BACKOFF_ACTIVE]", output)
@@ -685,6 +706,11 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             main.robot_tasks = old_tasks
             main.restorable_robot_states.clear()
             main.restorable_robot_states.update(old_restorable)
+            main.active_users.clear()
+            main.active_users.update(old_active_users)
+            main.robot_state_hydrated_users.clear()
+            main.robot_state_hydrated_users.update(old_hydrated_users)
+            main.session_response_cache.pop(user_id, None)
 
     async def test_robot_state_returns_memory_default_without_restoring_connection(self) -> None:
         from backend import main

@@ -47,14 +47,12 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.old_trader = main.auto_trader
         main.auto_trader = AutoTrader()
         main.session_response_cache.clear()
-        main.recent_connect_users.clear()
-        main.robot_start_requested_users.clear()
+        main.active_users.clear()
 
     def tearDown(self) -> None:
         main.auto_trader = self.old_trader
         main.session_response_cache.clear()
-        main.recent_connect_users.clear()
-        main.robot_start_requested_users.clear()
+        main.active_users.clear()
 
     @staticmethod
     def cache_account(user_id: str, *, balance: float = 42.5) -> None:
@@ -80,7 +78,7 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_account_timeout_returns_last_valid_cache_quickly(self) -> None:
         user_id = "fast-timeout-account"
         self.cache_account(user_id)
-        main.mark_connect_activity(user_id)
+        main.mark_user_active(user_id)
 
         started = time.monotonic()
         with (
@@ -106,13 +104,22 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[ACCOUNT_FETCH_FALLBACK]", output)
         self.assertIn("[UPSTREAM_ERROR_HANDLED]", output)
 
-    async def test_offline_account_and_status_skip_upstream_and_backoff(self) -> None:
-        user_id = "offline-polling-user"
+    async def test_account_and_status_mark_user_active(self) -> None:
+        user_id = "active-polling-user"
+        disconnected = (
+            404,
+            {
+                "ok": False,
+                "data": {"connected": False},
+                "error": "SESSION_NOT_FOUND",
+            },
+        )
 
-        with (
-            patch("backend.main.httpx.AsyncClient") as upstream_client,
-            self.assertLogs("backend-gateway", level="INFO") as logs,
-        ):
+        with patch.object(
+            main,
+            "call_bullex_service",
+            new=AsyncMock(return_value=disconnected),
+        ) as service_call:
             account = await main.bullex_account({"user_id": user_id})
             status = await main.bullex_status({"user_id": user_id})
 
@@ -121,17 +128,12 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200)
             self.assertTrue(payload["ok"])
             self.assertFalse(payload["data"]["connected"])
-        upstream_client.assert_not_called()
-        cache = main.get_session_cache(user_id)
-        self.assertEqual(cache.failure_count, 0)
-        self.assertIsNone(cache.next_retry_at)
-        output = "\n".join(logs.output)
-        self.assertIn("[OFFLINE_USER_SKIPPED]", output)
-        self.assertIn("[BACKOFF_SKIPPED_OFFLINE_USER]", output)
+        self.assertEqual(service_call.await_count, 2)
+        self.assertTrue(main.is_user_active(user_id))
 
     async def test_active_user_in_backoff_gets_controlled_200_payload(self) -> None:
         user_id = "active-backoff-user"
-        main.mark_connect_activity(user_id)
+        main.mark_user_active(user_id)
         cache = main.get_session_cache(user_id)
         cache.next_retry_at = main.utc_now() + timedelta(seconds=42)
 
@@ -147,6 +149,7 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
 
     def test_offline_failure_does_not_create_user_backoff(self) -> None:
         user_id = "offline-backoff-user"
+        main.auto_trader.start(user_id)
 
         with self.assertLogs("backend-gateway", level="INFO") as logs:
             main.mark_session_failure(user_id)
@@ -160,10 +163,10 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
 
     def test_connect_activity_expires_after_five_minutes(self) -> None:
         user_id = "expired-active-user"
-        main.recent_connect_users[user_id] = main.utc_now() - timedelta(seconds=301)
+        main.active_users[user_id] = main.utc_now() - timedelta(seconds=301)
 
         self.assertFalse(main.is_user_active(user_id))
-        self.assertNotIn(user_id, main.recent_connect_users)
+        self.assertNotIn(user_id, main.active_users)
 
     async def test_account_uses_ten_second_cache_without_upstream_call(self) -> None:
         user_id = "fast-account-cache-hit"
@@ -280,16 +283,14 @@ class GatewayControlledErrorCorsTests(unittest.TestCase):
         main.config.panel_api_key = "test-key"
         main.auto_trader = AutoTrader()
         main.session_response_cache.clear()
-        main.recent_connect_users.clear()
-        main.robot_start_requested_users.clear()
+        main.active_users.clear()
         self.client = TestClient(main.app)
 
     def tearDown(self) -> None:
         main.config.panel_api_key = self.old_api_key
         main.auto_trader = self.old_trader
         main.session_response_cache.clear()
-        main.recent_connect_users.clear()
-        main.robot_start_requested_users.clear()
+        main.active_users.clear()
 
     def test_account_exception_is_controlled_json_with_cors_headers(self) -> None:
         with patch.object(
