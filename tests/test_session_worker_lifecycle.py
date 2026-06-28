@@ -31,10 +31,12 @@ class WorkerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.old_persistence = main.robot_persistence
         self.old_restorable = dict(main.restorable_robot_states)
         self.old_hydrated = set(main.robot_state_hydrated_users)
+        self.old_active_users = dict(main.active_users)
         main.auto_trader = AutoTrader()
         main.robot_tasks = {}
         main.restorable_robot_states.clear()
         main.robot_state_hydrated_users.clear()
+        main.active_users.clear()
 
     async def asyncTearDown(self) -> None:
         for user_id in list(main.robot_tasks):
@@ -46,12 +48,15 @@ class WorkerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         main.restorable_robot_states.update(self.old_restorable)
         main.robot_state_hydrated_users.clear()
         main.robot_state_hydrated_users.update(self.old_hydrated)
+        main.active_users.clear()
+        main.active_users.update(self.old_active_users)
 
     async def test_each_user_has_at_most_one_worker(self) -> None:
         user_id = "single-worker"
         state = main.auto_trader.start(user_id)
         state.connected = True
         state.active_mode = "PRACTICE"
+        main.mark_user_active(user_id)
         blocker = asyncio.Event()
 
         async def idle_worker(_user_id: str) -> None:
@@ -148,7 +153,13 @@ class SessionRestoreLifecycleTests(unittest.TestCase):
         with patch.object(bullex_main, "Bullex") as bullex:
             manager = bullex_main.SessionManager(store)
 
-        self.assertEqual(bullex_main.app.router.on_startup, [])
+        self.assertEqual(
+            bullex_main.app.router.on_startup,
+            [bullex_main.startup_without_session_restore],
+        )
+        with self.assertLogs("bullex-service", level="INFO") as logs:
+            bullex_main.startup_without_session_restore()
+        self.assertIn("[STARTUP_READY] restore disabled", "\n".join(logs.output))
         self.assertNotIn("restore_persisted_sessions", vars(bullex_main))
         bullex.assert_not_called()
         store.load_connected_user.assert_not_called()
@@ -302,6 +313,115 @@ class SessionRestoreLifecycleTests(unittest.TestCase):
             "[CONNECT_SUCCESS]",
         ):
             self.assertIn(marker, output)
+
+    def test_connect_endpoint_handles_unexpected_error_and_cleans_session(self) -> None:
+        store = Mock()
+        api = SimpleNamespace(close=Mock())
+        manager = bullex_main.SessionManager(store)
+        manager.upsert(
+            bullex_main.ManagedSession(
+                user_id="failing-user",
+                client=SimpleNamespace(api=api),
+                email="old@example.com",
+            )
+        )
+        old_manager = bullex_main.session_manager
+        bullex_main.session_manager = manager
+        try:
+            with (
+                patch.object(manager, "connect", side_effect=RuntimeError("login failed")),
+                self.assertLogs("bullex-service", level="WARNING") as logs,
+            ):
+                response = bullex_main.connect_session(
+                    bullex_main.ConnectRequest(
+                        email="new@example.com",
+                        password="secret",
+                    ),
+                    x_user_id="failing-user",
+                )
+        finally:
+            bullex_main.session_manager = old_manager
+
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("failing-user", manager.sessions)
+        self.assertNotIn("failing-user", manager.websockets)
+        api.close.assert_called_once_with()
+        store.mark_disconnected.assert_called_once_with(
+            "failing-user",
+            revoke_token=True,
+        )
+        self.assertIn("[CONNECT_FAILED_HANDLED]", "\n".join(logs.output))
+
+    def test_connected_session_check_is_reused_for_market_calls(self) -> None:
+        check_connect = Mock(return_value=True)
+        client = SimpleNamespace(
+            check_connect=check_connect,
+            websocket_alive=Mock(return_value=True),
+            get_balance_mode=Mock(return_value="PRACTICE"),
+            api=SimpleNamespace(close=Mock()),
+        )
+        manager = bullex_main.SessionManager(Mock())
+        manager.upsert(
+            bullex_main.ManagedSession(
+                user_id="cached-session-user",
+                client=client,
+            )
+        )
+
+        with self.assertLogs("bullex-service", level="INFO") as logs:
+            for _ in range(3):
+                result = manager.run(
+                    "cached-session-user",
+                    lambda _session: "ok",
+                    disconnect_on_error=False,
+                )
+                self.assertEqual(result, "ok")
+
+        self.assertEqual(check_connect.call_count, 1)
+        self.assertEqual(
+            "\n".join(logs.output).count("[SESSION-CHECK]"),
+            1,
+        )
+
+    def test_candles_cache_ignores_count_and_endtime_for_same_asset_timeframe(self) -> None:
+        get_candles = Mock(return_value=[])
+        client = SimpleNamespace(
+            check_connect=Mock(return_value=True),
+            websocket_alive=Mock(return_value=True),
+            get_balance_mode=Mock(return_value="PRACTICE"),
+            get_candles=get_candles,
+            api=SimpleNamespace(close=Mock()),
+        )
+        manager = bullex_main.SessionManager(Mock())
+        manager.upsert(
+            bullex_main.ManagedSession(
+                user_id="candles-cache-user",
+                client=client,
+            )
+        )
+        old_manager = bullex_main.session_manager
+        bullex_main.session_manager = manager
+        try:
+            first = bullex_main.get_candles(
+                active="EURUSD-OTC",
+                interval=60,
+                count=10,
+                endtime=100,
+                x_user_id="candles-cache-user",
+            )
+            second = bullex_main.get_candles(
+                active="EURUSD-OTC",
+                interval=60,
+                count=80,
+                endtime=200,
+                x_user_id="candles-cache-user",
+            )
+        finally:
+            bullex_main.session_manager = old_manager
+
+        self.assertTrue(first["ok"])
+        self.assertEqual(second, first)
+        get_candles.assert_called_once_with("EURUSD-OTC", 60, 10, 100)
 
 
 class MaxEntriesPersistenceTests(unittest.TestCase):

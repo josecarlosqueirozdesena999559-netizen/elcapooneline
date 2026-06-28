@@ -53,6 +53,7 @@ STATUS_CONNECTION_BACKOFF = "CONNECTION_BACKOFF"
 STATUS_WAITING_RECOVERY = "WAITING_RECOVERY"
 STATUS_ACTIVE_COOLDOWN = "ACTIVE_COOLDOWN"
 STATUS_PAYOUT_COOLDOWN = "PAYOUT_COOLDOWN"
+STATUS_INSUFFICIENT_BALANCE = "INSUFFICIENT_BALANCE"
 
 TEMPORARY_WAIT_STATUSES = {
     STATUS_CONNECTION_BACKOFF,
@@ -68,6 +69,7 @@ ANALYSIS_MESSAGE = "Analisando mercado..."
 DISCONNECTED_MESSAGE = "Conta BullEx desconectada"
 STOP_WIN_MESSAGE = "Stop Win atingido. Clique em Reiniciar ciclo para continuar."
 STOP_LOSS_MESSAGE = "Stop Loss atingido. Clique em Reiniciar ciclo para continuar."
+INSUFFICIENT_BALANCE_MESSAGE = "Saldo insuficiente na conta REAL"
 SIGNAL_EXPIRED_MESSAGE = "Entrada perdida por atraso. Aguardando novo sinal."
 ANALYSIS_TIMEOUT_SECONDS = 10
 SYNC_TIMEOUT_SECONDS = 30
@@ -368,6 +370,15 @@ class RobotState:
             data["operation_in_progress"] = False
             data["result_waiting"] = False
             data["operation_message"] = STOP_LOSS_MESSAGE
+        elif self.status == STATUS_INSUFFICIENT_BALANCE:
+            data["enabled"] = False
+            data["operation_in_progress"] = False
+            data["result_waiting"] = False
+            data["operation_message"] = INSUFFICIENT_BALANCE_MESSAGE
+            data["status_message"] = INSUFFICIENT_BALANCE_MESSAGE
+            data["analysis_message"] = None
+            data["pending_signal"] = None
+            data["entry_window_open"] = False
         elif self.status == STATUS_SIGNAL_EXPIRED:
             data["operation_message"] = SIGNAL_EXPIRED_MESSAGE
         elif self.status == STATUS_SIGNAL_REJECTED and self.last_order_error == "PAYOUT_TOO_LOW":
@@ -753,6 +764,20 @@ class AutoTrader:
             self._clear_gale_state(state)
         else:
             state.gale_pending = False
+        return state
+
+    def insufficient_balance(self, user_id: str) -> RobotState:
+        state = self.stop(user_id)
+        state.status = STATUS_INSUFFICIENT_BALANCE
+        state.rejection_reason = STATUS_INSUFFICIENT_BALANCE
+        state.last_rejection_reason = STATUS_INSUFFICIENT_BALANCE
+        state.last_order_error = STATUS_INSUFFICIENT_BALANCE
+        state.operation_in_progress = False
+        state.pending_signal = None
+        state.analysis_result = None
+        state.last_analysis_result = STATUS_INSUFFICIENT_BALANCE
+        state.analysis_message = None
+        self._clear_gale_state(state)
         return state
 
     def prepare_cycle(self, user_id: str) -> tuple[bool, RobotState]:

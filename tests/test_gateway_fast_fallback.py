@@ -314,6 +314,46 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         persistent_snapshot.assert_not_called()
         self.assertIn("[ROBOT_STATE_FAST_RETURN]", "\n".join(logs.output))
 
+    async def test_real_robot_does_not_start_with_zero_balance(self) -> None:
+        user_id = "real-zero-start"
+        state = main.auto_trader.get(user_id)
+        state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = True
+        state.connected = True
+        state.active_mode = "REAL"
+        state.connection_checked_at = main.utc_now()
+
+        with (
+            patch.object(
+                main,
+                "refresh_account_snapshot_if_needed",
+                new=AsyncMock(
+                    return_value={
+                        "connected": True,
+                        "mode": "REAL",
+                        "balance": 0,
+                        "currency": "BRL",
+                    }
+                ),
+            ),
+            patch.object(main, "ensure_robot_worker") as worker_start,
+            patch.object(main, "persist_robot"),
+        ):
+            response = await main.robot_start({"user_id": user_id})
+
+        payload = json.loads(response.body)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["data"]["status"], "INSUFFICIENT_BALANCE")
+        self.assertFalse(payload["data"]["enabled"])
+        self.assertFalse(payload["data"]["worker_running"])
+        self.assertEqual(
+            payload["data"]["status_message"],
+            "Saldo insuficiente na conta REAL",
+        )
+        worker_start.assert_not_called()
+        self.assertNotIn(user_id, main.robot_tasks)
+
     async def test_status_exception_returns_memory_fallback(self) -> None:
         user_id = "fast-status-fallback"
         state = main.auto_trader.start(user_id)

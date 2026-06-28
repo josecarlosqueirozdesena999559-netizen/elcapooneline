@@ -379,8 +379,9 @@ class MarketDataResilienceTests(unittest.IsolatedAsyncioTestCase):
             response = await main.bullex_payouts(active="EURUSD-OTC", auth={"user_id": user_id})
 
         body = json.loads(response.body)
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 200)
         self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], "PAYOUTS_TEMPORARY_UNAVAILABLE")
         self.assertTrue(main.user_store.get_user(user_id).connected)
 
     async def test_bullex_account_keeps_connected_snapshot_on_false_negative(self) -> None:

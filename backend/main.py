@@ -23,6 +23,7 @@ from backend.auto_trader import (
     STATUS_ACCOUNT_DISCONNECTED,
     STATUS_ANALYZING,
     STATUS_CONNECTION_BACKOFF,
+    STATUS_INSUFFICIENT_BALANCE,
     STATUS_ORDER_REJECTED,
     STATUS_PENDING_GALE_RESULT,
     STATUS_PENDING_RESULT,
@@ -164,6 +165,7 @@ ANALYSIS_ASSETS = [
     "GBPJPY-OTC",
     "AUDJPY-OTC",
 ]
+CHART_ALLOWED_ASSET_SET = set(ANALYSIS_ASSETS)
 SESSION_CACHE_TTL_SECONDS = 15
 SESSION_STATUS_THROTTLE_SECONDS = 10
 ROBOT_SESSION_REFRESH_SECONDS = 15
@@ -187,6 +189,7 @@ ASSETS_CACHE_TTL_SECONDS = 300
 ASSETS_RETRY_BACKOFF_SECONDS = (10, 30, 60)
 PAYOUT_CACHE_TTL_SECONDS = 60
 CANDLES_CACHE_TTL_SECONDS = 2
+CANDLES_REQUEST_TIMEOUT_SECONDS = 5.0
 ACTIVE_COOLDOWN_SECONDS = 300
 PAYOUT_COOLDOWN_SECONDS = 30
 
@@ -197,6 +200,20 @@ def build_success(data: Any) -> dict[str, Any]:
 
 def build_error(message: str) -> dict[str, Any]:
     return {"ok": False, "data": None, "error": message}
+
+
+def normalize_service_payload(
+    payload: Any,
+    *,
+    error: str = BULLEX_TEMPORARY_UNAVAILABLE,
+) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        return payload
+    logger.warning(
+        "[INVALID_UPSTREAM_PAYLOAD_HANDLED] payload_type=%s",
+        type(payload).__name__,
+    )
+    return build_error(error)
 
 
 def build_controlled_upstream_error(detail: Any) -> dict[str, Any]:
@@ -406,6 +423,7 @@ def session_backoff_seconds(failure_count: int) -> int:
 
 
 def payload_connected_state(payload: dict[str, Any]) -> bool | None:
+    payload = normalize_service_payload(payload)
     data = payload.get("data")
     if not isinstance(data, dict) or "connected" not in data:
         return None
@@ -682,6 +700,7 @@ def account_still_connected(user_id: str) -> bool:
 
 
 def log_ignored_disconnect(user_id: str, path: str, payload: dict[str, Any]) -> None:
+    payload = normalize_service_payload(payload)
     if not is_session_disconnected(payload):
         return
     logger.warning(
@@ -841,6 +860,7 @@ robot_tasks: dict[str, asyncio.Task[None]] = {}
 robot_worker_last_tick_at: dict[str, datetime] = {}
 restorable_robot_states: dict[str, dict[str, Any]] = {}
 robot_state_hydrated_users: set[str] = set()
+chart_candles_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
 CONNECTION_GRACE_SECONDS = 30
 
 
@@ -895,6 +915,7 @@ def build_market_ws_payload(user_id: str, active: str, candle: dict[str, Any]) -
 
 
 def extract_latest_candle(payload: dict[str, Any]) -> dict[str, Any] | None:
+    payload = normalize_service_payload(payload)
     data = payload.get("data")
     candles: list[dict[str, Any]] = []
     if isinstance(data, list):
@@ -908,6 +929,7 @@ def extract_latest_candle(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def extract_candles(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = normalize_service_payload(payload)
     data = payload.get("data")
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
@@ -933,7 +955,11 @@ def normalize_timeframe_seconds(timeframe: str | None, interval: int | None = No
 def numeric_candle_time(candle: dict[str, Any]) -> float | None:
     value = candle.get("time")
     if value is None:
-        value = candle.get("from") or candle.get("at") or candle.get("id")
+        for key in ("from", "at", "id"):
+            candidate = candle.get(key)
+            if candidate is not None:
+                value = candidate
+                break
     parsed = parse_datetime(value)
     if parsed is not None:
         return parsed.timestamp()
@@ -1021,7 +1047,40 @@ def build_live_candles_payload(
     }
 
 
+def build_chart_candles_success(
+    data: dict[str, Any],
+    *,
+    from_cache: bool,
+    limit: int,
+) -> dict[str, Any]:
+    normalized = deepcopy(data)
+    candles = normalized.get("candles")
+    if isinstance(candles, list):
+        normalized["candles"] = candles[-limit:]
+        normalized["count"] = len(normalized["candles"])
+    normalized["limit"] = limit
+    normalized["from_cache"] = from_cache
+    normalized["updating"] = from_cache
+    payload = build_success(normalized)
+    if from_cache:
+        payload["warning"] = "Atualizando candles..."
+    return payload
+
+
+def build_chart_candles_unavailable() -> dict[str, Any]:
+    return {
+        "ok": False,
+        "data": {
+            "candles": [],
+            "from_cache": False,
+        },
+        "error": "CANDLES_TEMPORARY_UNAVAILABLE",
+        "warning": "Atualizando candles...",
+    }
+
+
 def is_session_disconnected(payload: dict[str, Any]) -> bool:
+    payload = normalize_service_payload(payload)
     error = str(payload.get("error") or "").strip().upper()
     return error in {"SESSION_NOT_FOUND", "SESSION_DISCONNECTED"}
 
@@ -1458,7 +1517,10 @@ async def call_bullex_service(
 
 
 def json_response(status_code: int, payload: dict[str, Any]) -> JSONResponse:
-    return JSONResponse(status_code=status_code, content=payload)
+    return JSONResponse(
+        status_code=status_code,
+        content=normalize_service_payload(payload),
+    )
 
 
 def build_connection_payload(data: dict[str, Any], fallback_email: str | None = None) -> dict[str, Any]:
@@ -1490,6 +1552,7 @@ def sync_user_store_from_payload(
     *,
     is_new_connection: bool = False,
 ) -> None:
+    payload = normalize_service_payload(payload)
     try:
         if not payload.get("ok"):
             if payload.get("error") in {SESSION_DISCONNECTED, SESSION_NOT_FOUND}:
@@ -1515,6 +1578,7 @@ def sync_user_store_from_payload(
 
 
 def mark_disconnected_from_payload(user_id: str, payload: dict[str, Any]) -> None:
+    payload = normalize_service_payload(payload)
     if payload.get("error") not in {SESSION_DISCONNECTED, SESSION_NOT_FOUND}:
         return
     try:
@@ -1524,6 +1588,7 @@ def mark_disconnected_from_payload(user_id: str, payload: dict[str, Any]) -> Non
 
 
 def extract_account_status(payload: dict[str, Any]) -> tuple[bool, str | None]:
+    payload = normalize_service_payload(payload)
     data = payload.get("data")
     if not payload.get("ok") or not isinstance(data, dict):
         return False, None
@@ -1533,6 +1598,7 @@ def extract_account_status(payload: dict[str, Any]) -> tuple[bool, str | None]:
 
 
 def connection_source_from_payload(payload: dict[str, Any], *, default: str = "bullex_service") -> str:
+    payload = normalize_service_payload(payload)
     data = payload.get("data")
     if payload.get("ok") and isinstance(data, dict):
         raw_source = str(data.get("connection_status_source") or data.get("source") or "").strip()
@@ -1726,6 +1792,7 @@ async def refresh_account_snapshot_if_needed(
     if not needs_refresh:
         return snapshot
     _, payload = await call_bullex_service("GET", "/account", user_id)
+    payload = normalize_service_payload(payload)
     if payload.get("ok"):
         sync_user_store_from_payload(user_id, payload)
         data = payload.get("data")
@@ -1803,6 +1870,7 @@ ORDER_EXPIRATION_FIELDS = (
 
 
 def extract_server_timestamp(payload: dict[str, Any]) -> float | None:
+    payload = normalize_service_payload(payload)
     data = payload.get("data")
     if not payload.get("ok") or not isinstance(data, dict):
         return None
@@ -2052,6 +2120,7 @@ def real_buy_gateway_block_reason(user_id: str, state: Any, body: dict[str, Any]
 
 
 def extract_payout(payload: dict[str, Any], symbol: str) -> float | None:
+    payload = normalize_service_payload(payload)
     data = payload.get("data")
     if not isinstance(data, list):
         return None
@@ -2286,7 +2355,11 @@ def robot_connection_unavailable(connected: bool, active_mode: str | None) -> bo
 
 
 def is_stop_status(status: Any) -> bool:
-    return str(status or "").strip().upper() in {STATUS_STOP_WIN_HIT, STATUS_STOP_LOSS_HIT}
+    return str(status or "").strip().upper() in {
+        STATUS_STOP_WIN_HIT,
+        STATUS_STOP_LOSS_HIT,
+        STATUS_INSUFFICIENT_BALANCE,
+    }
 
 
 def get_user_account_snapshot(user_id: str | None) -> dict[str, Any]:
@@ -2404,6 +2477,15 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         data["pending_signal"] = None
         data["last_signal"] = None
         data["last_trade"] = None
+    if data.get("status") == STATUS_INSUFFICIENT_BALANCE:
+        data["enabled"] = False
+        data["worker_running"] = False
+        data["operation_in_progress"] = False
+        data["result_waiting"] = False
+        data["analysis_message"] = None
+        data["pending_signal"] = None
+        data["operation_message"] = "Saldo insuficiente na conta REAL"
+        data["status_message"] = "Saldo insuficiente na conta REAL"
     if is_stop_status(data.get("status")):
         data["enabled"] = False
         data["worker_running"] = False
@@ -5020,6 +5102,33 @@ async def _robot_start_impl(auth: dict[str, str]) -> JSONResponse:
         persist_robot(user_id)
         await stop_robot_worker(user_id)
         return json_response(409, build_error("BULLEX_NOT_CONNECTED"))
+    if active_mode == "REAL":
+        snapshot = await refresh_account_snapshot_if_needed(
+            user_id,
+            connected=connected,
+            active_mode=active_mode,
+        )
+        try:
+            real_balance = float(snapshot["balance"]) if snapshot.get("balance") is not None else None
+        except (TypeError, ValueError):
+            real_balance = None
+        if real_balance is not None and real_balance <= 0:
+            state = auto_trader.insufficient_balance(user_id)
+            persist_robot(user_id)
+            await stop_robot_worker(user_id)
+            logger.warning(
+                "[ROBOT_START_BLOCKED_INSUFFICIENT_BALANCE] user_id=%s balance=%s",
+                user_id,
+                real_balance,
+            )
+            return json_response(
+                200,
+                build_robot_payload(
+                    state,
+                    user_id=user_id,
+                    balance=real_balance,
+                ),
+            )
     if state.account_mode == "REAL":
         logger.info(
             "[REAL MODE DETECTED] user_id=%s active_mode=%s confirm_real=%s",
@@ -5263,6 +5372,7 @@ async def _bullex_connect_impl(
         user_id,
         json_body=body,
     )
+    payload = normalize_service_payload(payload)
     if status_code >= 500:
         error = str(payload.get("error") or "").strip().upper()
         logger.warning(
@@ -5360,6 +5470,7 @@ async def _bullex_status_impl(auth: dict[str, str]) -> JSONResponse:
     mark_user_active(user_id)
     try:
         status_code, payload = await call_bullex_service("GET", "/sessions/status", user_id)
+        payload = normalize_service_payload(payload)
     except Exception as exc:
         logger.warning(
             "[UPSTREAM_ERROR_HANDLED] user_id=%s path=/sessions/status reason=%s",
@@ -5463,6 +5574,7 @@ async def bullex_assets(auth: dict[str, str] = Depends(require_headers)) -> JSON
             return json_response(200, cached_payload)
 
     status_code, payload = await call_bullex_service("GET", "/assets", user_id)
+    payload = normalize_service_payload(payload)
     log_ignored_disconnect(user_id, "/assets", payload)
     if payload.get("ok") and isinstance(payload.get("data"), list):
         allowed_assets = normalize_allowed_assets_list(payload.get("data"))
@@ -5518,38 +5630,129 @@ async def bullex_candles(
     auth: dict[str, str] = Depends(require_headers),
 ) -> JSONResponse:
     resolved_symbol = normalize_binary_active(symbol or active or "")
-    if not is_binary_asset_allowed(resolved_symbol):
-        return json_response(400, build_error(ASSET_NOT_ALLOWED))
-    resolved_timeframe, resolved_interval = normalize_timeframe_seconds(timeframe, interval)
-    resolved_limit = max(1, min(int(limit or count or 60), 500))
-
-    status_code, session_payload = await call_bullex_service("GET", "/sessions/status", auth["user_id"])
-    log_ignored_disconnect(auth["user_id"], "/sessions/status", session_payload)
-    if not session_payload.get("ok"):
-        return json_response(status_code, session_payload)
-    server_timestamp = extract_server_timestamp(session_payload) or utc_now().timestamp()
-
+    if resolved_symbol not in CHART_ALLOWED_ASSET_SET:
+        logger.warning(
+            "[CANDLES_ERROR_HANDLED] user_id=%s symbol=%s error=%s",
+            auth["user_id"],
+            resolved_symbol,
+            ASSET_NOT_ALLOWED,
+        )
+        return json_response(200, build_chart_candles_unavailable())
+    user_id = auth["user_id"]
+    try:
+        resolved_timeframe, resolved_interval = normalize_timeframe_seconds(timeframe, interval)
+        resolved_limit = max(1, min(int(limit or count or 60), 500))
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "[CANDLES_ERROR_HANDLED] user_id=%s symbol=%s reason=%s",
+            user_id,
+            resolved_symbol,
+            type(exc).__name__,
+        )
+        return json_response(200, build_chart_candles_unavailable())
+    cache_key = (user_id, resolved_symbol, resolved_timeframe)
     params = {
         "active": resolved_symbol,
         "interval": resolved_interval,
         "count": resolved_limit,
-        "endtime": int(endtime or server_timestamp),
     }
     if endtime is not None:
         params["endtime"] = endtime
-    status_code, payload = await call_bullex_service("GET", "/candles", auth["user_id"], params=params)
-    log_ignored_disconnect(auth["user_id"], "/candles", payload)
-    if not payload.get("ok"):
-        return json_response(status_code, payload)
-    live_payload = build_live_candles_payload(
+    logger.info(
+        "[CANDLES_FETCH] user_id=%s symbol=%s timeframe=%s count=%s",
+        user_id,
         resolved_symbol,
         resolved_timeframe,
-        resolved_interval,
         resolved_limit,
-        float(server_timestamp),
-        payload,
     )
-    return json_response(status_code, build_success(live_payload))
+    timed_out = False
+    try:
+        status_code, payload = await asyncio.wait_for(
+            call_bullex_service(
+                "GET",
+                "/candles",
+                user_id,
+                params=params,
+            ),
+            timeout=CANDLES_REQUEST_TIMEOUT_SECONDS,
+        )
+        payload = normalize_service_payload(
+            payload,
+            error="CANDLES_TEMPORARY_UNAVAILABLE",
+        )
+        if payload.get("ok"):
+            server_timestamp = extract_server_timestamp(payload) or utc_now().timestamp()
+            live_payload = build_live_candles_payload(
+                resolved_symbol,
+                resolved_timeframe,
+                resolved_interval,
+                resolved_limit,
+                float(server_timestamp),
+                payload,
+            )
+            chart_candles_cache[cache_key] = deepcopy(live_payload)
+            logger.info(
+                "[CANDLES_OK] user_id=%s symbol=%s candles=%s",
+                user_id,
+                resolved_symbol,
+                len(live_payload["candles"]),
+            )
+            return json_response(
+                200,
+                build_chart_candles_success(
+                    live_payload,
+                    from_cache=False,
+                    limit=resolved_limit,
+                ),
+            )
+        logger.warning(
+            "[CANDLES_ERROR_HANDLED] user_id=%s symbol=%s status=%s error=%s",
+            user_id,
+            resolved_symbol,
+            status_code,
+            payload.get("error"),
+        )
+    except asyncio.TimeoutError:
+        timed_out = True
+        logger.warning(
+            "[CANDLES_TIMEOUT_HANDLED] user_id=%s symbol=%s timeout_seconds=%s",
+            user_id,
+            resolved_symbol,
+            CANDLES_REQUEST_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[CANDLES_ERROR_HANDLED] user_id=%s symbol=%s reason=%s",
+            user_id,
+            resolved_symbol,
+            type(exc).__name__,
+            exc_info=True,
+        )
+
+    cached = chart_candles_cache.get(cache_key)
+    if cached is not None:
+        logger.info(
+            "[CANDLES_CACHE_RETURNED] user_id=%s symbol=%s timeframe=%s candles=%s",
+            user_id,
+            resolved_symbol,
+            resolved_timeframe,
+            len(cached.get("candles") or []),
+        )
+        return json_response(
+            200,
+            build_chart_candles_success(
+                cached,
+                from_cache=True,
+                limit=resolved_limit,
+            ),
+        )
+    if not timed_out:
+        logger.warning(
+            "[CANDLES_ERROR_HANDLED] user_id=%s symbol=%s error=CANDLES_TEMPORARY_UNAVAILABLE",
+            user_id,
+            resolved_symbol,
+        )
+    return json_response(200, build_chart_candles_unavailable())
 
 
 @app.get("/debug/candles-live")
@@ -5599,8 +5802,13 @@ async def bullex_payouts(
         return json_response(400, build_error(ASSET_NOT_ALLOWED))
     active = normalize_binary_active(active) if active is not None else None
     params = {"active": active} if active is not None else None
-    status_code, payload = await call_bullex_service("GET", "/payouts", auth["user_id"], params=params)
-    log_ignored_disconnect(auth["user_id"], "/payouts", payload)
+    user_id = auth["user_id"]
+    status_code, payload = await call_bullex_service("GET", "/payouts", user_id, params=params)
+    payload = normalize_service_payload(
+        payload,
+        error="PAYOUTS_TEMPORARY_UNAVAILABLE",
+    )
+    log_ignored_disconnect(user_id, "/payouts", payload)
     if payload.get("ok") and active and isinstance(payload.get("data"), list):
         payout_item = next(
             (
@@ -5612,10 +5820,23 @@ async def bullex_payouts(
         )
         if payout_item is not None:
             try:
-                user_store.save_market_asset_payout(auth["user_id"], active, payout_item.get("payout"))
+                user_store.save_market_asset_payout(user_id, active, payout_item.get("payout"))
             except Exception:
-                logger.exception("falha ao salvar payout de market_assets para %s %s", auth["user_id"], active)
-    return json_response(status_code, payload)
+                logger.exception("falha ao salvar payout de market_assets para %s %s", user_id, active)
+    if payload.get("ok"):
+        return json_response(200, payload)
+    cached = cached_successful_response(user_id, build_cache_key("/payouts", params))
+    if cached is not None:
+        logger.info("[PAYOUT_CACHE_RETURNED] user_id=%s active=%s", user_id, active)
+        return json_response(200, add_stale_warning(cached.payload))
+    return json_response(
+        200,
+        {
+            "ok": False,
+            "data": [],
+            "error": "PAYOUTS_TEMPORARY_UNAVAILABLE",
+        },
+    )
 
 
 @app.post("/bullex/buy-demo")
@@ -5678,6 +5899,7 @@ async def bullex_buy_real(
 async def bullex_disconnect(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     user_id = auth["user_id"]
     status_code, payload = await call_bullex_service("POST", "/sessions/disconnect", user_id)
+    payload = normalize_service_payload(payload)
     mark_session_failure(user_id, offline=True)
     auto_trader.disconnect_account(user_id)
     await stop_robot_worker(user_id)
@@ -5702,6 +5924,10 @@ async def _bullex_account_impl(auth: dict[str, str]) -> JSONResponse:
     mark_user_active(user_id)
     try:
         status_code, payload = await call_bullex_service("GET", "/account", user_id)
+        payload = normalize_service_payload(
+            payload,
+            error="ACCOUNT_TEMPORARY_UNAVAILABLE",
+        )
     except Exception as exc:
         logger.warning(
             "[UPSTREAM_ERROR_HANDLED] user_id=%s path=/account reason=%s",
