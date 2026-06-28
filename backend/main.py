@@ -4499,10 +4499,38 @@ async def read_restored_session_status(user_id: str) -> bool:
 
 
 @app.on_event("startup")
-async def startup_no_user_restore() -> None:
-    logger.info("[STARTUP_RESTORE_DISABLED] no user restore on startup")
+async def restore_robot_states() -> None:
+    logger.info("[STARTUP_RESTORE_DISABLED] no session restore on startup")
+    restored_count = 0
+    try:
+        for user_id, payload in robot_persistence.load_states():
+            session_restored = False
+            payload = {
+                **payload,
+                "connected": session_restored,
+                "active_mode": None,
+                "connection_checked_at": None,
+                "connection_status_source": "startup_no_session_restore",
+            }
+            restorable_robot_states[user_id] = deepcopy(payload)
+            trades = robot_persistence.load_trades(user_id)
+            auto_trader.restore(
+                user_id,
+                payload,
+                trades,
+                source=robot_persistence_source(),
+            )
+            robot_state_hydrated_users.add(user_id)
+            restored_count += 1
+            logger.info(
+                "[USER_STATE_LOADED_NO_WORKER] user_id=%s source=%s",
+                user_id,
+                robot_persistence_source(),
+            )
+    except Exception:
+        logger.exception("[ROBOT STARTUP RESTORE ERROR]")
     logger.info("[ON_DEMAND_RESTORE_ONLY] robot restore requires user action")
-    logger.info("[STARTUP_READY] no user restore on startup")
+    logger.info("[STARTUP_READY] restored_users=%s worker_start=false", restored_count)
 
 
 @app.on_event("shutdown")
