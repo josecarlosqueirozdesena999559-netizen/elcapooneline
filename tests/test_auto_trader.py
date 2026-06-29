@@ -50,7 +50,9 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertEqual(user_b.stop_win, 50)
         self.assertEqual(user_b.stop_loss, 30)
         self.assertEqual(user_b.strategy_mode, "conservative")
-        self.assertEqual(user_b.account_mode, "DEMO")
+        self.assertEqual(user_b.account_mode, "REAL")
+        self.assertTrue(user_b.allow_real)
+        self.assertTrue(user_b.confirm_real)
         self.assertFalse(user_b.enabled)
         self.assertEqual(trader.source("user-a"), "memory")
         self.assertEqual(trader.source("user-b"), "default")
@@ -2402,10 +2404,12 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["connection_status_source"], "bullex_service")
         self.assertEqual(data["connection_failure_count"], 0)
 
-    async def test_real_is_locked_by_default(self) -> None:
-        user_id = "user-real-locked"
+    async def test_real_is_allowed_by_default(self) -> None:
+        user_id = "user-real-default"
         state = main.auto_trader.start(user_id)
         state.account_mode = "REAL"
+        state.allow_real = False
+        state.confirm_real = False
         make_cycle_due(user_id)
 
         with patch.object(
@@ -2423,16 +2427,17 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                 required_mode="REAL",
             )
 
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"], "CONFIRM_REAL_REQUIRED")
-        service_call.assert_awaited_once()
+        self.assertNotEqual(status_code, 403)
+        self.assertNotEqual(payload.get("error"), "CONFIRM_REAL_REQUIRED")
+        self.assertGreaterEqual(service_call.await_count, 1)
 
-    async def test_real_without_confirm_real_is_blocked(self) -> None:
+    async def test_robot_start_forces_real_confirmation_defaults(self) -> None:
         user_id = "user-real-no-confirm"
         state = main.auto_trader.get(user_id)
         state.account_mode = "REAL"
-        state.allow_real = True
+        state.allow_real = False
         state.confirm_real = False
+        state.entry_value = min(2, main.config.robot_real_max_entry)
 
         with (
             patch.object(
@@ -2445,7 +2450,11 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                             {
                                 "connected": True,
                                 "active_mode": "REAL",
+                                "active_mode_from_bullex": "REAL",
                                 "server_time": SERVER_TIME_M1_OPEN,
+                                "balance_real": 25,
+                                "balance": 25,
+                                "mode": "REAL",
                             }
                         ),
                     )
@@ -2457,10 +2466,12 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             response = await main.robot_start({"user_id": user_id})
 
         payload = json.loads(response.body)
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(payload["error"], "CONFIRM_REAL_REQUIRED")
-        self.assertFalse(state.enabled)
-        ensure_worker.assert_not_called()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["data"]["enabled"])
+        self.assertTrue(payload["data"]["allow_real"])
+        self.assertTrue(payload["data"]["confirm_real"])
+        self.assertEqual(payload["data"]["account_mode"], "REAL")
+        ensure_worker.assert_called_once_with(user_id)
 
     async def test_real_with_practice_active_mode_is_blocked(self) -> None:
         user_id = "user-real-practice"
@@ -2555,12 +2566,14 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state.enabled)
         ensure_worker.assert_not_called()
 
-    async def test_robot_state_reports_real_readiness(self) -> None:
+    async def test_robot_state_blocks_real_zero_balance(self) -> None:
         user_id = "user-real-ready"
         state = main.auto_trader.get(user_id)
         state.account_mode = "REAL"
         state.allow_real = True
         state.confirm_real = True
+        state.enabled = True
+        state.status = main.STATUS_WAITING_NEXT_CYCLE
         main.user_store.save_connection(
             user_id,
             {
@@ -2595,8 +2608,15 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["balance"], 0.0)
         self.assertEqual(data["currency"], "BRL")
         self.assertEqual(data["email"], "real@example.com")
-        self.assertTrue(data["real_ready"])
-        self.assertIsNone(data["real_block_reason"])
+        self.assertFalse(data["enabled"])
+        self.assertFalse(data["worker_running"])
+        self.assertEqual(data["status"], "INSUFFICIENT_BALANCE")
+        self.assertEqual(
+            data["operation_message"],
+            "Você está sem saldo para iniciar. Faça um depósito na BullEx.",
+        )
+        self.assertFalse(data["real_ready"])
+        self.assertEqual(data["real_block_reason"], "INSUFFICIENT_BALANCE")
         self.assertEqual(data["real_balance_warning"], "BALANCE_ZERO")
 
     async def test_robot_worker_skips_analysis_while_waiting_trade_result(self) -> None:
@@ -2639,6 +2659,47 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["status"], "STOP_WIN_HIT")
         self.assertFalse(data["enabled"])
         self.assertFalse(data["worker_running"])
+        stop_worker.assert_awaited_once_with(user_id)
+
+    async def test_execute_robot_cycle_stops_real_zero_balance_before_analysis(self) -> None:
+        user_id = "user-real-zero-cycle"
+        state = main.auto_trader.start(user_id)
+        state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = True
+        state.connected = True
+        state.active_mode = "REAL"
+        make_cycle_due(user_id)
+        main.user_store.save_connection(
+            user_id,
+            {
+                "connected": True,
+                "account_mode": "REAL",
+                "last_balance": 0,
+                "currency": "BRL",
+            },
+        )
+
+        with (
+            patch.object(main, "call_bullex_service", new=AsyncMock()) as service_call,
+            patch.object(main, "scan_local_signals", new=AsyncMock()) as scan,
+            patch.object(main, "persist_robot"),
+            patch.object(main, "stop_robot_worker", new=AsyncMock()) as stop_worker,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "INSUFFICIENT_BALANCE")
+        self.assertFalse(data["enabled"])
+        self.assertFalse(data["operation_in_progress"])
+        self.assertFalse(data["worker_running"])
+        self.assertEqual(
+            data["operation_message"],
+            "Você está sem saldo para iniciar. Faça um depósito na BullEx.",
+        )
+        service_call.assert_not_awaited()
+        scan.assert_not_awaited()
         stop_worker.assert_awaited_once_with(user_id)
 
     async def test_execute_robot_cycle_pauses_on_stop_loss(self) -> None:
@@ -2722,12 +2783,14 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["last_order_error"], "ENTRY_WINDOW_MISSED")
         self.assertIsNone(data["pending_signal"])
 
-    async def test_robot_state_requires_allow_real_for_real_readiness(self) -> None:
+    async def test_robot_state_ignores_legacy_allow_real_flag_for_real_readiness(self) -> None:
         user_id = "user-real-allow-required"
         state = main.auto_trader.get(user_id)
         state.account_mode = "REAL"
         state.allow_real = False
-        state.confirm_real = True
+        state.confirm_real = False
+        state.connected = True
+        state.active_mode = "REAL"
 
         with (
             patch.object(
@@ -2745,8 +2808,11 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             response = await main.robot_state({"user_id": user_id})
 
         data = json.loads(response.body)["data"]
-        self.assertFalse(data["real_ready"])
-        self.assertEqual(data["real_block_reason"], "CONFIRM_REAL_REQUIRED")
+        self.assertTrue(data["real_ready"])
+        self.assertIsNone(data["real_block_reason"])
+        self.assertEqual(data["account_mode"], "REAL")
+        self.assertTrue(data["allow_real"])
+        self.assertTrue(data["confirm_real"])
 
     async def test_confirmed_real_sends_at_most_one_order_per_cycle(self) -> None:
         user_id = "user-real"

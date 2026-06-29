@@ -569,6 +569,55 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_supabase_load_settings_creates_real_defaults_for_new_user(self) -> None:
+        persistence = SupabaseRobotPersistence("https://example.supabase.co", "service-key")
+        persistence._ensure_user = Mock()
+        persistence._request = Mock(side_effect=[[], httpx.Response(201, text="")])
+
+        settings = persistence.load_settings("user-new")
+
+        self.assertEqual(settings["account_mode"], "REAL")
+        self.assertTrue(settings["allow_real"])
+        self.assertTrue(settings["confirm_real"])
+        self.assertEqual(settings["entry_value"], 2)
+        self.assertEqual(persistence._request.call_count, 2)
+        self.assertEqual(
+            persistence._request.call_args_list[1].kwargs["json"]["account_mode"],
+            "REAL",
+        )
+        self.assertTrue(persistence._request.call_args_list[1].kwargs["json"]["allow_real"])
+        self.assertTrue(persistence._request.call_args_list[1].kwargs["json"]["confirm_real"])
+
+    async def test_supabase_load_settings_repairs_legacy_demo_record(self) -> None:
+        persistence = SupabaseRobotPersistence("https://example.supabase.co", "service-key")
+        persistence._ensure_user = Mock()
+        legacy = {
+            "entry_value": 7,
+            "stop_win": 50,
+            "stop_loss": 30,
+            "cycle_minutes": 5,
+            "min_confidence": 80,
+            "min_payout": 80,
+            "strategy_mode": "conservative",
+            "account_mode": "DEMO",
+            "allow_real": False,
+            "confirm_real": False,
+            "max_entries_per_cycle": 1,
+        }
+        persistence._request = Mock(side_effect=[[legacy], httpx.Response(201, text="")])
+
+        settings = persistence.load_settings("legacy-user")
+
+        self.assertEqual(settings["account_mode"], "REAL")
+        self.assertTrue(settings["allow_real"])
+        self.assertTrue(settings["confirm_real"])
+        self.assertEqual(settings["entry_value"], 7)
+        self.assertEqual(persistence._request.call_count, 2)
+        repaired_payload = persistence._request.call_args_list[1].kwargs["json"]
+        self.assertEqual(repaired_payload["account_mode"], "REAL")
+        self.assertTrue(repaired_payload["allow_real"])
+        self.assertTrue(repaired_payload["confirm_real"])
+
     async def test_extract_robot_settings_normalizes_practice_account_mode(self) -> None:
         settings = extract_robot_settings(
             {
@@ -642,7 +691,11 @@ class RobotPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(settings_b["account_mode"], "REAL")
             self.assertTrue(settings_b["allow_real"])
             self.assertTrue(settings_b["confirm_real"])
-            self.assertIsNone(restarted.load_settings("user-new"))
+            settings_new = restarted.load_settings("user-new")
+            self.assertEqual(settings_new["account_mode"], "REAL")
+            self.assertTrue(settings_new["allow_real"])
+            self.assertTrue(settings_new["confirm_real"])
+            self.assertEqual(settings_new["entry_value"], 2)
 
     async def test_robot_state_loads_dedicated_settings_after_memory_reset(self) -> None:
         from backend import main

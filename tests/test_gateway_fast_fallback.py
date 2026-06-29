@@ -357,13 +357,65 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         payload = json.loads(response.body)
         self.assertEqual(response.status_code, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "INSUFFICIENT_BALANCE")
+        self.assertEqual(
+            payload["message"],
+            "Você está sem saldo para iniciar. Faça um depósito na BullEx.",
+        )
         self.assertEqual(payload["data"]["status"], "INSUFFICIENT_BALANCE")
         self.assertFalse(payload["data"]["enabled"])
         self.assertFalse(payload["data"]["worker_running"])
         self.assertEqual(
             payload["data"]["status_message"],
-            "Saldo insuficiente na conta REAL",
+            "Você está sem saldo para iniciar. Faça um depósito na BullEx.",
         )
+        worker_start.assert_not_called()
+        self.assertNotIn(user_id, main.robot_tasks)
+
+    async def test_real_robot_does_not_start_when_entry_exceeds_balance(self) -> None:
+        user_id = "real-entry-over-balance"
+        state = main.auto_trader.get(user_id)
+        state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = True
+        state.connected = True
+        state.active_mode = "REAL"
+        state.connection_checked_at = main.utc_now()
+        state.entry_value = 10
+
+        with (
+            patch.object(
+                main,
+                "call_bullex_service",
+                new=AsyncMock(
+                    return_value=(
+                        200,
+                        main.build_success(
+                            {
+                                "connected": True,
+                                "active_mode_from_bullex": "REAL",
+                                "balance_real": 5,
+                                "balance": 5,
+                                "mode": "REAL",
+                            }
+                        ),
+                    )
+                ),
+            ),
+            patch.object(main, "ensure_robot_worker") as worker_start,
+            patch.object(main, "persist_robot"),
+        ):
+            response = await main.robot_start({"user_id": user_id})
+
+        payload = json.loads(response.body)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "INSUFFICIENT_BALANCE")
+        self.assertEqual(payload["message"], "Seu saldo é menor que o valor da entrada.")
+        self.assertEqual(payload["data"]["status"], "INSUFFICIENT_BALANCE")
+        self.assertFalse(payload["data"]["enabled"])
+        self.assertFalse(payload["data"]["worker_running"])
         worker_start.assert_not_called()
         self.assertNotIn(user_id, main.robot_tasks)
 

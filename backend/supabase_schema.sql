@@ -152,7 +152,32 @@ alter table public.robot_user_settings
 update public.robot_user_settings
 set account_mode = 'REAL',
     allow_real = true,
-    confirm_real = true;
+    confirm_real = true
+where account_mode is distinct from 'REAL'
+   or allow_real is distinct from true
+   or confirm_real is distinct from true;
+
+do $$
+begin
+  if to_regclass('public.robot_settings') is not null then
+    execute $migration$
+      update public.robot_settings
+      set account_mode = 'REAL',
+          allow_real = true,
+          confirm_real = true
+      where account_mode is distinct from 'REAL'
+         or allow_real is distinct from true
+         or confirm_real is distinct from true
+    $migration$;
+
+    execute $migration$
+      alter table public.robot_settings
+        alter column account_mode set default 'REAL',
+        alter column allow_real set default true,
+        alter column confirm_real set default true
+    $migration$;
+  end if;
+end $$;
 
 update public.robot_states
 set state = jsonb_set(

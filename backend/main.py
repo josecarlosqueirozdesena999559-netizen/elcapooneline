@@ -203,6 +203,10 @@ def build_error(message: str) -> dict[str, Any]:
     return {"ok": False, "data": None, "error": message}
 
 
+INSUFFICIENT_BALANCE_START_MESSAGE = "Você está sem saldo para iniciar. Faça um depósito na BullEx."
+ENTRY_VALUE_EXCEEDS_BALANCE_MESSAGE = "Seu saldo é menor que o valor da entrada."
+
+
 def normalize_service_payload(
     payload: Any,
     *,
@@ -1598,6 +1602,26 @@ def build_real_account_contract(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_insufficient_balance_start_response(state: Any, *, message: str) -> dict[str, Any]:
+    data = build_robot_payload(state)["data"]
+    data.update(
+        {
+            "enabled": False,
+            "worker_running": False,
+            "operation_in_progress": False,
+            "status": STATUS_INSUFFICIENT_BALANCE,
+            "operation_message": message,
+            "status_message": message,
+        }
+    )
+    return {
+        "ok": False,
+        "error": STATUS_INSUFFICIENT_BALANCE,
+        "message": message,
+        "data": data,
+    }
+
+
 def sync_user_store_from_payload(
     user_id: str,
     payload: dict[str, Any],
@@ -2126,8 +2150,6 @@ def real_block_reason(
         reason = "BULLEX_NOT_CONNECTED"
     elif active_mode != "REAL":
         reason = "BULLEX_ACTIVE_MODE_NOT_REAL"
-    elif not state.allow_real or not state.confirm_real:
-        reason = "CONFIRM_REAL_REQUIRED"
     elif state.entry_value <= 0:
         reason = "AMOUNT_MUST_BE_POSITIVE"
     else:
@@ -2507,6 +2529,9 @@ def memory_status_fallback(user_id: str) -> dict[str, Any] | None:
 
 def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     data = strip_ai_fields(state.to_dict())
+    data["account_mode"] = "REAL"
+    data["allow_real"] = True
+    data["confirm_real"] = True
     user_id = extra.pop("user_id", None)
     if user_id is not None:
         worker_task = robot_tasks.get(str(user_id))
@@ -2514,6 +2539,9 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         data["worker_running"] = bool(worker_task is not None and not worker_task.done())
         data["worker_last_tick_at"] = last_tick_at.isoformat() if last_tick_at is not None else None
     data.update(strip_ai_fields(extra))
+    data["account_mode"] = "REAL"
+    data["allow_real"] = True
+    data["confirm_real"] = True
     if data.get("status") == STATUS_ACCOUNT_DISCONNECTED:
         data["connected"] = False
         data["enabled"] = False
@@ -2536,8 +2564,8 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         data["result_waiting"] = False
         data["analysis_message"] = None
         data["pending_signal"] = None
-        data["operation_message"] = "Saldo insuficiente na conta REAL"
-        data["status_message"] = "Saldo insuficiente na conta REAL"
+        data["operation_message"] = INSUFFICIENT_BALANCE_START_MESSAGE
+        data["status_message"] = INSUFFICIENT_BALANCE_START_MESSAGE
     if data.get("status") == STATUS_BULLEX_ACTIVE_MODE_NOT_REAL:
         data["enabled"] = False
         data["worker_running"] = False
@@ -2611,9 +2639,33 @@ def get_real_balance_warning(
     if snapshot.get("balance") is None:
         return None
     balance = float(snapshot["balance"])
-    if balance == 0:
-        logger.info("[BALANCE_ZERO_NOT_DISCONNECTED] user_id=%s mode=REAL", user_id)
-    return "BALANCE_ZERO" if balance == 0 else None
+    if balance <= 0:
+        logger.warning("[INSUFFICIENT_BALANCE_REAL] user_id=%s balance=%s", user_id, balance)
+    return "BALANCE_ZERO" if balance <= 0 else None
+
+
+async def stop_real_robot_for_insufficient_balance(
+    user_id: str,
+    *,
+    balance: float | None,
+    entry_value: float | None = None,
+) -> Any:
+    state = auto_trader.insufficient_balance(user_id)
+    persist_robot(user_id)
+    logger.warning(
+        "[ROBOT_STOPPED_BALANCE_ZERO] user_id=%s balance=%s entry_value=%s",
+        user_id,
+        balance,
+        entry_value if entry_value is not None else state.entry_value,
+    )
+    logger.warning(
+        "[INSUFFICIENT_BALANCE_REAL] user_id=%s balance=%s entry_value=%s",
+        user_id,
+        balance,
+        entry_value if entry_value is not None else state.entry_value,
+    )
+    await stop_robot_worker(user_id)
+    return state
 
 
 def recover_timed_out_analysis_if_needed(user_id: str) -> Any:
@@ -2837,6 +2889,14 @@ def get_user_robot_state(user_id: str) -> Any:
         state.account_mode = "REAL"
         state.allow_real = True
         state.confirm_real = True
+        return state
+    if auto_trader.has_state(user_id) and user_id not in restorable_robot_states:
+        state = auto_trader.get(user_id)
+        state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = True
+        robot_state_hydrated_users.add(user_id)
+        persist_robot(user_id)
         return state
     robot_state_hydrated_users.discard(user_id)
     try:
@@ -3608,6 +3668,37 @@ async def execute_robot_cycle(
             if required_mode is not None and state.account_mode != required_mode:
                 return 409, build_error(f"ACCOUNT_MODE_NOT_{required_mode}")
 
+            if state.account_mode == "REAL":
+                account_snapshot = get_cached_account_snapshot(user_id)
+                snapshot_mode = account_snapshot.get("mode") or state.active_mode
+                raw_balance = account_snapshot.get("balance")
+                real_balance = float(raw_balance) if snapshot_mode == "REAL" and raw_balance is not None else None
+                if real_balance is not None and real_balance <= 0:
+                    state = await stop_real_robot_for_insufficient_balance(
+                        user_id,
+                        balance=real_balance,
+                    )
+                    return 200, build_robot_payload(
+                        state,
+                        user_id=user_id,
+                        balance=real_balance,
+                        balance_real=real_balance,
+                    )
+                if real_balance is not None and float(state.entry_value) > real_balance:
+                    state = await stop_real_robot_for_insufficient_balance(
+                        user_id,
+                        balance=real_balance,
+                        entry_value=float(state.entry_value),
+                    )
+                    return 200, build_robot_payload(
+                        state,
+                        user_id=user_id,
+                        balance=real_balance,
+                        balance_real=real_balance,
+                        operation_message=ENTRY_VALUE_EXCEEDS_BALANCE_MESSAGE,
+                        status_message=ENTRY_VALUE_EXCEEDS_BALANCE_MESSAGE,
+                    )
+
             status_code, account_payload, entry_window = await refresh_entry_window(user_id, state)
             state, connected, active_mode, connection_source = await reconcile_robot_connection_from_payload(
                 user_id,
@@ -3626,6 +3717,35 @@ async def execute_robot_cycle(
                     connection_status_source="disconnected",
                 )
             if state.account_mode == "REAL":
+                account_snapshot = get_cached_account_snapshot(user_id)
+                snapshot_mode = account_snapshot.get("mode") or active_mode
+                raw_balance = account_snapshot.get("balance")
+                real_balance = float(raw_balance) if snapshot_mode == "REAL" and raw_balance is not None else None
+                if active_mode == "REAL" and real_balance is not None and real_balance <= 0:
+                    state = await stop_real_robot_for_insufficient_balance(
+                        user_id,
+                        balance=real_balance,
+                    )
+                    return 200, build_robot_payload(
+                        state,
+                        user_id=user_id,
+                        balance=real_balance,
+                        balance_real=real_balance,
+                    )
+                if active_mode == "REAL" and real_balance is not None and float(state.entry_value) > real_balance:
+                    state = await stop_real_robot_for_insufficient_balance(
+                        user_id,
+                        balance=real_balance,
+                        entry_value=float(state.entry_value),
+                    )
+                    return 200, build_robot_payload(
+                        state,
+                        user_id=user_id,
+                        balance=real_balance,
+                        balance_real=real_balance,
+                        operation_message=ENTRY_VALUE_EXCEEDS_BALANCE_MESSAGE,
+                        status_message=ENTRY_VALUE_EXCEEDS_BALANCE_MESSAGE,
+                    )
                 logger.info(
                     "[REAL MODE DETECTED] user_id=%s active_mode=%s connected=%s confirm_real=%s",
                     user_id,
@@ -4625,6 +4745,26 @@ def ensure_robot_worker(user_id: str) -> None:
     if not state.enabled:
         logger.info("[SESSION_RESTORE_SKIPPED] user_id=%s reason=robot_disabled", user_id)
         return
+    account_snapshot = get_cached_account_snapshot(user_id)
+    if (
+        state.account_mode == "REAL"
+        and (state.active_mode or account_snapshot.get("mode")) == "REAL"
+        and account_snapshot.get("balance") is not None
+        and float(account_snapshot["balance"]) <= 0
+    ):
+        auto_trader.insufficient_balance(user_id)
+        persist_robot(user_id)
+        logger.warning(
+            "[INSUFFICIENT_BALANCE_REAL] user_id=%s balance=%s",
+            user_id,
+            account_snapshot.get("balance"),
+        )
+        logger.warning(
+            "[ROBOT_STOPPED_BALANCE_ZERO] user_id=%s balance=%s",
+            user_id,
+            account_snapshot.get("balance"),
+        )
+        return
     if robot_connection_unavailable(bool(state.connected), state.active_mode):
         logger.warning("[ROBOT_WORKER_BLOCKED_DISCONNECTED] user_id=%s", user_id)
         return
@@ -4824,6 +4964,9 @@ async def _robot_state_impl(auth: dict[str, str]) -> JSONResponse:
     # entry is represented by its in-memory default state.
     auto_trader.get(user_id)
     state = recover_sync_timeout_if_needed(user_id)
+    state.account_mode = "REAL"
+    state.allow_real = True
+    state.confirm_real = True
     account_snapshot = get_cached_account_snapshot(user_id)
     connected = bool(state.connected or account_snapshot.get("connected") is True)
     active_mode = state.active_mode or account_snapshot.get("mode")
@@ -4847,6 +4990,18 @@ async def _robot_state_impl(auth: dict[str, str]) -> JSONResponse:
         active_mode,
         snapshot=account_snapshot,
     )
+    if (
+        state.account_mode == "REAL"
+        and active_mode == "REAL"
+        and account_snapshot.get("balance") is not None
+        and float(account_snapshot["balance"]) <= 0
+    ):
+        state = await stop_real_robot_for_insufficient_balance(
+            user_id,
+            balance=float(account_snapshot["balance"]),
+        )
+        real_balance_warning = "BALANCE_ZERO"
+        block_reason = STATUS_INSUFFICIENT_BALANCE
     logger.info(
         "[ROBOT_STATE_FAST_RETURN] user_id=%s connected=%s source=%s",
         user_id,
@@ -5229,7 +5384,7 @@ async def _robot_start_impl(auth: dict[str, str]) -> JSONResponse:
         account_data["robot"] = build_robot_payload(state, user_id=user_id)["data"]
         return json_response(200, account_contract)
     real_balance = number_or_none(account_data.get("balance_real"))
-    if real_balance is None or float(real_balance) <= 0 or float(real_balance) < float(state.entry_value):
+    if real_balance is None or float(real_balance) <= 0:
         state = auto_trader.insufficient_balance(user_id)
         persist_robot(user_id)
         await stop_robot_worker(user_id)
@@ -5239,13 +5394,40 @@ async def _robot_start_impl(auth: dict[str, str]) -> JSONResponse:
             real_balance,
             state.entry_value,
         )
+        logger.warning(
+            "[INSUFFICIENT_BALANCE_REAL] user_id=%s balance=%s entry_value=%s",
+            user_id,
+            real_balance,
+            state.entry_value,
+        )
         return json_response(
             200,
-            build_robot_payload(
+            build_insufficient_balance_start_response(
                 state,
-                user_id=user_id,
-                balance=real_balance,
-                balance_real=real_balance,
+                message=INSUFFICIENT_BALANCE_START_MESSAGE,
+            ),
+        )
+    if float(real_balance) < float(state.entry_value):
+        state = auto_trader.insufficient_balance(user_id)
+        persist_robot(user_id)
+        await stop_robot_worker(user_id)
+        logger.warning(
+            "[ROBOT_START_BLOCKED_INSUFFICIENT_BALANCE] user_id=%s balance=%s entry_value=%s",
+            user_id,
+            real_balance,
+            state.entry_value,
+        )
+        logger.warning(
+            "[INSUFFICIENT_BALANCE_REAL] user_id=%s balance=%s entry_value=%s",
+            user_id,
+            real_balance,
+            state.entry_value,
+        )
+        return json_response(
+            200,
+            build_insufficient_balance_start_response(
+                state,
+                message=ENTRY_VALUE_EXCEEDS_BALANCE_MESSAGE,
             ),
         )
     if state.account_mode == "REAL":

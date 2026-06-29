@@ -89,6 +89,10 @@ def enforce_real_state(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def default_robot_settings() -> dict[str, Any]:
+    return enforce_real_state(dict(ROBOT_SETTING_DEFAULTS))
+
+
 def normalize_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -331,9 +335,57 @@ class SQLiteRobotPersistence(RobotPersistence):
                 """,
                 (user_id,),
             ).fetchone()
-        if row is None:
-            return None
-        settings = dict(row)
+            if row is None:
+                settings = default_robot_settings()
+                now = utc_iso()
+                connection.execute(
+                    """
+                    insert into robot_user_settings (
+                        user_id, entry_value, stop_win, stop_loss, cycle_minutes,
+                        min_confidence, min_payout, strategy_mode, account_mode,
+                        allow_real, confirm_real, max_entries_per_cycle,
+                        martingale_enabled, martingale_steps, martingale_multiplier,
+                        created_at, updated_at
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id,
+                        settings["entry_value"],
+                        settings["stop_win"],
+                        settings["stop_loss"],
+                        settings["cycle_minutes"],
+                        settings["min_confidence"],
+                        settings["min_payout"],
+                        settings["strategy_mode"],
+                        "REAL",
+                        1,
+                        1,
+                        settings["max_entries_per_cycle"],
+                        int(bool(settings["martingale_enabled"])),
+                        settings["martingale_steps"],
+                        settings["martingale_multiplier"],
+                        now,
+                        now,
+                    ),
+                )
+                return settings
+            settings = dict(row)
+            if (
+                str(settings.get("account_mode") or "").upper() != "REAL"
+                or not bool(settings.get("allow_real"))
+                or not bool(settings.get("confirm_real"))
+            ):
+                connection.execute(
+                    """
+                    update robot_user_settings
+                    set account_mode = 'REAL',
+                        allow_real = 1,
+                        confirm_real = 1,
+                        updated_at = ?
+                    where user_id = ?
+                    """,
+                    (utc_iso(), user_id),
+                )
         settings["account_mode"] = "REAL"
         settings["allow_real"] = True
         settings["confirm_real"] = True
@@ -714,13 +766,27 @@ class SupabaseRobotPersistence(RobotPersistence):
             f"&select={fields}&limit=1",
         )
         if not rows:
-            return None
-        return {
-            **rows[0],
+            settings = {
+                field: default_robot_settings()[field]
+                for field in SUPABASE_ROBOT_SETTING_FIELDS
+            }
+            self.save_settings(user_id, settings)
+            return settings
+        row = dict(rows[0])
+        needs_repair = (
+            str(row.get("account_mode") or "").upper() != "REAL"
+            or row.get("allow_real") is not True
+            or row.get("confirm_real") is not True
+        )
+        settings = {
+            **row,
             "account_mode": "REAL",
             "allow_real": True,
             "confirm_real": True,
         }
+        if needs_repair:
+            self.save_settings(user_id, settings)
+        return settings
 
     def save_trade(self, user_id: str, trade: dict[str, Any]) -> None:
         self._ensure_user(user_id)
