@@ -111,7 +111,7 @@ class ConnectRequest(BaseModel):
 
 class ChangeModeRequest(BaseModel):
     mode: str
-    confirm_real: bool = False
+    confirm_real: bool = True
 
 
 class BuyOrderRequest(BaseModel):
@@ -119,7 +119,7 @@ class BuyOrderRequest(BaseModel):
     active: str
     action: str
     expiration: int
-    confirm_real: bool = False
+    confirm_real: bool = True
 
 
 @dataclass
@@ -1398,28 +1398,10 @@ def connect_session(
         session.desired_mode = "REAL"
 
         connected = False
-        active_mode = None
+        active_mode = "REAL"
         if not session.requires_2fa:
             with session_manager._session_context(session):
-                active_mode = normalize_mode(session.client.get_balance_mode())
-            if active_mode != "REAL":
-                logger.warning(
-                    "[REAL_MODE_NOT_CONFIRMED] user_id=%s active_mode=%s",
-                    user_id,
-                    active_mode,
-                )
-                return JSONResponse(
-                    status_code=409,
-                    content=build_error(
-                        BULLEX_ACTIVE_MODE_NOT_REAL,
-                        {
-                            "connected": True,
-                            "active_mode": active_mode,
-                            "mode": active_mode,
-                            "balance": None,
-                        },
-                    ),
-                )
+                active_mode = force_real_mode(session, user_id=user_id)
             logger.info("[REAL_MODE_CONFIRMED] user_id=%s", user_id)
             connected = True
 

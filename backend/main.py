@@ -2532,6 +2532,8 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     data["account_mode"] = "REAL"
     data["allow_real"] = True
     data["confirm_real"] = True
+    if str(data.get("active_mode") or "").strip().upper() == "DEMO":
+        data["active_mode"] = "REAL"
     user_id = extra.pop("user_id", None)
     if user_id is not None:
         worker_task = robot_tasks.get(str(user_id))
@@ -2542,6 +2544,8 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     data["account_mode"] = "REAL"
     data["allow_real"] = True
     data["confirm_real"] = True
+    if str(data.get("active_mode") or "").strip().upper() == "DEMO":
+        data["active_mode"] = "REAL"
     if data.get("status") == STATUS_ACCOUNT_DISCONNECTED:
         data["connected"] = False
         data["enabled"] = False
@@ -2889,12 +2893,16 @@ def get_user_robot_state(user_id: str) -> Any:
         state.account_mode = "REAL"
         state.allow_real = True
         state.confirm_real = True
+        if state.active_mode is None or str(state.active_mode).strip().upper() == "DEMO":
+            state.active_mode = "REAL"
         return state
     if auto_trader.has_state(user_id) and user_id not in restorable_robot_states:
         state = auto_trader.get(user_id)
         state.account_mode = "REAL"
         state.allow_real = True
         state.confirm_real = True
+        if state.active_mode is None or str(state.active_mode).strip().upper() == "DEMO":
+            state.active_mode = "REAL"
         robot_state_hydrated_users.add(user_id)
         persist_robot(user_id)
         return state
@@ -2919,6 +2927,8 @@ def get_user_robot_state(user_id: str) -> Any:
             payload["account_mode"] = "REAL"
             payload["allow_real"] = True
             payload["confirm_real"] = True
+            if payload.get("active_mode") is None or str(payload.get("active_mode")).strip().upper() == "DEMO":
+                payload["active_mode"] = "REAL"
             trades = robot_persistence.load_trades(user_id)
             state = auto_trader.restore(
                 user_id,
@@ -2937,6 +2947,8 @@ def get_user_robot_state(user_id: str) -> Any:
             state.account_mode = "REAL"
             state.allow_real = True
             state.confirm_real = True
+            if state.active_mode is None or str(state.active_mode).strip().upper() == "DEMO":
+                state.active_mode = "REAL"
             state.enabled = False
             auto_trader.mark_source(user_id, robot_persistence_source())
             robot_state_hydrated_users.add(user_id)
@@ -2949,6 +2961,8 @@ def get_user_robot_state(user_id: str) -> Any:
     state.account_mode = "REAL"
     state.allow_real = True
     state.confirm_real = True
+    if state.active_mode is None or str(state.active_mode).strip().upper() == "DEMO":
+        state.active_mode = "REAL"
     return state
 
 
@@ -4596,18 +4610,11 @@ async def execute_robot_cycle(
                     entry_window["seconds_until_close"],
                     entry_window["expiration"],
                 )
-                if state.account_mode == "REAL":
-                    logger.info(
-                        "[REAL_TRADE_SENT] user_id=%s order_id=%s",
-                        user_id,
-                        trade.get("order_id"),
-                    )
-                else:
-                    logger.info(
-                        "[ROBOT DEMO ORDER SENT] user_id=%s order_id=%s",
-                        user_id,
-                        trade.get("order_id"),
-                    )
+                logger.info(
+                    "[REAL_TRADE_SENT] user_id=%s order_id=%s",
+                    user_id,
+                    trade.get("order_id"),
+                )
                 logger.info(
                     "[CYCLE_END] user_id=%s cycle_id=%s result=ORDER_SENT order_id=%s",
                     user_id,
@@ -4964,9 +4971,19 @@ async def _robot_state_impl(auth: dict[str, str]) -> JSONResponse:
     # entry is represented by its in-memory default state.
     auto_trader.get(user_id)
     state = recover_sync_timeout_if_needed(user_id)
+    repaired_legacy_real_flags = (
+        state.account_mode != "REAL"
+        or not bool(state.allow_real)
+        or not bool(state.confirm_real)
+        or str(state.active_mode or "").strip().upper() == "DEMO"
+    )
     state.account_mode = "REAL"
     state.allow_real = True
     state.confirm_real = True
+    if str(state.active_mode or "").strip().upper() == "DEMO":
+        state.active_mode = "REAL"
+    if repaired_legacy_real_flags:
+        persist_robot(user_id)
     account_snapshot = get_cached_account_snapshot(user_id)
     connected = bool(state.connected or account_snapshot.get("connected") is True)
     active_mode = state.active_mode or account_snapshot.get("mode")
@@ -5751,6 +5768,8 @@ async def _bullex_connect_impl(
         logger.info("[REAL_MODE_CONFIRMED] user_id=%s active_mode=%s", user_id, active_mode)
         state = auto_trader.get(user_id)
         state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = True
         state = auto_trader.sync_connection(
             user_id,
             connected=True,

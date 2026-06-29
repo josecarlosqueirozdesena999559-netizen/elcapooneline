@@ -81,12 +81,16 @@ def normalize_account_mode(value: Any) -> str:
 
 
 def enforce_real_state(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
+    normalized = {
         **payload,
         "account_mode": "REAL",
         "allow_real": True,
         "confirm_real": True,
     }
+    active_mode = str(normalized.get("active_mode") or "").strip().upper()
+    if active_mode == "DEMO" or "active_mode" not in normalized:
+        normalized["active_mode"] = "REAL"
+    return normalized
 
 
 def default_robot_settings() -> dict[str, Any]:
@@ -920,7 +924,7 @@ def build_trade_history_item(user_id: str, trade: dict[str, Any]) -> dict[str, A
     return {
         "user_id": user_id,
         "created_at": finished_at,
-        "account_mode": str(trade.get("mode") or trade.get("account_mode") or "REAL").upper(),
+        "account_mode": "REAL",
         "active": str(trade.get("active") or ""),
         "direction": str(trade.get("direction") or "").upper(),
         "amount": float(trade.get("amount") or 0),

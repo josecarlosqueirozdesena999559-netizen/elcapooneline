@@ -17,7 +17,7 @@ def final_trade(
     profit: float,
     *,
     finished_at: datetime,
-    mode: str = "DEMO",
+    mode: str = "REAL",
     **extra,
 ) -> dict:
     trade = {

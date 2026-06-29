@@ -16,7 +16,7 @@ def is_ai_field_key(key: Any) -> bool:
     return normalized.startswith(AI_FIELD_PREFIX) or text.startswith("ai")
 
 
-AccountMode = Literal["DEMO", "REAL"]
+AccountMode = Literal["REAL"]
 Timeframe = Literal["M1", "M5", "M15", "M30"]
 StrategyMode = Literal["aggressive", "balanced", "conservative"]
 StateSource = Literal["memory", "supabase", "default"]
@@ -194,7 +194,7 @@ class RobotState:
     server_time: str | None = None
     server_time_source: str = "vps_fallback"
     connected: bool = False
-    active_mode: str | None = None
+    active_mode: str | None = "REAL"
     connection_checked_at: datetime | None = None
     last_connected_at: datetime | None = None
     connection_grace_until: datetime | None = None
@@ -527,6 +527,11 @@ class AutoTrader:
             state = RobotState()
             self._states[user_id] = state
             self._sources[user_id] = "default"
+        state.account_mode = "REAL"
+        state.allow_real = True
+        state.confirm_real = True
+        if str(state.active_mode or "").strip().upper() == "DEMO":
+            state.active_mode = "REAL"
         return state
 
     def has_state(self, user_id: str) -> bool:
@@ -588,6 +593,8 @@ class AutoTrader:
         state.account_mode = "REAL"
         state.allow_real = True
         state.confirm_real = True
+        if str(state.active_mode or "").strip().upper() == "DEMO" or state.active_mode is None:
+            state.active_mode = "REAL"
         if state.status == "WAITING_ENTRY_WINDOW":
             state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
         if state.status == STATUS_PENDING_RESULT and state.gale_active:
@@ -690,12 +697,8 @@ class AutoTrader:
             state.next_cycle_at = None
 
         if "enabled" in changes:
-            if state.enabled and state.account_mode == "DEMO":
-                state.status = STATUS_WAITING_NEXT_CYCLE
-                state.next_cycle_at = utc_now()
-            else:
-                state.enabled = False
-                state.status = STATUS_STOPPED
+            state.enabled = False
+            state.status = STATUS_STOPPED
         if changes:
             self._sources[user_id] = "memory"
         return state
