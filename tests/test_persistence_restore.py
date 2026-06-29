@@ -58,13 +58,14 @@ class SessionPersistenceTests(unittest.TestCase):
         self.assertIn("[CHANGE_BALANCE_REAL_OK]", output)
         self.assertIn("[REAL_MODE_CONFIRMED]", output)
 
-    def test_ready_state_rejects_unconfirmed_real_mode(self) -> None:
+    def test_ready_state_marks_unconfirmed_real_mode_without_loading_practice_balance(self) -> None:
+        get_balance = Mock(return_value=10000)
         session = bullex_main.ManagedSession(
             user_id="still-practice",
             client=SimpleNamespace(
                 get_balance_mode=lambda: "PRACTICE",
                 change_balance=Mock(),
-                get_balance=lambda: 10000,
+                get_balance=get_balance,
                 get_currency=lambda: "USD",
             ),
             desired_mode="REAL",
@@ -72,11 +73,39 @@ class SessionPersistenceTests(unittest.TestCase):
         manager = bullex_main.SessionManager(None)
 
         with patch.object(bullex_main.time, "sleep", return_value=None):
-            with self.assertRaisesRegex(
-                bullex_main.ServiceError,
-                "BULLEX_ACTIVE_MODE_NOT_REAL",
-            ):
+            with self.assertLogs("bullex-service", level="WARNING") as logs:
                 manager._populate_ready_state(session, user_id=session.user_id, attempt=1)
+
+        self.assertEqual(session.active_mode, "PRACTICE")
+        self.assertFalse(session.real_mode_confirmed)
+        get_balance.assert_not_called()
+        self.assertIn("[REAL_MODE_FAILED]", "\n".join(logs.output))
+
+    def test_force_real_mode_retries_three_times_before_failing(self) -> None:
+        change_balance = Mock()
+        session = bullex_main.ManagedSession(
+            user_id="retry-still-practice",
+            client=SimpleNamespace(
+                get_balance_mode=Mock(return_value="PRACTICE"),
+                change_balance=change_balance,
+            ),
+            desired_mode="REAL",
+        )
+
+        with patch.object(bullex_main.time, "sleep", return_value=None):
+            with self.assertLogs("bullex-service", level="INFO") as logs:
+                with self.assertRaisesRegex(
+                    bullex_main.ServiceError,
+                    "BULLEX_ACTIVE_MODE_NOT_REAL",
+                ):
+                    bullex_main.force_real_mode(session, user_id=session.user_id)
+
+        self.assertEqual(change_balance.call_count, 3)
+        output = "\n".join(logs.output)
+        self.assertIn("[CHANGE_BALANCE_REAL_ATTEMPT]", output)
+        self.assertIn("[CHANGE_BALANCE_REAL_RESULT]", output)
+        self.assertIn("[ACTIVE_MODE_AFTER_CHANGE]", output)
+        self.assertIn("[REAL_MODE_FAILED]", output)
 
     def test_service_account_blocks_practice_balance(self) -> None:
         account = {
@@ -95,6 +124,68 @@ class SessionPersistenceTests(unittest.TestCase):
         self.assertEqual(payload["data"]["active_mode"], "PRACTICE")
         self.assertEqual(payload["data"]["mode"], "PRACTICE")
         self.assertIsNone(payload["data"]["balance"])
+
+    def test_connect_returns_controlled_error_when_bullex_stays_practice(self) -> None:
+        session = bullex_main.ManagedSession(
+            user_id="connect-still-practice",
+            client=SimpleNamespace(
+                get_balance_mode=Mock(return_value="PRACTICE"),
+                change_balance=Mock(),
+            ),
+            active_mode="PRACTICE",
+            real_mode_confirmed=False,
+        )
+        manager = bullex_main.SessionManager(None)
+        manager.get_probe_state(session.user_id).failure_count = 4
+        manager.last_account_cache[session.user_id] = {"stale": True}
+        manager.last_status_cache[session.user_id] = {"stale": True}
+
+        old_manager = bullex_main.session_manager
+        bullex_main.session_manager = manager
+        try:
+            with patch.object(manager, "connect", return_value=session):
+                with patch.object(bullex_main.time, "sleep", return_value=None):
+                    response = bullex_main.connect_session(
+                        bullex_main.ConnectRequest(
+                            email="real@example.com",
+                            password="secret",
+                            account_mode="PRACTICE",
+                        ),
+                        x_user_id=session.user_id,
+                    )
+        finally:
+            bullex_main.session_manager = old_manager
+
+        self.assertEqual(response.status_code, 409)
+        payload = json.loads(response.body)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "BULLEX_ACTIVE_MODE_NOT_REAL")
+        self.assertTrue(payload["data"]["connected"])
+        self.assertEqual(payload["data"]["active_mode"], "PRACTICE")
+        self.assertIsNone(payload["data"]["balance"])
+        self.assertEqual(session.client.change_balance.call_count, 3)
+        self.assertEqual(manager.get_probe_state(session.user_id).failure_count, 0)
+        self.assertNotIn(session.user_id, manager.last_account_cache)
+        self.assertNotIn(session.user_id, manager.last_status_cache)
+
+    def test_unconfirmed_real_mode_is_not_persisted_as_connected(self) -> None:
+        store = Mock()
+        manager = bullex_main.SessionManager(store)
+        session = bullex_main.ManagedSession(
+            user_id="practice-not-persisted",
+            client=SimpleNamespace(),
+            email="real@example.com",
+            desired_mode="REAL",
+            active_mode="PRACTICE",
+            real_mode_confirmed=False,
+            state=bullex_main.SessionState(SSID="ssid-practice"),
+        )
+
+        with self.assertLogs("bullex-service", level="WARNING") as logs:
+            manager._persist_connected(session)
+
+        store.save_connected.assert_not_called()
+        self.assertIn("reason=persist_blocked", "\n".join(logs.output))
 
     def test_account_payload_keeps_real_and_practice_balances_separate(self) -> None:
         session = bullex_main.ManagedSession(

@@ -142,6 +142,8 @@ class ManagedSession:
     sms_code: str | None = None
     desired_mode: str = "REAL"
     requires_2fa: bool = False
+    active_mode: str | None = None
+    real_mode_confirmed: bool = False
     state: SessionState = field(default_factory=SessionState)
 
 
@@ -222,6 +224,16 @@ class SessionManager:
         probe = self.get_probe_state(user_id)
         probe.responses.clear()
         probe.last_request_at.clear()
+
+    def clear_user_runtime_cache(self, user_id: str) -> None:
+        probe = self.get_probe_state(user_id)
+        probe.responses.clear()
+        probe.last_request_at.clear()
+        probe.failure_count = 0
+        probe.next_retry_at = 0.0
+        probe.offline_until = 0.0
+        self.last_account_cache.pop(user_id, None)
+        self.last_status_cache.pop(user_id, None)
 
     def login_progress_payload(self, user_id: str) -> dict[str, Any]:
         progress = self.get_login_progress(user_id)
@@ -497,8 +509,21 @@ class SessionManager:
                     current_mode,
                 )
                 raise real_mode_service_error(current_mode)
-            current_mode = force_real_mode(session, user_id=user_id)
-            logger.info("[REAL_MODE_CONFIRMED] user_id=%s active_mode=%s", user_id, current_mode)
+            try:
+                current_mode = force_real_mode(session, user_id=user_id)
+                session.active_mode = current_mode
+                session.real_mode_confirmed = current_mode == "REAL"
+                logger.info("[REAL_MODE_CONFIRMED] user_id=%s active_mode=%s", user_id, current_mode)
+            except ServiceError as exc:
+                current_mode = str((exc.data or {}).get("active_mode") or current_mode).strip().upper()
+                session.active_mode = current_mode
+                session.real_mode_confirmed = False
+                logger.warning(
+                    "[REAL_MODE_FAILED] user_id=%s active_mode=%s",
+                    user_id,
+                    current_mode,
+                )
+                return
             self._set_login_progress(user_id, "LOADING_BALANCE", attempt=attempt, active=True)
             session.client.get_balance()
             session.client.get_currency()
@@ -568,13 +593,10 @@ class SessionManager:
     def connect(self, user_id: str, payload: ConnectRequest) -> ManagedSession:
         with self.user_lock(user_id):
             payload.account_mode = "REAL"
+            logger.info("[REAL_MODE_FORCED] user_id=%s requested_mode=REAL", user_id)
             logger.info("[REAL_MODE_REQUESTED] user_id=%s", user_id)
             logger.info("[CONNECT_REQUEST] user_id=%s", user_id)
-            probe = self.get_probe_state(user_id)
-            probe.failure_count = 0
-            probe.next_retry_at = 0.0
-            probe.offline_until = 0.0
-            self.clear_probe_cache(user_id)
+            self.clear_user_runtime_cache(user_id)
             logger.info("[CONNECT_BACKOFF_CLEARED] user_id=%s", user_id)
 
             is_2fa_continuation = bool(
@@ -593,8 +615,7 @@ class SessionManager:
                 if existing is not None:
                     self._close_session(existing)
                 self.remove(user_id)
-                self.last_account_cache.pop(user_id, None)
-                self.last_status_cache.pop(user_id, None)
+                self.clear_user_runtime_cache(user_id)
                 if self.store is not None:
                     self.store.mark_disconnected(user_id, revoke_token=True)
                 logger.info(
@@ -606,6 +627,7 @@ class SessionManager:
             try:
                 logger.info("[CONNECT_ATTEMPT] user_id=%s", user_id)
                 session = self._connect_unlocked(user_id, payload)
+                connected = (not session.requires_2fa) and session.real_mode_confirmed
                 self._mark_probe_success(
                     user_id,
                     "/sessions/status",
@@ -613,10 +635,10 @@ class SessionManager:
                     build_success(
                         {
                             "user_id": user_id,
-                            "connected": not session.requires_2fa,
+                            "connected": connected,
                             "requires_2fa": session.requires_2fa,
                             "active_mode": (
-                                session.client.get_balance_mode()
+                                session.active_mode or session.client.get_balance_mode()
                                 if not session.requires_2fa
                                 else None
                             ),
@@ -922,6 +944,13 @@ class SessionManager:
     def _persist_connected(self, session: ManagedSession) -> None:
         if self.store is None or session.requires_2fa:
             return
+        if not session.real_mode_confirmed:
+            logger.warning(
+                "[REAL_MODE_FAILED] user_id=%s active_mode=%s reason=persist_blocked",
+                session.user_id,
+                session.active_mode or "UNKNOWN",
+            )
+            return
         token = session.state.SSID
         if not session.email or not token:
             return
@@ -1084,7 +1113,10 @@ def normalize_balance_value(balance: Any) -> float | None:
 
 
 def real_mode_service_error(active_mode: Any) -> ServiceError:
-    mode = normalize_mode(active_mode)
+    try:
+        mode = normalize_mode(active_mode)
+    except ServiceError:
+        mode = str(active_mode or "UNKNOWN").strip().upper() or "UNKNOWN"
     return ServiceError(
         BULLEX_ACTIVE_MODE_NOT_REAL,
         409,
@@ -1099,30 +1131,71 @@ def real_mode_service_error(active_mode: Any) -> ServiceError:
 
 def force_real_mode(session: ManagedSession, *, user_id: str) -> str:
     session.desired_mode = "REAL"
+    session.real_mode_confirmed = False
     logger.info("[REAL_MODE_FORCED] user_id=%s", user_id)
-    before_mode = normalize_mode(session.client.get_balance_mode())
-    logger.info("[CHANGE_BALANCE_REAL_CALL] user_id=%s active_mode=%s", user_id, before_mode)
-    try:
-        session.client.change_balance("REAL")
-    except Exception:
-        logger.warning(
-            "[CHANGE_BALANCE_REAL_FAILED] user_id=%s active_mode=%s reason=exception",
+    active_mode = "UNKNOWN"
+    for attempt in range(1, 4):
+        try:
+            before_mode = normalize_mode(session.client.get_balance_mode())
+        except ServiceError:
+            before_mode = "UNKNOWN"
+        logger.info(
+            "[CHANGE_BALANCE_REAL_ATTEMPT] user_id=%s attempt=%s active_mode_before=%s",
             user_id,
+            attempt,
             before_mode,
-            exc_info=True,
         )
-        raise real_mode_service_error(before_mode)
-    time.sleep(1)
-    active_mode = normalize_mode(session.client.get_balance_mode())
-    if active_mode != "REAL":
-        logger.warning(
-            "[CHANGE_BALANCE_REAL_FAILED] user_id=%s active_mode=%s",
+        logger.info("[CHANGE_BALANCE_REAL_CALL] user_id=%s active_mode=%s", user_id, before_mode)
+        try:
+            session.client.change_balance("REAL")
+            logger.info(
+                "[CHANGE_BALANCE_REAL_RESULT] user_id=%s attempt=%s result=called",
+                user_id,
+                attempt,
+            )
+        except Exception:
+            logger.warning(
+                "[CHANGE_BALANCE_REAL_RESULT] user_id=%s attempt=%s result=exception",
+                user_id,
+                attempt,
+                exc_info=True,
+            )
+            logger.warning(
+                "[CHANGE_BALANCE_REAL_FAILED] user_id=%s active_mode=%s reason=exception",
+                user_id,
+                before_mode,
+                exc_info=True,
+            )
+        time.sleep(1)
+        try:
+            active_mode = normalize_mode(session.client.get_balance_mode())
+        except ServiceError:
+            active_mode = "UNKNOWN"
+        session.active_mode = active_mode
+        logger.info(
+            "[ACTIVE_MODE_AFTER_CHANGE] user_id=%s attempt=%s active_mode=%s",
             user_id,
+            attempt,
             active_mode,
         )
-        raise real_mode_service_error(active_mode)
-    logger.info("[CHANGE_BALANCE_REAL_OK] user_id=%s active_mode=%s", user_id, active_mode)
-    return active_mode
+        if active_mode == "REAL":
+            session.real_mode_confirmed = True
+            logger.info("[CHANGE_BALANCE_REAL_RESULT] user_id=%s attempt=%s result=confirmed", user_id, attempt)
+            logger.info("[CHANGE_BALANCE_REAL_OK] user_id=%s active_mode=%s", user_id, active_mode)
+            logger.info("[REAL_MODE_CONFIRMED] user_id=%s active_mode=%s", user_id, active_mode)
+            return active_mode
+        if attempt < 3:
+            logger.warning(
+                "[CHANGE_BALANCE_REAL_RESULT] user_id=%s attempt=%s result=still_%s",
+                user_id,
+                attempt,
+                active_mode,
+            )
+
+    session.real_mode_confirmed = False
+    logger.warning("[REAL_MODE_FAILED] user_id=%s active_mode=%s", user_id, active_mode)
+    logger.warning("[CHANGE_BALANCE_REAL_FAILED] user_id=%s active_mode=%s", user_id, active_mode)
+    raise real_mode_service_error(active_mode)
 
 
 def discover_balance_ids(client: Bullex) -> tuple[Any, Any, bool]:
@@ -1234,7 +1307,7 @@ def build_account_payload(session: ManagedSession) -> dict[str, Any]:
             elif mode == "PRACTICE":
                 balance_practice = current_balance
         balance = balance_real if mode == "REAL" else None
-        currency = session.client.get_currency() or ("BRL" if mode == "REAL" else None)
+        currency = (session.client.get_currency() or "BRL") if mode == "REAL" else None
         account["balance"] = balance
         account["currency"] = currency
         account["mode"] = mode
@@ -1365,7 +1438,7 @@ def ensure_session_alive(user_id: str) -> ManagedSession:
 
 @app.exception_handler(ServiceError)
 def service_error_handler(_: Request, exc: ServiceError) -> JSONResponse:
-    return JSONResponse(status_code=exc.status_code, content=build_error(exc.message))
+    return JSONResponse(status_code=exc.status_code, content=build_error(exc.message, exc.data))
 
 
 @app.exception_handler(RequestValidationError)
@@ -1398,12 +1471,37 @@ def connect_session(
         session.desired_mode = "REAL"
 
         connected = False
-        active_mode = "REAL"
+        active_mode = session.active_mode or "REAL"
         if not session.requires_2fa:
-            with session_manager._session_context(session):
-                active_mode = force_real_mode(session, user_id=user_id)
+            if not session.real_mode_confirmed:
+                with session_manager._session_context(session):
+                    try:
+                        active_mode = force_real_mode(session, user_id=user_id)
+                    except ServiceError as exc:
+                        active_mode = str((exc.data or {}).get("active_mode") or "UNKNOWN").strip().upper()
+                        session.active_mode = active_mode
+                        session.real_mode_confirmed = False
+                        session_manager.clear_user_runtime_cache(user_id)
+                        return JSONResponse(
+                            status_code=exc.status_code,
+                            content=build_error(exc.message, exc.data),
+                        )
+            connected = active_mode == "REAL"
+            if not connected:
+                logger.warning("[REAL_MODE_FAILED] user_id=%s active_mode=%s", user_id, active_mode)
+                return JSONResponse(
+                    status_code=409,
+                    content=build_error(
+                        BULLEX_ACTIVE_MODE_NOT_REAL,
+                        {
+                            "connected": True,
+                            "active_mode": active_mode,
+                            "mode": active_mode,
+                            "balance": None,
+                        },
+                    ),
+                )
             logger.info("[REAL_MODE_CONFIRMED] user_id=%s", user_id)
-            connected = True
 
         return with_login_progress(build_success(
             {
