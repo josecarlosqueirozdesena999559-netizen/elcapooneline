@@ -496,6 +496,14 @@ def temporary_upstream_response(
     reason: str,
     allow_failure_backoff: bool = True,
 ) -> tuple[int, dict[str, Any]]:
+    recent_account_payload = recent_real_account_connection_payload(user_id) if path == "/sessions/status" else None
+    if recent_account_payload is not None:
+        logger.warning(
+            "[SESSION_STATUS_GRACE_FROM_ACCOUNT] user_id=%s reason=%s",
+            user_id,
+            reason,
+        )
+        return 200, recent_account_payload
     if not allow_failure_backoff:
         logger.info(
             "[BACKOFF_SKIPPED_RESTORE] user_id=%s path=%s",
@@ -2505,6 +2513,40 @@ def robot_has_recent_real_cache(user_id: str, state: Any, *, max_age_seconds: in
     return balance > 0
 
 
+def recent_real_account_connection_payload(user_id: str) -> dict[str, Any] | None:
+    cached = get_session_cache(user_id).responses.get("/account")
+    if cached is None or utc_now() >= cached.expires_at:
+        return None
+    data = cached.payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    active_mode = str(
+        data.get("active_mode_from_bullex")
+        or data.get("active_mode")
+        or data.get("mode")
+        or ""
+    ).strip().upper()
+    if data.get("connected") is not True or active_mode != "REAL" or data.get("balance") is None:
+        return None
+    clear_session_backoff(user_id)
+    state = auto_trader.sync_connection(
+        user_id,
+        connected=True,
+        active_mode="REAL",
+        source="account_cache_grace",
+        align_status=True,
+    )
+    return build_success(
+        {
+            "connected": True,
+            "active_mode": "REAL",
+            "server_time": None,
+            "connection_status_source": state.connection_status_source,
+            "from_cache": True,
+        }
+    )
+
+
 def memory_account_fallback(user_id: str) -> dict[str, Any] | None:
     state = auto_trader.get(user_id)
     snapshot = get_cached_account_snapshot(user_id)
@@ -2571,10 +2613,29 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     data["confirm_real"] = True
     if str(data.get("active_mode") or "").strip().upper() == "DEMO":
         data["active_mode"] = "REAL"
+    connected = bool(data.get("connected"))
+    active_mode = str(data.get("active_mode") or "").strip().upper() or None
+    if connected and active_mode == "REAL":
+        data["connected"] = True
+        data["active_mode"] = "REAL"
+        data["session_status"] = "connected"
+        data["session"] = "connected"
+        if data.get("status") == STATUS_ACCOUNT_DISCONNECTED:
+            data["status"] = STATUS_WAITING_NEXT_CYCLE if data.get("enabled") else STATUS_STOPPED
+            data["rejection_reason"] = None
+            data["last_rejection_reason"] = None
+            data["operation_message"] = None
+    else:
+        data["session_status"] = "disconnected"
+        data["session"] = "disconnected"
+    if data.get("worker_running") and data.get("status") == STATUS_STOPPED:
+        data["status"] = "RUNNING"
     if data.get("status") == STATUS_ACCOUNT_DISCONNECTED:
         data["connected"] = False
         data["enabled"] = False
         data["active_mode"] = None
+        data["session_status"] = "disconnected"
+        data["session"] = "disconnected"
         data["worker_running"] = False
         data["operation_in_progress"] = False
         data["result_waiting"] = False
@@ -2595,6 +2656,7 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         data["pending_signal"] = None
         data["operation_message"] = INSUFFICIENT_BALANCE_START_MESSAGE
         data["status_message"] = INSUFFICIENT_BALANCE_START_MESSAGE
+        data["real_ready"] = False
     if data.get("status") == STATUS_BULLEX_ACTIVE_MODE_NOT_REAL:
         data["enabled"] = False
         data["worker_running"] = False
@@ -2604,6 +2666,8 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         data["pending_signal"] = None
         data["operation_message"] = "Entre na conta REAL da BullEx para iniciar o robô."
         data["status_message"] = "Entre na conta REAL da BullEx para iniciar o robô."
+    if data.get("status") == STATUS_BULLEX_ACTIVE_MODE_NOT_REAL:
+        data["real_ready"] = False
     if is_stop_status(data.get("status")):
         data["enabled"] = False
         data["worker_running"] = False
@@ -3114,12 +3178,14 @@ async def scan_local_signals(
 
             signal = payload["data"]
             logger.info(
-                "[ASSET_SCORE] user_id=%s asset=%s score=%s payout=%s confidence=%s",
+                "[ASSET_SCORE] user_id=%s symbol=%s signal=%s confidence=%s score=%s payout=%s allowed=%s",
                 user_id,
                 symbol,
+                signal.get("signal"),
+                signal.get("confidence"),
                 signal.get("strategy_score") or signal.get("score") or 0,
                 signal.get("payout"),
-                signal.get("confidence"),
+                signal.get("trade_allowed"),
             )
             if signal["confidence"] < 70 and not include_wait:
                 continue
@@ -3977,6 +4043,11 @@ async def execute_robot_cycle(
                     user_id,
                     state.cycle_id,
                 )
+                logger.info(
+                    "[WORKER_ANALYSIS_STARTED] user_id=%s cycle_id=%s",
+                    user_id,
+                    state.cycle_id,
+                )
                 scan_status, scan_payload = await scan_local_signals(
                     user_id,
                     limit=len(ANALYSIS_ASSETS),
@@ -4025,6 +4096,12 @@ async def execute_robot_cycle(
                         logger.info(
                             "[NO_CANDIDATE_THIS_CANDLE] user_id=%s reason=%s",
                             user_id,
+                            state.last_rejection_reason,
+                        )
+                        logger.info(
+                            "[NO_SIGNAL_FOUND] user_id=%s cycle_id=%s reason=%s",
+                            user_id,
+                            state.cycle_id,
                             state.last_rejection_reason,
                         )
                         return 200, build_robot_payload(state)
@@ -4215,8 +4292,25 @@ async def execute_robot_cycle(
                         last_rejection_reason,
                         len(candidates),
                     )
+                    logger.info(
+                        "[NO_SIGNAL_FOUND] user_id=%s cycle_id=%s reason=%s candidates=%s",
+                        user_id,
+                        state.cycle_id,
+                        last_rejection_reason,
+                        len(candidates),
+                    )
                     return 200, build_robot_payload(state)
 
+                logger.info(
+                    "[BEST_CANDIDATE] user_id=%s cycle_id=%s symbol=%s direction=%s confidence=%s payout=%s score=%s",
+                    user_id,
+                    state.cycle_id,
+                    selected["symbol"],
+                    selected["direction"],
+                    selected["confidence"],
+                    selected["payout"],
+                    selected["strategy_score"],
+                )
                 logger.info(
                     "[BEST_CANDIDATE_SELECTED] user_id=%s symbol=%s direction=%s strategy_score=%s confidence=%s payout=%s strategy_name=%s strategy_reason=%s used_strategies=%s",
                     user_id,
@@ -4401,6 +4495,15 @@ async def execute_robot_cycle(
                 direction = str(selected.get("signal") or selected.get("direction"))
                 payout = selected.get("payout")
                 order_amount = state.gale_amount if is_gale_order else state.entry_value
+                logger.info(
+                    "[ENTRY_ALLOWED] user_id=%s cycle_id=%s symbol=%s direction=%s amount=%s payout=%s",
+                    user_id,
+                    state.cycle_id,
+                    symbol,
+                    direction,
+                    order_amount,
+                    payout,
+                )
                 order_body = {
                     "active": symbol,
                     "action": direction.lower(),
@@ -4581,8 +4684,9 @@ async def execute_robot_cycle(
                 if state.account_mode == "REAL":
                     logger.info("[REAL BUY SUCCESS order_id=%s] user_id=%s", order_id, user_id)
                 logger.info(
-                    "[ORDER_ACCEPTED] user_id=%s order_id=%s asset=%s direction=%s",
+                    "[ORDER_ACCEPTED] user_id=%s cycle_id=%s order_id=%s symbol=%s direction=%s",
                     user_id,
+                    state.cycle_id,
                     order_id,
                     symbol,
                     direction,
@@ -4772,6 +4876,7 @@ async def run_analysis_now(user_id: str) -> tuple[int, dict[str, Any]]:
 
 async def robot_worker(user_id: str) -> None:
     try:
+        logger.info("[WORKER_RUNNING_TRUE] user_id=%s", user_id)
         while auto_trader.get(user_id).enabled:
             recover_sync_timeout_if_needed(user_id)
             robot_worker_last_tick_at[user_id] = utc_now()
@@ -4895,6 +5000,7 @@ def ensure_robot_worker(user_id: str) -> None:
     if task is None or task.done():
         robot_tasks[user_id] = asyncio.create_task(robot_worker(user_id))
         logger.info("[WORKER_CREATED] user_id=%s", user_id)
+        logger.info("[WORKER_RUNNING_TRUE] user_id=%s", user_id)
         logger.info("[ROBOT_WORKER_STARTED] user_id=%s", user_id)
     else:
         logger.info("[WORKER_ALREADY_RUNNING] user_id=%s", user_id)
@@ -5099,9 +5205,21 @@ async def _robot_state_impl(auth: dict[str, str]) -> JSONResponse:
     account_snapshot = get_cached_account_snapshot(user_id)
     connected = bool(state.connected or account_snapshot.get("connected") is True)
     active_mode = state.active_mode or account_snapshot.get("mode")
+    active_mode = str(active_mode).strip().upper() if active_mode else None
     source = state.connection_status_source or (
         "cached" if account_snapshot.get("connected") is not None else "memory"
     )
+    if connected and active_mode == "REAL":
+        if source in {"disconnected", "offline_cache", "backoff_active"}:
+            source = "cached"
+        clear_session_backoff(user_id)
+        state = auto_trader.sync_connection(
+            user_id,
+            connected=True,
+            active_mode="REAL",
+            source=source,
+            align_status=True,
+        )
     window = get_entry_window(
         state.timeframe,
         utc_now().timestamp(),
@@ -5147,6 +5265,13 @@ async def _robot_state_impl(auth: dict[str, str]) -> JSONResponse:
     if state.enabled and worker_running and state.status == STATUS_STOPPED:
         state.status = STATUS_ANALYZING
         persist_robot(user_id)
+    balance_value = number_or_none(account_snapshot.get("balance"))
+    real_ready = bool(
+        connected
+        and active_mode == "REAL"
+        and block_reason is None
+        and (balance_value is None or float(balance_value) > 0)
+    )
     logger.info(
         "[ROBOT_STATE_FAST_RETURN] user_id=%s connected=%s source=%s",
         user_id,
@@ -5167,7 +5292,7 @@ async def _robot_state_impl(auth: dict[str, str]) -> JSONResponse:
             if state.connection_checked_at is not None
             else None,
             connection_status_source=source,
-            real_ready=block_reason is None,
+            real_ready=real_ready,
             real_block_reason=block_reason,
             real_balance_warning=real_balance_warning,
         ),
@@ -5576,6 +5701,14 @@ async def _robot_start_impl(auth: dict[str, str]) -> JSONResponse:
                 message=ENTRY_VALUE_EXCEEDS_BALANCE_MESSAGE,
             ),
         )
+    clear_session_backoff(user_id)
+    state = auto_trader.sync_connection(
+        user_id,
+        connected=True,
+        active_mode="REAL",
+        source=connection_source_from_payload(account_payload),
+        align_status=True,
+    )
     if state.account_mode == "REAL":
         logger.info(
             "[REAL MODE DETECTED] user_id=%s active_mode=%s confirm_real=%s",
@@ -5595,11 +5728,12 @@ async def _robot_start_impl(auth: dict[str, str]) -> JSONResponse:
             return json_response(403, build_error(block_reason))
 
     logger.info(
-        "[ROBOT_START_VALIDATED] user_id=%s connected=%s active_mode=%s balance=%s",
+        "[ROBOT_START_VALIDATED] user_id=%s connected=%s active_mode=%s balance=%s entry_value=%s",
         user_id,
         connected,
         active_mode,
         real_balance,
+        state.entry_value,
     )
     state = auto_trader.start(user_id)
     state.next_cycle_at = utc_now()
