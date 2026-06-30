@@ -1096,7 +1096,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["analysis_result"], "NO_CANDIDATE_THIS_CANDLE")
         self.assertIsNotNone(data["last_analysis_at"])
         self.assertIsNone(data["pending_signal"])
-        self.assertGreaterEqual(data["seconds_until_analysis_window"], 44)
+        self.assertGreaterEqual(data["seconds_until_next_cycle"], 44)
         self.assertIn("[CYCLE_DUE]", output)
         self.assertIn("[ANALYSIS_STARTED]", output)
         self.assertIn("[ANALYSIS_FINISHED]", output)
@@ -1402,7 +1402,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
             if path == "/sessions/status":
                 return 200, main.build_success(
-                    {"connected": True, "active_mode": "PRACTICE", "server_time": 20.0}
+                    {"connected": True, "active_mode": "REAL", "server_time": 20.0}
                 )
             raise AssertionError(f"unexpected path: {path}")
 
@@ -1418,14 +1418,14 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
 
         data = payload["data"]
         output = "\n".join(logs.output)
-        self.assertEqual(status_code, 500)
-        self.assertEqual(data["status"], "WAITING_ANALYSIS_WINDOW")
-        self.assertEqual(data["rejection_reason"], "ANALYSIS_ERROR")
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], "WAITING_NEXT_CYCLE")
         self.assertEqual(data["analysis_result"], "ANALYSIS_ERROR")
         self.assertEqual(data["last_order_error"], "scan exploded")
-        self.assertGreaterEqual(data["seconds_until_analysis_window"], 44)
-        self.assertIn("[ANALYSIS_ERROR]", output)
-        self.assertIn("[ANALYSIS_ERROR_RECOVERED]", output)
+        self.assertGreaterEqual(data["seconds_until_next_cycle"], 44)
+        self.assertIn("[ANALYSIS_RECOVERED]", output)
+        self.assertNotIn("[ANALYSIS_ERROR]", output)
+        self.assertNotIn("[ROBOT ERROR]", output)
 
     async def test_waiting_next_cycle_running_result_never_returns_invalid_zero_state(self) -> None:
         user_id = "user-invalid-running-state"

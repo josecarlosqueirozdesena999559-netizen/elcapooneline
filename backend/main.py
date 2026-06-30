@@ -19,30 +19,34 @@ from pydantic import BaseModel, ConfigDict
 from backend.auto_trader import (
     AutoTrader,
     RobotConfigUpdate,
-    STATUS_ACTIVE_COOLDOWN,
-    STATUS_ACCOUNT_DISCONNECTED,
-    STATUS_ANALYZING,
-    STATUS_CONNECTION_BACKOFF,
-    STATUS_BULLEX_ACTIVE_MODE_NOT_REAL,
-    STATUS_INSUFFICIENT_BALANCE,
-    STATUS_ORDER_REJECTED,
-    STATUS_PENDING_GALE_RESULT,
-    STATUS_PENDING_RESULT,
-    STATUS_SIGNAL_EXPIRED,
-    STATUS_SENDING_GALE_ORDER,
-    STATUS_PAYOUT_COOLDOWN,
-    STATUS_SENDING_ORDER,
-    STATUS_STOP_LOSS_HIT,
-    STATUS_STOP_WIN_HIT,
-    STATUS_WAITING_GALE_ENTRY,
-    STATUS_WAITING_RECOVERY,
-    STATUS_WAITING_ANALYSIS_WINDOW,
-    STATUS_WAITING_ENTRY_WINDOW,
-    STATUS_WAITING_NEXT_CYCLE,
-    TEMPORARY_WAIT_STATUSES,
     parse_datetime,
     strip_ai_fields,
     utc_now,
+)
+from backend.status import (
+    STATUS_ACCOUNT_DISCONNECTED,
+    STATUS_ACTIVE_COOLDOWN,
+    STATUS_ANALYZING,
+    STATUS_BULLEX_ACTIVE_MODE_NOT_REAL,
+    STATUS_CONNECTION_BACKOFF,
+    STATUS_INSUFFICIENT_BALANCE,
+    STATUS_ORDER_REJECTED,
+    STATUS_PAYOUT_COOLDOWN,
+    STATUS_PENDING_GALE_RESULT,
+    STATUS_PENDING_RESULT,
+    STATUS_SENDING_GALE_ORDER,
+    STATUS_SENDING_ORDER,
+    STATUS_SIGNAL_EXPIRED,
+    STATUS_STOP_LOSS_HIT,
+    STATUS_STOP_WIN_HIT,
+    STATUS_STOPPED,
+    STATUS_WAITING_ANALYSIS_WINDOW,
+    STATUS_WAITING_ENTRY_WINDOW,
+    STATUS_WAITING_GALE_ENTRY,
+    STATUS_WAITING_NEXT_CYCLE,
+    STATUS_WAITING_RECOVERY,
+    TEMPORARY_WAIT_STATUSES,
+    normalize_robot_status,
 )
 from backend.robot_persistence import (
     RobotPersistence,
@@ -850,11 +854,6 @@ async def log_cors_allowed_origin(request: Request, call_next):
             exc.__class__.__name__,
             exc_info=True,
         )
-        logger.warning(
-            "[BAD_GATEWAY_PREVENTED] path=%s reason=%s",
-            request.url.path,
-            exc.__class__.__name__,
-        )
         response = JSONResponse(
             status_code=200,
             content=build_controlled_upstream_error(exc),
@@ -1213,11 +1212,6 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
             exc.__class__.__name__,
             exc_info=True,
         )
-        logger.warning(
-            "[BAD_GATEWAY_PREVENTED] path=%s reason=%s",
-            request.url.path,
-            exc.__class__.__name__,
-        )
         return JSONResponse(
             status_code=200,
             content=build_controlled_upstream_error(exc),
@@ -1345,11 +1339,6 @@ async def call_bullex_service(
                 user_id,
                 timeout_seconds,
             )
-            logger.warning(
-                "[BAD_GATEWAY_PREVENTED] user_id=%s path=%s reason=timeout",
-                user_id,
-                path,
-            )
             return 504, build_error("LOGIN_TIMEOUT")
         if method == "GET" and path in SESSION_CACHEABLE_PATHS:
             return temporary_upstream_response(
@@ -1442,12 +1431,6 @@ async def call_bullex_service(
         error = str(payload.get("error") or "").strip().upper()
         logger.warning(
             "[UPSTREAM_ERROR_HANDLED] user_id=%s path=%s reason=status_%s",
-            user_id,
-            path,
-            response.status_code,
-        )
-        logger.warning(
-            "[BAD_GATEWAY_PREVENTED] user_id=%s path=%s upstream_status=%s",
             user_id,
             path,
             response.status_code,
@@ -2591,6 +2574,7 @@ def memory_status_fallback(user_id: str) -> dict[str, Any] | None:
 
 def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     data = strip_ai_fields(state.to_dict())
+    data["status"] = normalize_robot_status(data.get("status"))
     data["account_mode"] = "REAL"
     data["allow_real"] = True
     data["confirm_real"] = True
@@ -2608,6 +2592,7 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         }:
             data["status"] = STATUS_ANALYZING
     data.update(strip_ai_fields(extra))
+    data["status"] = normalize_robot_status(data.get("status"))
     data["account_mode"] = "REAL"
     data["allow_real"] = True
     data["confirm_real"] = True
@@ -2687,6 +2672,41 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
                 (data.get("last_trade") or {}).get("order_id"),
             )
     return build_success(data)
+
+
+def build_robot_state_fallback_payload(user_id: str | None, exc: Exception) -> dict[str, Any]:
+    state = auto_trader.get(str(user_id)) if user_id else None
+    if state is not None:
+        try:
+            state.status = normalize_robot_status(getattr(state, "status", None))
+            return build_robot_payload(
+                state,
+                user_id=user_id,
+                real_ready=False,
+                real_block_reason=exc.__class__.__name__,
+            )
+        except Exception:
+            logger.info(
+                "[ROBOT_STATE_FALLBACK_PAYLOAD] user_id=%s reason=minimal_payload",
+                user_id,
+                exc_info=True,
+            )
+    return build_success(
+        {
+            "status": STATUS_STOPPED,
+            "enabled": False,
+            "connected": False,
+            "active_mode": None,
+            "worker_running": False,
+            "operation_in_progress": False,
+            "result_waiting": False,
+            "account_mode": "REAL",
+            "allow_real": True,
+            "confirm_real": True,
+            "real_ready": False,
+            "real_block_reason": exc.__class__.__name__,
+        }
+    )
 
 
 def robot_config_locked(user_id: str, state: Any) -> bool:
@@ -2804,19 +2824,27 @@ def recover_analysis_error_to_window(
             server_time_source="vps_fallback",
         )
         logger.warning(
-            "[SERVER_TIME_FALLBACK] user_id=%s reason=ANALYSIS_ERROR current_candle_seconds=%s",
+            "[SERVER_TIME_FALLBACK] user_id=%s reason=analysis_recovery current_candle_seconds=%s",
             user_id,
             window["current_candle_seconds"],
         )
     friendly_error = readable_order_error(error)
-    state = auto_trader.reject_order(
+    state = auto_trader.wait_analysis_window(
         user_id,
-        "ANALYSIS_ERROR",
-        last_order_error=friendly_error,
+        window,
+        clear_pending=True,
+        analysis_result="ANALYSIS_ERROR",
+        rejection_reason="ANALYSIS_ERROR",
+        last_rejection_reason=friendly_error,
+        force_next=True,
     )
     state.last_order_error = friendly_error
-    logger.error("[ANALYSIS_ERROR] user_id=%s error=%s", user_id, friendly_error)
-    logger.info("[ANALYSIS_ERROR_RECOVERED] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
+    logger.info(
+        "[ANALYSIS_RECOVERED] user_id=%s error=%s next_cycle_at=%s",
+        user_id,
+        friendly_error,
+        state.next_cycle_at,
+    )
     return state
 
 
@@ -3411,7 +3439,7 @@ async def update_cycle_analysis(
         signals = [item for item in scan_payload.get("data", []) if isinstance(item, dict)]
     else:
         logger.warning(
-            "[ANALYSIS_ERROR_RECOVERED] user_id=%s error=%s action=FALLBACK_CANDIDATE",
+            "[ANALYSIS_RECOVERED] user_id=%s error=%s action=FALLBACK_CANDIDATE",
             user_id,
             scan_payload.get("error") or "SIGNAL_SCAN_FAILED",
         )
@@ -4060,7 +4088,7 @@ async def execute_robot_cycle(
                 if not scan_payload.get("ok"):
                     scan_error = str(scan_payload.get("error") or "SIGNAL_SCAN_FAILED")
                     logger.warning(
-                        "[ANALYSIS_ERROR_RECOVERED] user_id=%s error=%s action=FALLBACK_CANDIDATE",
+                        "[ANALYSIS_RECOVERED] user_id=%s error=%s action=FALLBACK_CANDIDATE",
                         user_id,
                         scan_error,
                     )
@@ -4844,13 +4872,13 @@ async def execute_robot_cycle(
             return last_order_status, build_robot_payload(state)
         except Exception as exc:
             error = str(exc).strip() or type(exc).__name__
-            logger.exception("[ROBOT ERROR] user_id=%s error=%s", user_id, exc)
+            logger.exception("[ROBOT_CYCLE_RECOVERED] user_id=%s error=%s", user_id, exc)
             state = recover_analysis_error_to_window(
                 user_id,
                 error,
                 locals().get("entry_window") if isinstance(locals().get("entry_window"), dict) else None,
             )
-            return 500, build_robot_payload(state)
+            return 200, build_robot_payload(state)
         finally:
             persist_robot(user_id)
 
@@ -5015,7 +5043,7 @@ def schedule_robot_tick(user_id: str) -> None:
         try:
             await execute_robot_cycle(user_id)
         except Exception:
-            logger.exception("[ROBOT ERROR] user_id=%s error=INITIAL_TICK_FAILED", user_id)
+            logger.exception("[ROBOT_INITIAL_TICK_RECOVERED] user_id=%s", user_id)
 
     asyncio.create_task(run_tick())
 
@@ -5304,13 +5332,13 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
     try:
         return await _robot_state_impl(auth)
     except Exception as exc:
-        logger.warning(
-            "[BAD_GATEWAY_PREVENTED] user_id=%s path=/robot/state reason=%s",
+        logger.info(
+            "[ROBOT_STATE_RECOVERED] user_id=%s reason=%s",
             auth.get("user_id"),
             exc.__class__.__name__,
             exc_info=True,
         )
-        return json_response(200, build_controlled_upstream_error(exc))
+        return json_response(200, build_robot_state_fallback_payload(auth.get("user_id"), exc))
 
 
 def build_robot_stats(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -5776,7 +5804,7 @@ async def robot_start(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
         return await _robot_start_impl(auth)
     except Exception as exc:
         logger.warning(
-            "[BAD_GATEWAY_PREVENTED] user_id=%s path=/robot/start reason=%s",
+            "[ROBOT_START_RECOVERED] user_id=%s reason=%s",
             auth.get("user_id"),
             exc.__class__.__name__,
             exc_info=True,
@@ -5801,7 +5829,7 @@ async def robot_stop(auth: dict[str, str] = Depends(require_headers)) -> JSONRes
         return await _robot_stop_impl(auth)
     except Exception as exc:
         logger.warning(
-            "[BAD_GATEWAY_PREVENTED] user_id=%s path=/robot/stop reason=%s",
+            "[ROBOT_STOP_RECOVERED] user_id=%s reason=%s",
             auth.get("user_id"),
             exc.__class__.__name__,
             exc_info=True,
@@ -5972,7 +6000,7 @@ async def _bullex_connect_impl(
     if status_code >= 500:
         error = str(payload.get("error") or "").strip().upper()
         logger.warning(
-            "[BAD_GATEWAY_PREVENTED] user_id=%s path=/bullex/connect upstream_status=%s",
+            "[CONNECT_UPSTREAM_HANDLED] user_id=%s upstream_status=%s",
             user_id,
             status_code,
         )
@@ -6093,7 +6121,7 @@ async def bullex_connect(
             exc.__class__.__name__,
         )
         logger.warning(
-            "[BAD_GATEWAY_PREVENTED] user_id=%s path=/bullex/connect reason=%s",
+            "[CONNECT_RECOVERED] user_id=%s reason=%s",
             auth.get("user_id"),
             exc.__class__.__name__,
             exc_info=True,
@@ -6176,7 +6204,7 @@ async def bullex_status(auth: dict[str, str] = Depends(require_headers)) -> JSON
         return await _bullex_status_impl(auth)
     except Exception as exc:
         logger.warning(
-            "[BAD_GATEWAY_PREVENTED] user_id=%s path=/bullex/status reason=%s",
+            "[STATUS_RECOVERED] user_id=%s reason=%s",
             auth.get("user_id"),
             exc.__class__.__name__,
             exc_info=True,
@@ -6642,7 +6670,7 @@ async def bullex_account(auth: dict[str, str] = Depends(require_headers)) -> JSO
         return await _bullex_account_impl(auth)
     except Exception as exc:
         logger.warning(
-            "[BAD_GATEWAY_PREVENTED] user_id=%s path=/bullex/account reason=%s",
+            "[ACCOUNT_RECOVERED] user_id=%s reason=%s",
             auth.get("user_id"),
             exc.__class__.__name__,
             exc_info=True,

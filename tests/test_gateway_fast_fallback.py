@@ -539,7 +539,7 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"], "LOGIN_TIMEOUT")
         output = "\n".join(logs.output)
         self.assertIn("[CONNECT_TIMEOUT_HANDLED]", output)
-        self.assertIn("[BAD_GATEWAY_PREVENTED]", output)
+        self.assertNotIn("[BAD_GATEWAY_PREVENTED]", output)
 
 
 class GatewayControlledErrorCorsTests(unittest.TestCase):
@@ -629,10 +629,9 @@ class GatewayControlledErrorCorsTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json()["error"],
-            main.BULLEX_TEMPORARY_UNAVAILABLE,
-        )
+        self.assertTrue(response.json()["ok"])
+        self.assertEqual(response.json()["data"]["status"], "STOPPED")
+        self.assertFalse(response.json()["data"]["real_ready"])
         self.assertEqual(
             response.headers.get("access-control-allow-origin"),
             "https://elcapobot.online",
