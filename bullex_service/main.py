@@ -69,10 +69,12 @@ BINARY_ALLOWED_ASSETS = [
 BINARY_ALLOWED_ASSET_SET = set(BINARY_ALLOWED_ASSETS)
 SESSION_EXCEPTION_TYPES = (WebSocketConnectionClosedException, ConnectionError, TimeoutError)
 SESSION_STATUS_TTL_SECONDS = 10
-ACCOUNT_TTL_SECONDS = 10
+ACCOUNT_TTL_SECONDS = 30
 ASSETS_TTL_SECONDS = 300
 PAYOUT_TTL_SECONDS = 60
-CANDLES_TTL_SECONDS = 2
+CANDLES_TTL_SECONDS = 60
+STALE_MARKET_DATA_SECONDS = 120
+MIN_API_CALL_SPACING_SECONDS = 0.05
 SESSION_STATUS_THROTTLE_SECONDS = 10
 SESSION_OFFLINE_TTL_SECONDS = 60
 SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
@@ -188,6 +190,7 @@ class SessionManager:
         self._runtime_lock = RLock()
         self._max_concurrent_api_calls = read_max_concurrent_api_calls()
         self._call_gate = BoundedSemaphore(self._max_concurrent_api_calls)
+        self._last_api_call_at = 0.0
 
         logger.warning("MVP_SAFE_MODE: bullexapi global-state protected by process lock")
         logger.info(
@@ -575,6 +578,11 @@ class SessionManager:
             session = self.ensure_session_alive(user_id)
             try:
                 with self._session_context(session):
+                    now = time.monotonic()
+                    elapsed = now - self._last_api_call_at
+                    if elapsed < MIN_API_CALL_SPACING_SECONDS:
+                        time.sleep(MIN_API_CALL_SPACING_SECONDS - elapsed)
+                    self._last_api_call_at = time.monotonic()
                     return operation(session)
             except ServiceError as exc:
                 if exc.message == SESSION_DISCONNECTED and disconnect_on_error:
@@ -1102,8 +1110,70 @@ def parse_order_id(order_id: str) -> int | str:
 def build_cache_key(path: str, params: dict[str, Any] | None = None) -> str:
     if not params:
         return path
-    parts = [f"{key}={params[key]}" for key in sorted(params)]
+    normalized_params = dict(params)
+    if path == "/candles":
+        try:
+            interval = int(normalized_params.get("interval") or 60)
+        except (TypeError, ValueError):
+            interval = 60
+        try:
+            endtime = int(normalized_params.get("endtime") or time.time())
+        except (TypeError, ValueError):
+            endtime = int(time.time())
+        normalized_params["endtime"] = int(endtime // interval) * interval
+    parts = [f"{key}={normalized_params[key]}" for key in sorted(normalized_params)]
     return f"{path}?{'&'.join(parts)}"
+
+
+def metric_label_for_path(path: str) -> str | None:
+    if path == "/candles":
+        return "CANDLES_FETCH_MS"
+    if path == "/payouts":
+        return "PAYOUT_FETCH_MS"
+    if path == "/account":
+        return "ACCOUNT_FETCH_MS"
+    return None
+
+
+def log_fetch_metric(path: str, started_at: float, *, user_id: str, source: str, status_code: int | None = None) -> None:
+    label = metric_label_for_path(path)
+    if label is None:
+        return
+    logger.info(
+        "[%s] user_id=%s path=%s source=%s status_code=%s ms=%s",
+        label,
+        user_id,
+        path,
+        source,
+        status_code,
+        int((time.monotonic() - started_at) * 1000),
+    )
+
+
+def add_stale_warning(payload: dict[str, Any]) -> dict[str, Any]:
+    cloned = dict(payload)
+    cloned["warning"] = "BULLEX_TEMPORARY_UNAVAILABLE"
+    data = cloned.get("data")
+    if isinstance(data, dict):
+        data = dict(data)
+        data["from_cache"] = True
+        cloned["data"] = data
+    cloned["meta"] = {
+        **(cloned.get("meta") if isinstance(cloned.get("meta"), dict) else {}),
+        "source": "cache",
+        "stale": True,
+    }
+    return cloned
+
+
+def stale_cached_probe(user_id: str, cache_key: str, *, max_age_seconds: int = STALE_MARKET_DATA_SECONDS) -> tuple[int, dict[str, Any]] | None:
+    cached = session_manager.get_last_probe(user_id, cache_key)
+    if cached is None:
+        return None
+    probe = session_manager.get_probe_state(user_id).responses.get(cache_key)
+    if probe is None or time.time() > probe.expires_at + max_age_seconds:
+        return None
+    return cached[0], add_stale_warning(cached[1])
 
 
 def normalize_balance_value(balance: Any) -> float | None:
@@ -1637,9 +1707,11 @@ def account_balance(x_user_id: str | None = Header(default=None)) -> dict[str, A
 @app.get("/account")
 def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
+    started_at = time.monotonic()
     cached = session_manager.get_cached_probe(user_id, "/account", path="/account")
     if cached is not None:
         _, payload = cached
+        log_fetch_metric("/account", started_at, user_id=user_id, source="cache", status_code=cached[0])
         return with_login_progress(
             normalize_real_only_account_payload(payload),
             user_id,
@@ -1647,11 +1719,13 @@ def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, 
     if session_manager.get(user_id) is None:
         previous = session_manager.get_last_probe(user_id, "/account")
         if previous is not None:
+            log_fetch_metric("/account", started_at, user_id=user_id, source="last_cache", status_code=previous[0])
             return with_login_progress(
                 normalize_real_only_account_payload(previous[1]),
                 user_id,
             )
         payload = with_login_progress(build_success({"connected": False}), user_id)
+        log_fetch_metric("/account", started_at, user_id=user_id, source="no_session", status_code=200)
         return payload
 
     def operation(session: ManagedSession) -> dict[str, Any]:
@@ -1677,22 +1751,27 @@ def account_overview(x_user_id: str | None = Header(default=None)) -> dict[str, 
             )
         else:
             session_manager._mark_probe_failure(user_id, offline=True)
+        log_fetch_metric("/account", started_at, user_id=user_id, source="upstream", status_code=200)
         return payload
     except ServiceError as exc:
         if exc.message in {SESSION_NOT_FOUND, SESSION_DISCONNECTED}:
             cached = session_manager.get_last_probe(user_id, "/account")
             if cached is not None:
+                log_fetch_metric("/account", started_at, user_id=user_id, source="last_cache", status_code=cached[0])
                 return with_login_progress(
                     normalize_real_only_account_payload(cached[1]),
                     user_id,
                 )
+            log_fetch_metric("/account", started_at, user_id=user_id, source=exc.message, status_code=200)
             return with_login_progress(build_success({"connected": False}), user_id)
         cached = session_manager.get_last_probe(user_id, "/account")
         if cached is not None:
+            log_fetch_metric("/account", started_at, user_id=user_id, source="last_cache", status_code=cached[0])
             return with_login_progress(
                 normalize_real_only_account_payload(cached[1]),
                 user_id,
             )
+        log_fetch_metric("/account", started_at, user_id=user_id, source=exc.message)
         return with_login_progress(build_error("ACCOUNT_TEMPORARY_UNAVAILABLE"), user_id)
 
 
@@ -1752,15 +1831,17 @@ def get_candles(
     x_user_id: str | None = Header(default=None),
 ) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
+    started_at = time.monotonic()
     active = ensure_binary_asset_allowed(active)
     resolved_endtime = endtime or int(time.time())
     cache_key = build_cache_key(
         "/candles",
-        {"active": active, "interval": interval},
+        {"active": active, "interval": interval, "count": count, "endtime": resolved_endtime},
     )
     cached = session_manager.get_cached_probe(user_id, cache_key, path="/candles")
     if cached is not None:
         _, payload = cached
+        log_fetch_metric("/candles", started_at, user_id=user_id, source="cache", status_code=cached[0])
         return payload
 
     def operation(session: ManagedSession) -> list[dict[str, Any]]:
@@ -1792,22 +1873,27 @@ def get_candles(
             payload,
             ttl_seconds=CANDLES_TTL_SECONDS,
         )
+        log_fetch_metric("/candles", started_at, user_id=user_id, source="upstream", status_code=200)
         return payload
     except ServiceError:
-        cached = session_manager.get_last_probe(user_id, cache_key)
+        cached = stale_cached_probe(user_id, cache_key)
         if cached is not None:
+            log_fetch_metric("/candles", started_at, user_id=user_id, source="stale_cache", status_code=cached[0])
             return cached[1]
+        log_fetch_metric("/candles", started_at, user_id=user_id, source="error")
         return build_error("CANDLES_TEMPORARY_UNAVAILABLE")
 
 
 @app.get("/payouts")
 def get_payouts(active: str | None = None, x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     user_id = require_user_id(x_user_id)
+    started_at = time.monotonic()
     active = ensure_binary_asset_allowed(active) if active else None
     cache_key = build_cache_key("/payouts", {"active": active} if active else None)
     cached = session_manager.get_cached_probe(user_id, cache_key, path="/payouts")
     if cached is not None:
         _, payload = cached
+        log_fetch_metric("/payouts", started_at, user_id=user_id, source="cache", status_code=cached[0])
         return payload
 
     def operation(session: ManagedSession) -> list[dict[str, Any]]:
@@ -1848,11 +1934,14 @@ def get_payouts(active: str | None = None, x_user_id: str | None = Header(defaul
             payload,
             ttl_seconds=PAYOUT_TTL_SECONDS,
         )
+        log_fetch_metric("/payouts", started_at, user_id=user_id, source="upstream", status_code=200)
         return payload
     except ServiceError:
-        cached = session_manager.get_last_probe(user_id, cache_key)
+        cached = stale_cached_probe(user_id, cache_key)
         if cached is not None:
+            log_fetch_metric("/payouts", started_at, user_id=user_id, source="stale_cache", status_code=cached[0])
             return cached[1]
+        log_fetch_metric("/payouts", started_at, user_id=user_id, source="error")
         return build_error("PAYOUTS_TEMPORARY_UNAVAILABLE")
 
 

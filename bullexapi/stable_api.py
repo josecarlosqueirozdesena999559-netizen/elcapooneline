@@ -108,8 +108,11 @@ class Bullex:
             self.re_subscribe_stream()
 
             # ---------for async get name: "position-changed", microserviceName
+            wait_started_at = time.time()
             while global_value.balance_id == None:
-                pass
+                if time.time() - wait_started_at > 10:
+                    break
+                time.sleep(0.05)
 
             self.position_change_all(
                 "subscribeMessage", global_value.balance_id)
@@ -184,8 +187,11 @@ class Bullex:
 
         self.re_subscribe_stream()
 
+        wait_started_at = time.time()
         while global_value.balance_id == None:
-            pass
+            if time.time() - wait_started_at > 10:
+                break
+            time.sleep(0.05)
 
         self.position_change_all(
             "subscribeMessage", global_value.balance_id)
@@ -556,20 +562,28 @@ class Bullex:
 
     def get_candles(self, ACTIVES, interval, count, endtime):
         self.api.candles.candles_data = None
+        request_started_at = time.time()
         while True:
             try:
+                if time.time() - request_started_at > 8:
+                    logging.error('**error** get_candles timeout')
+                    return self.api.candles.candles_data
                 if ACTIVES not in OP_code.ACTIVES:
                     print('Asset {} not found on consts'.format(ACTIVES))
                     break
                 self.api.getcandles(
                     OP_code.ACTIVES[ACTIVES], interval, count, endtime)
+                wait_started_at = time.time()
                 while self.check_connect and self.api.candles.candles_data == None:
-                    pass
+                    if time.time() - wait_started_at > 5:
+                        break
+                    time.sleep(0.05)
                 if self.api.candles.candles_data != None:
                     break
             except:
                 logging.error('**error** get_candles need reconnect')
                 self.connect()
+                time.sleep(0.2)
 
         return self.api.candles.candles_data
 
@@ -1602,6 +1616,7 @@ class Bullex:
         while self.api.digital_payout is None:
             if seconds and int(time.time() - start) > seconds:
                 break
+            time.sleep(0.05)
 
         self.api.unsubscribe_digital_price_splitter(asset_id)
 

@@ -20,6 +20,7 @@ from backend.status import (
     STATUS_INSUFFICIENT_BALANCE,
     STATUS_NO_CANDIDATE_THIS_CANDLE,
     STATUS_NO_CANDIDATES,
+    STATUS_NO_SIGNAL_FOUND,
     STATUS_ORDER_REJECTED,
     STATUS_PAYOUT_COOLDOWN,
     STATUS_PENDING_GALE_RESULT,
@@ -1228,7 +1229,7 @@ class AutoTrader:
         )
         state.metrics = dict((best_candidate or {}).get("metrics") or {})
         state.last_analysis_at = utc_now()
-        state.last_analysis_result = "BEST_CANDIDATE_UPDATED" if best_candidate is not None else "NO_CANDIDATES"
+        state.last_analysis_result = "BEST_CANDIDATE_UPDATED" if best_candidate is not None else STATUS_NO_SIGNAL_FOUND
         state.analysis_result = state.last_analysis_result
         state.analysis_message = None
         return state

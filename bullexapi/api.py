@@ -272,8 +272,11 @@ class BullexAPI(object):  # pylint: disable=too-many-instance-attributes
         data = json.dumps(dict(name=name,
                                msg=msg, request_id=request_id))
 
+        wait_started_at = time.time()
         while (global_value.ssl_Mutual_exclusion or global_value.ssl_Mutual_exclusion_write) and no_force_send:
-            pass
+            if time.time() - wait_started_at > 5:
+                raise TimeoutError("websocket_send_lock_timeout")
+            time.sleep(0.01)
         global_value.ssl_Mutual_exclusion_write = True
         self.websocket.send(data)
         logger.debug(data)
@@ -793,6 +796,7 @@ class BullexAPI(object):  # pylint: disable=too-many-instance-attributes
                                                  "check_hostname": False, "cert_reqs": ssl.CERT_NONE, "ca_certs": "cacert.pem"}})  # for fix pyinstall error: cafile, capath and cadata cannot be all omitted
         self.websocket_thread.daemon = True
         self.websocket_thread.start()
+        wait_started_at = time.time()
         while True:
             try:
                 if global_value.check_websocket_if_error:
@@ -803,8 +807,9 @@ class BullexAPI(object):  # pylint: disable=too-many-instance-attributes
                     return True, None
             except:
                 pass
-
-            pass
+            if time.time() - wait_started_at > 15:
+                return False, "Websocket connection timeout."
+            time.sleep(0.05)
 
     # @tokensms.setter
     def setTokenSMS(self, response):
@@ -834,8 +839,11 @@ class BullexAPI(object):  # pylint: disable=too-many-instance-attributes
     def send_ssid(self):
         self.profile.msg = None
         self.ssid(global_value.SSID)  # pylint: disable=not-callable
+        wait_started_at = time.time()
         while self.profile.msg == None:
-            pass
+            if time.time() - wait_started_at > 10:
+                return False
+            time.sleep(0.05)
         if self.profile.msg == False:
             return False
         else:
@@ -887,12 +895,16 @@ class BullexAPI(object):  # pylint: disable=too-many-instance-attributes
             self.session.cookies, {"ssid": global_value.SSID})
 
         self.timesync.server_timestamp = None
+        wait_started_at = time.time()
         while True:
             try:
                 if self.timesync.server_timestamp != None:
                     break
             except:
                 pass
+            if time.time() - wait_started_at > 15:
+                return False, "Timesync timeout."
+            time.sleep(0.05)
         return True, None
 
     def connect_with_ssid_only(self):
@@ -919,12 +931,16 @@ class BullexAPI(object):  # pylint: disable=too-many-instance-attributes
             self.session.cookies, {"ssid": global_value.SSID})
 
         self.timesync.server_timestamp = None
+        wait_started_at = time.time()
         while True:
             try:
                 if self.timesync.server_timestamp != None:
                     break
             except:
                 pass
+            if time.time() - wait_started_at > 15:
+                return False, "Timesync timeout."
+            time.sleep(0.05)
         return True, None
 
     def connect2fa(self, sms_code):

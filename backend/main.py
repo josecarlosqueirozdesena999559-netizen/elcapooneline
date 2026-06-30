@@ -7,6 +7,7 @@ from copy import deepcopy
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 from typing import Any
 
 import httpx
@@ -178,7 +179,7 @@ SESSION_OFFLINE_TTL_SECONDS = 60
 SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
 SESSION_CACHEABLE_PATHS = {"/sessions/status", "/account"}
 ACTIVE_USER_TTL_SECONDS = 300
-ACCOUNT_CACHE_TTL_SECONDS = 10
+ACCOUNT_CACHE_TTL_SECONDS = 30
 BULLEX_UPSTREAM_TIMEOUT_SECONDS = 5.0
 BULLEX_CONNECT_TIMEOUT_SECONDS = 60.0
 BULLEX_TEMPORARY_UNAVAILABLE = "BULLEX_TEMPORARY_UNAVAILABLE"
@@ -193,10 +194,13 @@ BAD_GATEWAY_PROTECTED_PATHS = {
 ASSETS_CACHE_TTL_SECONDS = 300
 ASSETS_RETRY_BACKOFF_SECONDS = (10, 30, 60)
 PAYOUT_CACHE_TTL_SECONDS = 60
-CANDLES_CACHE_TTL_SECONDS = 2
+CANDLES_CACHE_TTL_SECONDS = 60
 CANDLES_REQUEST_TIMEOUT_SECONDS = 5.0
 ACTIVE_COOLDOWN_SECONDS = 300
 PAYOUT_COOLDOWN_SECONDS = 30
+STALE_MARKET_DATA_SECONDS = 120
+ROBOT_MAX_ASSETS_PER_CYCLE = 3
+ROBOT_ASSET_QUEUE_SLEEP_SECONDS = 0.2
 
 
 def build_success(data: Any) -> dict[str, Any]:
@@ -419,6 +423,7 @@ session_response_cache: dict[str, BullexUserSessionCache] = {}
 active_cooldowns: dict[str, dict[str, datetime]] = {}
 payout_cooldowns: dict[str, dict[str, datetime]] = {}
 active_users: dict[str, datetime] = {}
+analysis_asset_queue_offsets: dict[str, int] = {}
 
 
 def get_session_cache(user_id: str) -> BullexUserSessionCache:
@@ -630,6 +635,97 @@ def request_cache_ttl_seconds(path: str, params: dict[str, Any] | None = None) -
     return None
 
 
+def metric_label_for_path(path: str) -> str | None:
+    if path == "/candles":
+        return "CANDLES_FETCH_MS"
+    if path == "/payouts":
+        return "PAYOUT_FETCH_MS"
+    if path == "/account":
+        return "ACCOUNT_FETCH_MS"
+    return None
+
+
+def log_fetch_metric(path: str, started_at: float, *, user_id: str, source: str, status_code: int | None = None) -> None:
+    label = metric_label_for_path(path)
+    if label is None:
+        return
+    elapsed_ms = int((monotonic() - started_at) * 1000)
+    logger.info(
+        "[%s] user_id=%s path=%s source=%s status_code=%s ms=%s",
+        label,
+        user_id,
+        path,
+        source,
+        status_code,
+        elapsed_ms,
+    )
+
+
+def stale_successful_response(
+    user_id: str,
+    cache_key: str,
+    *,
+    max_age_seconds: int = STALE_MARKET_DATA_SECONDS,
+) -> BullexResponseCacheEntry | None:
+    cached = cached_successful_response(user_id, cache_key)
+    if cached is None:
+        return None
+    stale_until = cached.expires_at + timedelta(seconds=max_age_seconds)
+    return cached if utc_now() <= stale_until else None
+
+
+def select_analysis_assets_for_cycle(
+    user_id: str,
+    *,
+    max_assets: int | None,
+) -> list[str]:
+    assets = [symbol for symbol in BINARY_ALLOWED_ASSETS if symbol in ANALYSIS_ASSETS]
+    if max_assets is None or max_assets <= 0 or max_assets >= len(assets):
+        return assets
+    offset = analysis_asset_queue_offsets.get(user_id, 0) % len(assets)
+    selected = [assets[(offset + index) % len(assets)] for index in range(max_assets)]
+    analysis_asset_queue_offsets[user_id] = (offset + max_assets) % len(assets)
+    logger.info(
+        "[ANALYSIS_ASSET_QUEUE] user_id=%s offset=%s limit=%s assets=%s",
+        user_id,
+        offset,
+        max_assets,
+        ",".join(selected),
+    )
+    return selected
+
+
+def invalidate_account_cache(user_id: str) -> None:
+    cache = get_session_cache(user_id)
+    cache.responses.pop("/account", None)
+    cache.last_successful_responses.pop("/account", None)
+    logger.info("[ACCOUNT_CACHE_INVALIDATED] user_id=%s reason=ORDER_SENT", user_id)
+
+
+def seconds_until_next_candle_after_trade(state: Any) -> float | None:
+    last_trade = getattr(state, "last_trade", None)
+    if not isinstance(last_trade, dict):
+        return None
+    if str(last_trade.get("result") or "").strip().upper() not in {"WIN", "LOSS", "TIMEOUT"}:
+        return None
+    finished_at = parse_datetime(last_trade.get("finished_at"))
+    if finished_at is None:
+        return None
+    timeframe = str(getattr(state, "timeframe", "M1") or "M1").strip().upper()
+    interval = TIMEFRAME_SECONDS.get(timeframe, 60)
+    now = utc_now()
+    seconds_since_finish = (now - finished_at).total_seconds()
+    if seconds_since_finish < 0:
+        return 1.0
+    seconds_into_candle = now.timestamp() % interval
+    remaining = interval - seconds_into_candle
+    if remaining <= 0:
+        remaining = interval
+    if seconds_since_finish >= remaining + 0.5:
+        return None
+    return max(0.5, remaining)
+
+
 def normalize_allowed_assets_list(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, list):
         return []
@@ -731,7 +827,18 @@ def log_ignored_disconnect(user_id: str, path: str, payload: dict[str, Any]) -> 
 def build_cache_key(path: str, params: dict[str, Any] | None = None) -> str:
     if not params:
         return path
-    parts = [f"{key}={params[key]}" for key in sorted(params)]
+    normalized_params = dict(params)
+    if path == "/candles":
+        try:
+            interval = int(normalized_params.get("interval") or TIMEFRAME_SECONDS["M1"])
+        except (TypeError, ValueError):
+            interval = TIMEFRAME_SECONDS["M1"]
+        try:
+            endtime = int(normalized_params.get("endtime") or utc_now().timestamp())
+        except (TypeError, ValueError):
+            endtime = int(utc_now().timestamp())
+        normalized_params["endtime"] = int(endtime // interval) * interval
+    parts = [f"{key}={normalized_params[key]}" for key in sorted(normalized_params)]
     return f"{path}?{'&'.join(parts)}"
 
 
@@ -786,14 +893,15 @@ def set_named_cooldown(
         return
     expires_at = utc_now() + timedelta(seconds=seconds)
     store.setdefault(user_id, {})[normalized] = expires_at
-    auto_trader.defer_cycle(
-        user_id,
-        status,
-        wait_seconds=seconds,
-        rejection_reason=reason,
-        last_rejection_reason=reason,
-        last_order_error=reason,
-    )
+    if status != STATUS_PAYOUT_COOLDOWN:
+        auto_trader.defer_cycle(
+            user_id,
+            status,
+            wait_seconds=seconds,
+            rejection_reason=reason,
+            last_rejection_reason=reason,
+            last_order_error=reason,
+        )
     logger.warning("[%s] user_id=%s symbol=%s until=%s", log_label, user_id, normalized, expires_at.isoformat())
 
 
@@ -1236,6 +1344,7 @@ async def call_bullex_service(
         cached = cache.responses.get(cache_key)
         now = utc_now()
         if cached is not None and now < cached.expires_at:
+            log_fetch_metric(path, monotonic(), user_id=user_id, source="fresh_cache", status_code=cached.status_code)
             if path == "/account":
                 logger.info(
                     "[ACCOUNT_CACHE_HIT] user_id=%s ttl_remaining=%.2f",
@@ -1298,6 +1407,24 @@ async def call_bullex_service(
             if cached is not None:
                 return cached.status_code, deepcopy(cached.payload)
             return 200, backoff_payload(user_id, remaining)
+        if path in {"/candles", "/payouts"}:
+            guard = connection_guard_reason(user_id)
+            if guard is not None:
+                reason, remaining = guard
+                logger.warning(
+                    "[MARKET_DATA_BACKOFF_SKIPPED] user_id=%s path=%s reason=%s retry_in=%.2f",
+                    user_id,
+                    path,
+                    reason,
+                    remaining,
+                )
+                logger.warning("[CPU_LOOP_PROTECTION] user_id=%s path=%s reason=%s", user_id, path, reason)
+                stale = stale_successful_response(user_id, cache_key)
+                if stale is not None:
+                    return 200, add_stale_warning(stale.payload)
+                if path == "/candles":
+                    return 200, build_success({"candles": [], "from_cache": False})
+                return 200, build_success([])
 
     headers = {"x-user-id": user_id}
     if allow_session_restore:
@@ -1309,6 +1436,7 @@ async def call_bullex_service(
         else BULLEX_UPSTREAM_TIMEOUT_SECONDS
     )
 
+    request_started_at = monotonic()
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             response = await asyncio.wait_for(
@@ -1322,6 +1450,7 @@ async def call_bullex_service(
                 timeout=timeout_seconds,
             )
     except (asyncio.TimeoutError, httpx.TimeoutException):
+        log_fetch_metric(path, request_started_at, user_id=user_id, source="timeout")
         if path == "/account":
             logger.warning(
                 "[ACCOUNT_FETCH_TIMEOUT] user_id=%s timeout_seconds=%s",
@@ -1353,8 +1482,19 @@ async def call_bullex_service(
             user_id,
             path,
         )
+        if method == "GET" and path in {"/candles", "/payouts"}:
+            stale = stale_successful_response(user_id, cache_key)
+            if stale is not None:
+                logger.warning(
+                    "[MARKET_DATA_STALE_FALLBACK] user_id=%s path=%s cache_key=%s reason=timeout",
+                    user_id,
+                    path,
+                    cache_key,
+                )
+                return 200, add_stale_warning(stale.payload)
         return 503, build_error(BULLEX_TEMPORARY_UNAVAILABLE)
     except httpx.HTTPError as exc:
+        log_fetch_metric(path, request_started_at, user_id=user_id, source=exc.__class__.__name__)
         if method == "GET" and path == "/payouts":
             symbol = normalize_binary_active(str((params or {}).get("active") or ""))
             if symbol:
@@ -1381,8 +1521,20 @@ async def call_bullex_service(
             path,
             exc.__class__.__name__,
         )
+        if method == "GET" and path in {"/candles", "/payouts"}:
+            stale = stale_successful_response(user_id, cache_key)
+            if stale is not None:
+                logger.warning(
+                    "[MARKET_DATA_STALE_FALLBACK] user_id=%s path=%s cache_key=%s reason=%s",
+                    user_id,
+                    path,
+                    cache_key,
+                    exc.__class__.__name__,
+                )
+                return 200, add_stale_warning(stale.payload)
         return 503, build_error(BULLEX_TEMPORARY_UNAVAILABLE)
     except Exception as exc:
+        log_fetch_metric(path, request_started_at, user_id=user_id, source=exc.__class__.__name__)
         logger.warning(
             "[UPSTREAM_ERROR_HANDLED] user_id=%s path=%s reason=%s",
             user_id,
@@ -1398,7 +1550,20 @@ async def call_bullex_service(
                 reason=exc.__class__.__name__,
                 allow_failure_backoff=allow_failure_backoff,
             )
+        if method == "GET" and path in {"/candles", "/payouts"}:
+            stale = stale_successful_response(user_id, cache_key)
+            if stale is not None:
+                logger.warning(
+                    "[MARKET_DATA_STALE_FALLBACK] user_id=%s path=%s cache_key=%s reason=%s",
+                    user_id,
+                    path,
+                    cache_key,
+                    exc.__class__.__name__,
+                )
+                return 200, add_stale_warning(stale.payload)
         return 503, build_error(BULLEX_TEMPORARY_UNAVAILABLE)
+
+    log_fetch_metric(path, request_started_at, user_id=user_id, source="upstream", status_code=response.status_code)
 
     try:
         payload = response.json()
@@ -1438,6 +1603,17 @@ async def call_bullex_service(
         if method == "POST" and path == "/sessions/connect" and error == "LOGIN_TIMEOUT":
             logger.warning("[CONNECT_TIMEOUT_HANDLED] user_id=%s source=upstream", user_id)
             return 504, build_error("LOGIN_TIMEOUT")
+        if method == "GET" and path in {"/candles", "/payouts"}:
+            stale = stale_successful_response(user_id, cache_key)
+            if stale is not None:
+                logger.warning(
+                    "[MARKET_DATA_STALE_FALLBACK] user_id=%s path=%s cache_key=%s reason=status_%s",
+                    user_id,
+                    path,
+                    cache_key,
+                    response.status_code,
+                )
+                return 200, add_stale_warning(stale.payload)
         return 503, build_error(BULLEX_TEMPORARY_UNAVAILABLE)
 
     cacheable_success = (
@@ -3176,17 +3352,20 @@ async def scan_local_signals(
     timeframe: str = "M1",
     endtime: int | None = None,
     strategy_mode: str = "conservative",
+    max_assets: int | None = None,
+    asset_sleep_seconds: float = 0.0,
 ) -> tuple[int, dict[str, Any]]:
     logger.info("[SIGNAL SCAN START]")
     signals = []
+    analysis_assets = select_analysis_assets_for_cycle(user_id, max_assets=max_assets)
     logger.info(
         "[ANALYSIS_FILTER] total_assets=%s filtered_assets=%s",
         len(BINARY_ALLOWED_ASSETS),
-        len(ANALYSIS_ASSETS),
+        len(analysis_assets),
     )
-    logger.info("[ANALYSIS_FILTER_10_ASSETS] assets=%s", ",".join(ANALYSIS_ASSETS))
+    logger.info("[ANALYSIS_FILTER_10_ASSETS] assets=%s", ",".join(analysis_assets))
 
-    for symbol in ANALYSIS_ASSETS:
+    for index, symbol in enumerate(analysis_assets):
         try:
             logger.info("[ANALYZING_ASSET] user_id=%s asset=%s", user_id, symbol)
             logger.info("[ANALYZING_ASSET] symbol=%s", symbol)
@@ -3223,6 +3402,9 @@ async def scan_local_signals(
         except Exception as exc:
             logger.exception("[SIGNAL ERROR] %s %s", symbol, exc)
             continue
+        finally:
+            if asset_sleep_seconds > 0 and index < len(analysis_assets) - 1:
+                await asyncio.sleep(asset_sleep_seconds)
 
     signals.sort(key=lambda item: item["confidence"], reverse=True)
     limited_signals = signals[:limit]
@@ -3301,8 +3483,12 @@ async def select_fallback_candidate(
     state: Any,
     *,
     endtime: int | None = None,
+    max_assets: int | None = ROBOT_MAX_ASSETS_PER_CYCLE,
 ) -> dict[str, Any] | None:
-    for symbol in ANALYSIS_ASSETS:
+    assets = select_analysis_assets_for_cycle(user_id, max_assets=max_assets)
+    for index, symbol in enumerate(assets):
+        if index > 0:
+            await asyncio.sleep(ROBOT_ASSET_QUEUE_SLEEP_SECONDS)
         if active_cooldown_remaining(user_id, symbol) is not None:
             logger.warning("[ACTIVE_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
             continue
@@ -3337,7 +3523,7 @@ async def select_fallback_candidate(
             candle_params: dict[str, Any] = {
                 "active": symbol,
                 "interval": TIMEFRAME_SECONDS[state.timeframe],
-                "count": 5,
+                "count": 100,
             }
             if endtime is not None:
                 candle_params["endtime"] = endtime
@@ -3427,13 +3613,16 @@ async def update_cycle_analysis(
         state.to_dict()["seconds_until_next_cycle"],
     )
     logger.info("[WORKER_ANALYSIS_STARTED] user_id=%s cycle_id=%s", user_id, state.cycle_id)
+    cycle_started_at = monotonic()
     scan_status, scan_payload = await scan_local_signals(
         user_id,
-        limit=len(ANALYSIS_ASSETS),
+        limit=ROBOT_MAX_ASSETS_PER_CYCLE,
         include_wait=True,
         timeframe=state.timeframe,
         endtime=int(entry_window["server_timestamp"]),
         strategy_mode=state.strategy_mode,
+        max_assets=ROBOT_MAX_ASSETS_PER_CYCLE,
+        asset_sleep_seconds=ROBOT_ASSET_QUEUE_SLEEP_SECONDS,
     )
     if scan_payload.get("ok"):
         signals = [item for item in scan_payload.get("data", []) if isinstance(item, dict)]
@@ -3620,6 +3809,12 @@ async def update_cycle_analysis(
         user_id,
         state.cycle_id,
         len(candidates),
+    )
+    logger.info(
+        "[CYCLE_DURATION_MS] user_id=%s cycle_id=%s phase=analysis ms=%s",
+        user_id,
+        state.cycle_id,
+        int((monotonic() - cycle_started_at) * 1000),
     )
     return state
 
@@ -4773,6 +4968,7 @@ async def execute_robot_cycle(
                 }
                 trade["timestamp"] = trade["sent_at"]
                 state = auto_trader.record_trade(user_id, trade)
+                invalidate_account_cache(user_id)
                 state.pending_signal = None
                 state.entry_window_open = False
                 logger.info(
@@ -4946,8 +5142,25 @@ async def robot_worker(user_id: str) -> None:
                 logger.info("[CPU_GUARD_SLEEP] user_id=%s seconds=0.50", user_id)
                 await asyncio.sleep(0.5)
                 continue
+            post_trade_wait = seconds_until_next_candle_after_trade(state)
+            if post_trade_wait is not None:
+                sleep_seconds = max(0.5, min(post_trade_wait, 5.0))
+                logger.info(
+                    "[SKIP_HEAVY_ANALYSIS_UNTIL_NEXT_CANDLE] user_id=%s seconds=%.2f",
+                    user_id,
+                    post_trade_wait,
+                )
+                logger.info("[CPU_GUARD_SLEEP] user_id=%s seconds=%.2f", user_id, sleep_seconds)
+                await asyncio.sleep(sleep_seconds)
+                continue
             logger.info("[ROBOT_WORKER_TICK] user_id=%s", user_id)
+            cycle_started_at = monotonic()
             await execute_robot_cycle(user_id)
+            logger.info(
+                "[CYCLE_DURATION_MS] user_id=%s source=worker ms=%s",
+                user_id,
+                int((monotonic() - cycle_started_at) * 1000),
+            )
             state = auto_trader.get(user_id)
             if not state.enabled:
                 break
@@ -6143,7 +6356,8 @@ async def _bullex_status_impl(auth: dict[str, str]) -> JSONResponse:
             exc_info=True,
         )
         fallback = memory_status_fallback(user_id)
-        if fallback is not None:
+        fallback_data = fallback.get("data") if isinstance(fallback, dict) else None
+        if isinstance(fallback_data, dict) and fallback_data.get("connected") is True:
             return json_response(200, fallback)
         return json_response(200, build_controlled_upstream_error(exc))
     if payload.get("ok") and isinstance(payload.get("data"), dict) and payload["data"].get("status") == "backoff":
