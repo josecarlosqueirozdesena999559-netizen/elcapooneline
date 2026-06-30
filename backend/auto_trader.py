@@ -14,6 +14,7 @@ from backend.status import (
     STATUS_ANALYSIS_TIMEOUT,
     STATUS_ANALYZING,
     STATUS_BULLEX_ACTIVE_MODE_NOT_REAL,
+    STATUS_BUYING,
     STATUS_CONNECTION_BACKOFF,
     STATUS_ERROR,
     STATUS_GALE_RESULT_RECEIVED,
@@ -22,6 +23,7 @@ from backend.status import (
     STATUS_NO_CANDIDATES,
     STATUS_NO_SIGNAL_FOUND,
     STATUS_ORDER_REJECTED,
+    STATUS_OPERATION_OPEN,
     STATUS_PAYOUT_COOLDOWN,
     STATUS_PENDING_GALE_RESULT,
     STATUS_PENDING_RESULT,
@@ -29,6 +31,7 @@ from backend.status import (
     STATUS_RESULT_RECEIVED,
     STATUS_SENDING_GALE_ORDER,
     STATUS_SENDING_ORDER,
+    STATUS_SIGNAL_FOUND,
     STATUS_SIGNAL_EXPIRED,
     STATUS_SIGNAL_REJECTED,
     STATUS_STOP_LOSS_HIT,
@@ -37,11 +40,15 @@ from backend.status import (
     STATUS_SYNCING,
     STATUS_SYNCING_PT,
     STATUS_WAITING_ANALYSIS_WINDOW,
+    STATUS_WAITING_ENTRY,
     STATUS_WAITING_ENTRY_WINDOW,
     STATUS_WAITING_GALE_ENTRY,
+    STATUS_WAITING_RESULT,
     STATUS_WAITING_NEXT_CANDLE_ENTRY,
     STATUS_WAITING_NEXT_CYCLE,
     STATUS_WAITING_RECOVERY,
+    STATUS_WIN,
+    STATUS_LOSS,
     TEMPORARY_WAIT_STATUSES,
     normalize_robot_status,
 )
@@ -284,7 +291,7 @@ class RobotState:
             data["last_analysis_result"] = self.last_analysis_result = None
             data["analysis_message"] = self.analysis_message = None
         if (
-            self.status in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED}
+            self.status in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED, STATUS_WIN, STATUS_LOSS}
             and self.result_display_until is not None
             and now >= self.result_display_until
         ):
@@ -344,6 +351,37 @@ class RobotState:
         data["operation_message"] = None
         data["expiration_display"] = None
         data["show_expiration_countdown"] = False
+        final_result = str(
+            (self.last_trade or {}).get("final_result")
+            or (self.last_trade or {}).get("result")
+            or ""
+        ).upper()
+        if self.operation_in_progress or data["result_waiting"]:
+            data["status"] = STATUS_WAITING_RESULT
+        elif self.status in {STATUS_PENDING_RESULT, STATUS_PENDING_GALE_RESULT}:
+            data["status"] = STATUS_WAITING_RESULT
+        elif self.status in {STATUS_SENDING_ORDER, STATUS_SENDING_GALE_ORDER, STATUS_BUYING}:
+            data["status"] = STATUS_BUYING
+        elif self.status in {
+            STATUS_SIGNAL_FOUND,
+            STATUS_WAITING_NEXT_CANDLE_ENTRY,
+            STATUS_WAITING_GALE_ENTRY,
+            STATUS_WAITING_ENTRY,
+        }:
+            data["status"] = STATUS_SIGNAL_FOUND if self.status == STATUS_SIGNAL_FOUND else STATUS_WAITING_ENTRY
+        elif self.status in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED, STATUS_WIN, STATUS_LOSS}:
+            if final_result in {STATUS_WIN, STATUS_LOSS}:
+                data["status"] = final_result
+        if data["status"] in {
+            STATUS_SIGNAL_FOUND,
+            STATUS_WAITING_ENTRY,
+            STATUS_BUYING,
+            STATUS_OPERATION_OPEN,
+            STATUS_WAITING_RESULT,
+            STATUS_WIN,
+            STATUS_LOSS,
+        }:
+            data["analysis_message"] = None
         if self.status == STATUS_ACCOUNT_DISCONNECTED:
             data["enabled"] = False
             data["connected"] = False
@@ -391,7 +429,7 @@ class RobotState:
             data["operation_message"] = SIGNAL_EXPIRED_MESSAGE
         elif self.status == STATUS_SIGNAL_REJECTED and self.last_order_error == "PAYOUT_TOO_LOW":
             data["operation_message"] = "Entrada bloqueada: payout abaixo do minimo."
-        if self.status == STATUS_ANALYZING:
+        if self.status == STATUS_ANALYZING and data["status"] == STATUS_ANALYZING:
             data["last_analysis_result"] = "RUNNING"
             data["analysis_result"] = "RUNNING"
             data["analysis_message"] = ANALYSIS_MESSAGE
@@ -400,7 +438,7 @@ class RobotState:
         if data["status"] == STATUS_WAITING_NEXT_CYCLE:
             display_countdown_label = "Entrada em"
             display_countdown_seconds = max(0, int(data["seconds_until_next_cycle"]))
-        elif data["status"] in {STATUS_WAITING_NEXT_CANDLE_ENTRY, STATUS_WAITING_GALE_ENTRY}:
+        elif data["status"] in {STATUS_WAITING_NEXT_CANDLE_ENTRY, STATUS_WAITING_GALE_ENTRY, STATUS_WAITING_ENTRY}:
             display_countdown_label = "Entrada no inicio da proxima vela em"
             display_countdown_seconds = max(0, int(data["seconds_until_entry_window"]))
         elif data["status"] in TEMPORARY_WAIT_STATUSES:
@@ -420,14 +458,18 @@ class RobotState:
         data["voice_message"] = None
         data["voice_event_id"] = None
         voice_signal = self.pending_signal or self.best_candidate
-        if self.status in {STATUS_WAITING_NEXT_CANDLE_ENTRY, STATUS_WAITING_GALE_ENTRY} and voice_signal:
-            data["status_message"] = "Sinal preparado"
+        if data["status"] in {STATUS_SIGNAL_FOUND, STATUS_WAITING_ENTRY} and voice_signal:
+            data["status_message"] = (
+                "Melhor ativo encontrado"
+                if data["status"] == STATUS_SIGNAL_FOUND
+                else "Entrada preparada"
+            )
             data["voice_message"] = "Entrada preparada. Vamos entrar no inicio da proxima vela."
             symbol = str(voice_signal.get("symbol") or "")
             direction = str(voice_signal.get("direction") or voice_signal.get("signal") or "")
             score = int(voice_signal.get("strategy_score") or voice_signal.get("score") or 0)
             data["voice_event_id"] = f"{self.cycle_id or ''}:{symbol}:{direction}:{score}:prepared"
-        if self.status in {STATUS_SENDING_ORDER, STATUS_SENDING_GALE_ORDER} and voice_signal:
+        if data["status"] == STATUS_BUYING and voice_signal:
             symbol = str(voice_signal.get("symbol") or "")
             direction = str(voice_signal.get("direction") or voice_signal.get("signal") or "")
             score = int(voice_signal.get("strategy_score") or voice_signal.get("score") or 0)
@@ -438,7 +480,7 @@ class RobotState:
                 f"{reason_text}"
             )
             data["voice_event_id"] = f"{self.cycle_id or ''}:{symbol}:{direction}:{score}:sending"
-        if self.status in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED} and self.last_trade is not None:
+        if data["status"] in {STATUS_WIN, STATUS_LOSS} and self.last_trade is not None:
             final_result = str(self.last_trade.get("final_result") or self.last_trade.get("result") or "").upper()
             gale_step = int(self.last_trade.get("gale_step") or 0)
             if final_result == "WIN":
@@ -447,7 +489,11 @@ class RobotState:
             elif final_result == "LOSS":
                 data["operation_message"] = "LOSS no Gale 1" if gale_step == 1 else "LOSS"
                 data["voice_message"] = "LOSS no Gale 1" if gale_step == 1 else "LOSS"
-        if self.status == STATUS_WAITING_NEXT_CYCLE and not self.operation_in_progress:
+        if (
+            self.status == STATUS_WAITING_NEXT_CYCLE
+            and not self.operation_in_progress
+            and not (self.pending_signal or self.best_candidate)
+        ):
             data["strategy_reason"] = "Analisando mercado em silêncio. A entrada será revelada quando o contador zerar."
             data["used_strategies"] = []
             data["candle_reading"] = None
@@ -491,18 +537,18 @@ class RobotState:
                     result = str(trade.get("result") or "").strip().upper()
                     data["result_waiting"] = result not in {"WIN", "LOSS", "TIMEOUT"}
                     if data["result_waiting"]:
-                        data["status"] = STATUS_PENDING_RESULT
+                        data["status"] = STATUS_WAITING_RESULT
                 result = str(trade.get("result") or "").strip().upper()
                 if result not in {"WIN", "LOSS"}:
                     if int(data["expiration_seconds"]) <= 0:
-                        data["status"] = STATUS_PENDING_RESULT
+                        data["status"] = STATUS_WAITING_RESULT
                         data["result_waiting"] = True
                         data["operation_message"] = RESULT_WAITING_MESSAGE
                         data["expiration_display"] = RESULT_WAITING_MESSAGE
                         data["show_expiration_countdown"] = False
                     else:
                         countdown = format_mm_ss(int(data["expiration_seconds"]))
-                        data["operation_message"] = f"Expira em {countdown}"
+                        data["operation_message"] = "Operação aberta"
                         data["expiration_display"] = countdown
                         data["show_expiration_countdown"] = True
         total = self.wins + self.losses
@@ -593,7 +639,7 @@ class AutoTrader:
         if str(state.active_mode or "").strip().upper() == "DEMO" or state.active_mode is None:
             state.active_mode = "REAL"
         if state.status == "WAITING_ENTRY_WINDOW":
-            state.status = STATUS_WAITING_NEXT_CANDLE_ENTRY
+            state.status = STATUS_WAITING_ENTRY
         if state.status == STATUS_PENDING_RESULT and state.gale_active:
             state.status = STATUS_PENDING_GALE_RESULT
         if state.status in {STATUS_SYNCING, STATUS_SYNCING_PT} and state.sync_started_at is None:
@@ -602,14 +648,14 @@ class AutoTrader:
             state.status = STATUS_GALE_RESULT_RECEIVED
 
         result_visible = (
-            state.status in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED}
+            state.status in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED, STATUS_WIN, STATUS_LOSS}
             and state.result_display_until is not None
             and utc_now() < state.result_display_until
         )
         if result_visible:
             state.operation_in_progress = False
         elif state.enabled and state.pending_signal:
-            state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_NEXT_CANDLE_ENTRY
+            state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_ENTRY
             state.rejection_reason = None
         elif state.enabled and not state.operation_in_progress:
             state.status = STATUS_WAITING_NEXT_CYCLE
@@ -824,7 +870,7 @@ class AutoTrader:
                 return False, state
             state.status = STATUS_WAITING_NEXT_CYCLE
             state.rejection_reason = None
-        if state.status in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED} and state.result_display_until is not None:
+        if state.status in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED, STATUS_WIN, STATUS_LOSS} and state.result_display_until is not None:
             if now < state.result_display_until:
                 return False, state
             if state.status == STATUS_GALE_RESULT_RECEIVED:
@@ -847,15 +893,15 @@ class AutoTrader:
             state.metrics = {}
         last_trade_result = str((state.last_trade or {}).get("result") or "").upper()
         result_waiting = (
-            state.status in {STATUS_PENDING_RESULT, STATUS_PENDING_GALE_RESULT}
+            state.status in {STATUS_PENDING_RESULT, STATUS_PENDING_GALE_RESULT, STATUS_WAITING_RESULT}
             and last_trade_result not in {"WIN", "LOSS", "TIMEOUT"}
         )
         if state.operation_in_progress or result_waiting:
             state.operation_in_progress = True
-            state.status = STATUS_PENDING_GALE_RESULT if state.gale_active else STATUS_PENDING_RESULT
+            state.status = STATUS_PENDING_GALE_RESULT if state.gale_active else STATUS_WAITING_RESULT
             return False, state
         if state.pending_signal:
-            state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_NEXT_CANDLE_ENTRY
+            state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_ENTRY
             return True, state
         if state.next_cycle_at is not None and now < state.next_cycle_at:
             state.status = STATUS_WAITING_NEXT_CYCLE
@@ -1103,7 +1149,7 @@ class AutoTrader:
         }
         state.last_signal = dict(pending_signal)
         state.pending_signal = pending_signal
-        state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_NEXT_CANDLE_ENTRY
+        state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_SIGNAL_FOUND
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.last_analysis_at = utc_now()
@@ -1507,13 +1553,16 @@ class AutoTrader:
         if not state.enabled:
             raise RuntimeError("ROBOT_STOPPED")
         if state.status not in {
+            STATUS_SIGNAL_FOUND,
+            STATUS_WAITING_ENTRY,
             STATUS_WAITING_NEXT_CANDLE_ENTRY,
             STATUS_WAITING_GALE_ENTRY,
+            STATUS_BUYING,
             STATUS_SENDING_ORDER,
             STATUS_SENDING_GALE_ORDER,
         } or not state.pending_signal:
             raise RuntimeError("INVALID_ORDER_STATE_TRANSITION")
-        state.status = STATUS_SENDING_GALE_ORDER if state.gale_pending else STATUS_SENDING_ORDER
+        state.status = STATUS_SENDING_GALE_ORDER if state.gale_pending else STATUS_BUYING
         state.rejection_reason = None
         state.rejected_at = None
         state.last_order_error = None
@@ -1567,7 +1616,7 @@ class AutoTrader:
         state.result_display_until = None
         state.operation_in_progress = True
         is_gale = bool(trade.get("is_gale"))
-        state.status = STATUS_PENDING_GALE_RESULT if is_gale else STATUS_PENDING_RESULT
+        state.status = STATUS_PENDING_GALE_RESULT if is_gale else STATUS_WAITING_RESULT
         state.rejection_reason = None
         state.last_order_error = None
         if is_gale:
@@ -1632,7 +1681,7 @@ class AutoTrader:
             and not state.operation_in_progress
             and state.pending_signal
         ):
-            state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_NEXT_CANDLE_ENTRY
+            state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_ENTRY
             state.rejection_reason = None
         elif (
             state.entry_window_open
@@ -1829,9 +1878,7 @@ class AutoTrader:
         completed.add(normalized_order_id)
         state.last_trade = trade
         state.operation_in_progress = False
-        state.status = (
-            STATUS_GALE_RESULT_RECEIVED if is_gale_trade else STATUS_RESULT_RECEIVED
-        ) if state.enabled else STATUS_STOPPED
+        state.status = normalized_result if state.enabled else STATUS_STOPPED
         state.rejection_reason = None
         state.last_rejection_reason = None
         state.result_received_at = finished_at

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 from backend.auto_trader import (
     AutoTrader,
     STATUS_ACCOUNT_DISCONNECTED,
+    STATUS_BUYING,
     STATUS_GALE_RESULT_RECEIVED,
     STATUS_ORDER_REJECTED,
     STATUS_PENDING_GALE_RESULT,
@@ -15,10 +16,14 @@ from backend.auto_trader import (
     STATUS_RESULT_RECEIVED,
     STATUS_SENDING_GALE_ORDER,
     STATUS_SENDING_ORDER,
+    STATUS_SIGNAL_FOUND,
     STATUS_SIGNAL_EXPIRED,
     STATUS_STOPPED,
+    STATUS_WAITING_ENTRY,
     STATUS_WAITING_GALE_ENTRY,
+    STATUS_WAITING_RESULT,
     STATUS_WAITING_NEXT_CYCLE,
+    STATUS_WIN,
     utc_now,
 )
 from backend import main
@@ -97,7 +102,7 @@ class AutoTraderStateTests(unittest.TestCase):
         sending_status = sending.status
         rejected = trader.reject_order("user-order-transition", "active suspended")
 
-        self.assertEqual(sending_status, STATUS_SENDING_ORDER)
+        self.assertEqual(sending_status, STATUS_BUYING)
         self.assertEqual(rejected.status, STATUS_ORDER_REJECTED)
         self.assertNotEqual(rejected.status, "ANALYZING")
         self.assertFalse(rejected.operation_in_progress)
@@ -959,7 +964,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             response = await main.robot_state({"user_id": user_id})
 
         payload = json.loads(response.body)["data"]
-        self.assertEqual(payload["status"], STATUS_RESULT_RECEIVED)
+        self.assertEqual(payload["status"], STATUS_WIN)
         self.assertEqual(payload["last_trade"]["result"], "WIN")
         self.assertIsNotNone(payload["last_trade"]["finished_at"])
         self.assertIsNotNone(payload["result_received_at"])
@@ -995,11 +1000,11 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                 return 200, main.build_success(
                     {
                         "connected": True,
-                        "active_mode": "PRACTICE",
+                        "active_mode": "REAL",
                         "server_time": SERVER_TIME_M1_OPEN,
                     }
                 )
-            if path == "/orders/buy-demo":
+            if path == "/bullex/buy-real":
                 return 200, main.build_success({"order_id": "demo-1"})
             raise AssertionError(f"unexpected path: {path}")
 
@@ -1070,7 +1075,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                 return 200, main.build_success(
                     {
                         "connected": True,
-                        "active_mode": "PRACTICE",
+                        "active_mode": "REAL",
                         "server_time": 20.0,
                     }
                 )
@@ -1570,7 +1575,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             status_code, payload = await main.execute_robot_cycle(user_id)
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["data"]["status"], "PENDING_RESULT")
+        self.assertEqual(payload["data"]["status"], "WAITING_RESULT")
         self.assertTrue(payload["data"]["operation_in_progress"])
         bullex.assert_not_awaited()
         scan.assert_not_awaited()
@@ -1664,7 +1669,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_order_status_is_sending_while_bullex_order_is_in_flight(self) -> None:
         user_id = "user-sending"
-        main.auto_trader.start(user_id)
+        state = main.auto_trader.start(user_id)
         main.auto_trader.set_pending_signal(
             user_id,
             {
@@ -1686,7 +1691,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                         "server_time": SERVER_TIME_M1_OPEN,
                     }
                 )
-            if path == "/orders/buy-demo":
+            if path in {"/bullex/buy-real", "/orders/buy-real"}:
                 order_started.set()
                 await release_order.wait()
                 return 200, main.build_success({"order_id": "sending-1"})
@@ -1702,7 +1707,18 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             sending_from_statuses.append(main.auto_trader.get(call_user_id).status)
             return original_start_sending(call_user_id)
 
+        entry_window = main.get_entry_window(state.timeframe, SERVER_TIME_M1_OPEN, server_time_source="bullex")
         with (
+            patch.object(
+                main,
+                "refresh_entry_window",
+                new=AsyncMock(return_value=(200, main.build_success({"connected": True, "active_mode": "REAL"}), entry_window)),
+            ),
+            patch.object(
+                main,
+                "reconcile_robot_connection_from_payload",
+                new=AsyncMock(return_value=(state, True, "REAL", "bullex_service")),
+            ),
             patch.object(main, "call_bullex_service", side_effect=fake_bullex),
             patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
             patch.object(
@@ -1718,12 +1734,12 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             release_order.set()
             status_code, payload = await task
 
-        self.assertEqual(sending_payload["status"], STATUS_SENDING_ORDER)
+        self.assertEqual(sending_payload["status"], STATUS_BUYING)
         self.assertFalse(sending_payload["operation_in_progress"])
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["data"]["status"], STATUS_PENDING_RESULT)
+        self.assertEqual(payload["data"]["status"], STATUS_WAITING_RESULT)
         self.assertTrue(payload["data"]["operation_in_progress"])
-        self.assertEqual(sending_from_statuses, ["WAITING_NEXT_CANDLE_ENTRY"])
+        self.assertEqual(sending_from_statuses, [STATUS_SIGNAL_FOUND])
 
     async def test_successful_order_goes_to_pending_result_with_last_trade_contract(self) -> None:
         user_id = "user-order-success"
@@ -1744,11 +1760,11 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
                 return 200, main.build_success(
                     {
                         "connected": True,
-                        "active_mode": "PRACTICE",
+                        "active_mode": "REAL",
                         "server_time": SERVER_TIME_M1_OPEN,
                     }
                 )
-            if path == "/orders/buy-demo":
+            if path in {"/bullex/buy-real", "/orders/buy-real"}:
                 return 200, main.build_success({"order_id": "success-1"})
             raise AssertionError(f"unexpected path: {path}")
 
@@ -1756,7 +1772,18 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             [{"symbol": "EURUSD-OTC", "signal": "PUT", "confidence": 94, "strength": 80}]
         )
 
+        entry_window = main.get_entry_window(state.timeframe, SERVER_TIME_M1_OPEN, server_time_source="bullex")
         with (
+            patch.object(
+                main,
+                "refresh_entry_window",
+                new=AsyncMock(return_value=(200, main.build_success({"connected": True, "active_mode": "REAL"}), entry_window)),
+            ),
+            patch.object(
+                main,
+                "reconcile_robot_connection_from_payload",
+                new=AsyncMock(return_value=(state, True, "REAL", "bullex_service")),
+            ),
             patch.object(main, "call_bullex_service", side_effect=fake_bullex),
             patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, scan_payload))),
             patch.object(main.trade_result_monitor, "start", return_value=True),
@@ -1766,7 +1793,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
 
         trade = payload["data"]["last_trade"]
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["data"]["status"], STATUS_PENDING_RESULT)
+        self.assertEqual(payload["data"]["status"], STATUS_WAITING_RESULT)
         self.assertTrue(payload["data"]["operation_in_progress"])
         self.assertIsNotNone(payload["data"]["last_signal"])
         self.assertEqual(trade["order_id"], "success-1")
@@ -1776,7 +1803,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(trade["sent_at"])
         self.assertEqual(trade["expiration"], "M1")
         self.assertEqual(trade["result"], STATUS_PENDING_RESULT)
-        self.assertEqual(trade["server_time_at_send"], "1970-01-01T00:00:25+00:00")
+        self.assertEqual(trade["server_time_at_send"], "1970-01-01T00:00:00+00:00")
         self.assertEqual(trade["server_timestamp_at_send"], SERVER_TIME_M1_OPEN)
         self.assertEqual(trade["expiration_source"], "server_time_aligned")
         self.assertEqual(
@@ -1784,7 +1811,9 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             datetime.fromtimestamp(61, timezone.utc).isoformat(),
         )
         output = "\n".join(logs.output)
-        self.assertIn("[ORDER_SEND_START]", output)
+        self.assertIn("[STATE] BUYING", output)
+        self.assertIn("[STATE] ORDER_OPEN", output)
+        self.assertIn("[STATE] WAITING_RESULT", output)
         self.assertIn("[EXPIRATION_SET]", output)
         self.assertIn("[ORDER_SEND_SUCCESS]", output)
 
@@ -2778,7 +2807,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
 
         data = payload["data"]
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], "WAITING_NEXT_CANDLE_ENTRY")
+        self.assertEqual(data["status"], "WAITING_ENTRY")
         self.assertEqual(data["entry_target"], "NEXT_CANDLE_OPEN")
         self.assertEqual(data["seconds_until_entry"], 55)
         self.assertIsNotNone(data["pending_signal"])
@@ -3058,14 +3087,14 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             status_code, payload = await main.execute_robot_cycle(user_id)
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["data"]["status"], "WAITING_NEXT_CANDLE_ENTRY")
+        self.assertEqual(payload["data"]["status"], "WAITING_ENTRY")
         self.assertIsNone(payload["data"]["rejection_reason"])
         self.assertIsNotNone(payload["data"]["pending_signal"])
         self.assertEqual(payload["data"]["seconds_until_entry_window"], 30)
         scan.assert_not_awaited()
         output = "\n".join(logs.output)
         self.assertIn("[ENTRY_SCHEDULED_NEXT_CANDLE]", output)
-        self.assertIn("[WAITING_NEXT_CANDLE_ENTRY]", output)
+        self.assertIn("[STATE] WAITING_ENTRY", output)
 
     async def test_m5_sends_five_minute_expiration(self) -> None:
         user_id = "user-m5"

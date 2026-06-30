@@ -29,6 +29,7 @@ from backend.status import (
     STATUS_ACTIVE_COOLDOWN,
     STATUS_ANALYZING,
     STATUS_BULLEX_ACTIVE_MODE_NOT_REAL,
+    STATUS_BUYING,
     STATUS_CONNECTION_BACKOFF,
     STATUS_INSUFFICIENT_BALANCE,
     STATUS_ORDER_REJECTED,
@@ -37,13 +38,16 @@ from backend.status import (
     STATUS_PENDING_RESULT,
     STATUS_SENDING_GALE_ORDER,
     STATUS_SENDING_ORDER,
+    STATUS_SIGNAL_FOUND,
     STATUS_SIGNAL_EXPIRED,
     STATUS_STOP_LOSS_HIT,
     STATUS_STOP_WIN_HIT,
     STATUS_STOPPED,
     STATUS_WAITING_ANALYSIS_WINDOW,
+    STATUS_WAITING_ENTRY,
     STATUS_WAITING_ENTRY_WINDOW,
     STATUS_WAITING_GALE_ENTRY,
+    STATUS_WAITING_RESULT,
     STATUS_WAITING_NEXT_CYCLE,
     STATUS_WAITING_RECOVERY,
     TEMPORARY_WAIT_STATUSES,
@@ -2836,13 +2840,43 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         last_tick_at = robot_worker_last_tick_at.get(str(user_id))
         data["worker_running"] = bool(worker_task is not None and not worker_task.done())
         data["worker_last_tick_at"] = last_tick_at.isoformat() if last_tick_at is not None else None
+        has_locked_signal = bool(data.get("pending_signal") or data.get("best_candidate"))
+        has_open_operation = bool(data.get("operation_in_progress") or data.get("result_waiting"))
+        has_result_display = data.get("status") in {"WIN", "LOSS"} or (
+            str(data.get("cycle_result") or "").upper() in {"WIN", "LOSS"}
+            and data.get("result_display_until")
+        )
         if data.get("enabled") and data["worker_running"] and data.get("status") in {
             STATUS_STOPPED,
             STATUS_WAITING_NEXT_CYCLE,
-        }:
+        } and not (has_locked_signal or has_open_operation or has_result_display):
             data["status"] = STATUS_ANALYZING
     data.update(strip_ai_fields(extra))
     data["status"] = normalize_robot_status(data.get("status"))
+    visible_result_status = str(data.get("status") or "").upper()
+    visible_cycle_result = str(data.get("cycle_result") or "").upper()
+    if data.get("operation_in_progress") or data.get("result_waiting"):
+        data["status"] = STATUS_WAITING_RESULT
+        data["analysis_message"] = None
+        data["operation_message"] = data.get("operation_message") or "Operação aberta"
+    elif data.get("status") in {STATUS_SENDING_ORDER, STATUS_SENDING_GALE_ORDER, STATUS_BUYING}:
+        data["status"] = STATUS_BUYING
+        data["analysis_message"] = None
+        data["operation_message"] = data.get("operation_message") or "Executando ordem"
+    elif visible_result_status in {"WIN", "LOSS"} or (
+        visible_cycle_result in {"WIN", "LOSS"} and data.get("result_display_until")
+    ):
+        data["status"] = visible_result_status if visible_result_status in {"WIN", "LOSS"} else visible_cycle_result
+        data["analysis_message"] = None
+        data["operation_message"] = data.get("operation_message") or data["status"]
+    elif data.get("pending_signal"):
+        data["status"] = STATUS_WAITING_ENTRY
+        data["analysis_message"] = None
+        data["status_message"] = data.get("status_message") or "Melhor ativo encontrado"
+    elif data.get("best_candidate") and data.get("status") in {STATUS_ANALYZING, STATUS_WAITING_NEXT_CYCLE, STATUS_SIGNAL_FOUND}:
+        data["status"] = STATUS_SIGNAL_FOUND
+        data["analysis_message"] = None
+        data["status_message"] = data.get("status_message") or "Melhor ativo encontrado"
     data["account_mode"] = "REAL"
     data["allow_real"] = True
     data["confirm_real"] = True
@@ -4056,6 +4090,19 @@ async def finish_monitored_trade(user_id: str, order_id: str, result: str, profi
                 state.last_trade.get("profit"),
             )
             logger.info(
+                "[STATE] RESULT_%s user_id=%s order_id=%s",
+                str(result).upper(),
+                user_id,
+                order_id,
+            )
+            logger.info(
+                "[STATE] SHOW_RESULT user_id=%s order_id=%s result=%s result_display_until=%s",
+                user_id,
+                order_id,
+                result,
+                state.result_display_until,
+            )
+            logger.info(
                 "[TRADE_RESULT] user_id=%s order_id=%s result=%s profit=%s",
                 user_id,
                 order_id,
@@ -4186,7 +4233,8 @@ async def execute_robot_cycle(
                 and str((state.last_trade or {}).get("result") or "").upper() not in {"WIN", "LOSS", "TIMEOUT"}
             )
             if state.operation_in_progress or result_waiting:
-                state.status = STATUS_PENDING_GALE_RESULT if state.gale_active else STATUS_PENDING_RESULT
+                state.status = STATUS_PENDING_GALE_RESULT if state.gale_active else STATUS_WAITING_RESULT
+                logger.info("[STATE] WAITING_RESULT user_id=%s order_id=%s", user_id, (state.last_trade or {}).get("order_id"))
                 logger.info("[RESULT_WAIT_ONLY] user_id=%s status=%s", user_id, state.status)
                 return 200, build_robot_payload(state)
 
@@ -4328,7 +4376,7 @@ async def execute_robot_cycle(
                 return 200, build_robot_payload(state)
             selected = dict(state.pending_signal) if state.pending_signal else None
             if selected is not None and not state.operation_in_progress:
-                state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_ENTRY_WINDOW
+                state.status = STATUS_WAITING_GALE_ENTRY if state.gale_pending else STATUS_WAITING_ENTRY
                 state.rejection_reason = None
             seconds_until_next_cycle = state.to_dict()["seconds_until_next_cycle"]
             if (
@@ -4397,6 +4445,7 @@ async def execute_robot_cycle(
                     selected.get("confidence"),
                     selected.get("payout"),
                 )
+                logger.info("[STATE] SIGNAL_FOUND user_id=%s cycle_id=%s", user_id, state.cycle_id)
                 logger.info(
                     "[SIGNAL_PREPARED] user_id=%s cycle_id=%s symbol=%s direction=%s seconds_until_entry=%s",
                     user_id,
@@ -4443,6 +4492,7 @@ async def execute_robot_cycle(
                     user_id,
                     state.cycle_id,
                 )
+                logger.info("[STATE] ANALYZING user_id=%s cycle_id=%s", user_id, state.cycle_id)
                 logger.info(
                     "[WORKER_ANALYSIS_STARTED] user_id=%s cycle_id=%s",
                     user_id,
@@ -4735,6 +4785,7 @@ async def execute_robot_cycle(
                     selected.get("confidence"),
                     selected.get("payout"),
                 )
+                logger.info("[STATE] SIGNAL_FOUND user_id=%s cycle_id=%s", user_id, state.cycle_id)
                 logger.info(
                     "[SIGNAL_PREPARED] user_id=%s cycle_id=%s symbol=%s direction=%s seconds_until_entry=%s",
                     user_id,
@@ -4770,7 +4821,7 @@ async def execute_robot_cycle(
                         state.best_candidate = dict(selected)
                         state.cycle_best_candidate = dict(selected)
                         state.cycle_best_trade_candidate = dict(selected)
-                        state.status = STATUS_WAITING_ENTRY_WINDOW
+                        state.status = STATUS_WAITING_ENTRY
                         state.rejection_reason = None
                         state.seconds_until_entry_window = int(entry_window["seconds_until_entry_window"])
                         logger.info(
@@ -4781,6 +4832,7 @@ async def execute_robot_cycle(
                             state.seconds_until_entry_window,
                             target_timestamp,
                         )
+                        logger.info("[STATE] WAITING_ENTRY user_id=%s cycle_id=%s", user_id, state.cycle_id)
                     elif float(entry_window["server_timestamp"]) > (
                         float(target_timestamp) + float(entry_window["entry_window_end_second"])
                     ):
@@ -4806,10 +4858,11 @@ async def execute_robot_cycle(
                         )
                         return 200, build_robot_payload(state, user_id=user_id)
                     else:
-                        state.status = STATUS_WAITING_ENTRY_WINDOW
+                        state.status = STATUS_WAITING_ENTRY
                         state.rejection_reason = None
                         state.seconds_until_entry_window = int(entry_window["seconds_until_entry_window"])
                 waiting_log = "[WAITING_GALE_ENTRY]" if state.gale_pending else "[WAITING_NEXT_CANDLE_ENTRY]"
+                logger.info("[STATE] WAITING_ENTRY user_id=%s cycle_id=%s", user_id, state.cycle_id)
                 logger.info(
                     "%s user_id=%s symbol=%s server_time=%s timeframe=%s current_candle_seconds=%s "
                     "seconds_until_entry=%s window_start=%s window_end=%s",
@@ -4972,9 +5025,10 @@ async def execute_robot_cycle(
                     selected.get("confidence"),
                 )
                 state = auto_trader.start_sending_order(user_id)
+                logger.info("[STATE] BUYING user_id=%s cycle_id=%s symbol=%s direction=%s", user_id, state.cycle_id, symbol, direction)
                 logger.info(
                     "[%s] user_id=%s symbol=%s direction=%s",
-                    "SENDING_GALE_ORDER" if is_gale_order else "SENDING_ORDER",
+                    "SENDING_GALE_ORDER" if is_gale_order else "BUYING",
                     user_id,
                     symbol,
                     direction,
@@ -5186,6 +5240,15 @@ async def execute_robot_cycle(
                     "cycle_id": state.cycle_id,
                     "order_attempts": state.order_attempts,
                     "fallback_candidate_used": state.fallback_candidate_used,
+                    "strategy_name": selected.get("strategy_name"),
+                    "strategy_reason": selected.get("strategy_reason"),
+                    "entry_reason": selected.get("entry_reason"),
+                    "used_strategies": list(selected.get("used_strategies") or []),
+                    "candle_reading": selected.get("candle_reading"),
+                    "strategy_score": int(selected.get("strategy_score") or selected.get("score") or 0),
+                    "quality_score": int(selected.get("quality_score") or 0),
+                    "block_reasons": list(selected.get("block_reasons") or selected.get("blocked_filters") or []),
+                    "metrics": dict(selected.get("metrics") or {}),
                     "is_gale": is_gale_order,
                     "gale_step": int(selected.get("gale_step") or (1 if is_gale_order else 0)),
                     "parent_order_id": selected.get("parent_order_id") or state.gale_original_order_id,
@@ -5196,14 +5259,10 @@ async def execute_robot_cycle(
                 }
                 trade["timestamp"] = trade["sent_at"]
                 state = auto_trader.record_trade(user_id, trade)
+                logger.info("[STATE] ORDER_OPEN user_id=%s cycle_id=%s order_id=%s", user_id, state.cycle_id, order_id)
+                logger.info("[STATE] WAITING_RESULT user_id=%s cycle_id=%s order_id=%s", user_id, state.cycle_id, order_id)
                 invalidate_account_cache(user_id)
-                state.pending_signal = None
                 state.entry_window_open = False
-                logger.info(
-                    "[PENDING_SIGNAL_CLEARED] user_id=%s symbol=%s reason=TRADE_SENT",
-                    user_id,
-                    symbol,
-                )
                 logger.info(
                     "[EXPIRATION_SET] user_id=%s order_id=%s timeframe=%s expected_expire_at=%s source=%s server_time_at_send=%s",
                     user_id,
@@ -5387,7 +5446,7 @@ async def robot_worker(user_id: str) -> None:
             state = auto_trader.get(user_id)
             if not state.enabled:
                 break
-            if state.status == STATUS_WAITING_ENTRY_WINDOW:
+            if state.status in {STATUS_WAITING_ENTRY_WINDOW, STATUS_WAITING_ENTRY}:
                 delay = max(1, state.seconds_until_entry_window)
             elif state.status in TEMPORARY_WAIT_STATUSES:
                 delay = max(1, state.to_dict()["seconds_until_next_cycle"])
