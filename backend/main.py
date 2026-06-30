@@ -4389,6 +4389,15 @@ async def execute_robot_cycle(
                     state.fallback_candidate_used = True
                 selected = dict(state.pending_signal or {})
                 logger.info(
+                    "[SIGNAL_FOUND] user_id=%s cycle_id=%s symbol=%s direction=%s confidence=%s payout=%s",
+                    user_id,
+                    state.cycle_id,
+                    selected.get("symbol"),
+                    selected.get("signal") or selected.get("direction"),
+                    selected.get("confidence"),
+                    selected.get("payout"),
+                )
+                logger.info(
                     "[SIGNAL_PREPARED] user_id=%s cycle_id=%s symbol=%s direction=%s seconds_until_entry=%s",
                     user_id,
                     state.cycle_id,
@@ -4718,6 +4727,15 @@ async def execute_robot_cycle(
                 state = auto_trader.set_pending_signal(user_id, selected)
                 selected = dict(state.pending_signal or {})
                 logger.info(
+                    "[SIGNAL_FOUND] user_id=%s cycle_id=%s symbol=%s direction=%s confidence=%s payout=%s",
+                    user_id,
+                    state.cycle_id,
+                    selected.get("symbol"),
+                    selected.get("signal") or selected.get("direction"),
+                    selected.get("confidence"),
+                    selected.get("payout"),
+                )
+                logger.info(
                     "[SIGNAL_PREPARED] user_id=%s cycle_id=%s symbol=%s direction=%s seconds_until_entry=%s",
                     user_id,
                     state.cycle_id,
@@ -4738,27 +4756,59 @@ async def execute_robot_cycle(
 
             if selected is not None and not entry_window["entry_window_open"]:
                 if entry_window["missed_entry_window"]:
-                    logger.warning(
-                        "[ENTRY_WINDOW_MISSED] user_id=%s symbol=%s server_time=%s "
-                        "timeframe=%s current_candle_seconds=%s window_end=%s",
-                        user_id,
-                        selected.get("symbol"),
-                        entry_window["server_time"],
-                        state.timeframe,
-                        entry_window["current_candle_seconds"],
-                        entry_window["entry_window_end_second"],
-                    )
-                    state = auto_trader.expire_pending_signal(
-                        user_id,
-                        reason="ENTRY_WINDOW_MISSED",
-                        wait_seconds=5,
-                    )
-                    logger.warning(
-                        "[SIGNAL_EXPIRED] user_id=%s cycle_id=%s reason=ENTRY_WINDOW_MISSED",
-                        user_id,
-                        state.cycle_id,
-                    )
-                    return 200, build_robot_payload(state, user_id=user_id)
+                    target_timestamp = selected.get("target_entry_timestamp")
+                    if target_timestamp is None:
+                        target_timestamp = (
+                            float(entry_window["server_timestamp"])
+                            + float(entry_window["seconds_until_entry_window"])
+                        )
+                        selected["target_entry_timestamp"] = target_timestamp
+                        selected["entry_target"] = "NEXT_CANDLE_OPEN"
+                        selected["target_entry_second"] = int(entry_window["buy_target_second"])
+                        state.pending_signal = dict(selected)
+                        state.last_signal = dict(selected)
+                        state.best_candidate = dict(selected)
+                        state.cycle_best_candidate = dict(selected)
+                        state.cycle_best_trade_candidate = dict(selected)
+                        state.status = STATUS_WAITING_ENTRY_WINDOW
+                        state.rejection_reason = None
+                        state.seconds_until_entry_window = int(entry_window["seconds_until_entry_window"])
+                        logger.info(
+                            "[ENTRY_SCHEDULED_NEXT_CANDLE] user_id=%s cycle_id=%s symbol=%s seconds_until_entry=%s target_entry_timestamp=%s",
+                            user_id,
+                            state.cycle_id,
+                            selected.get("symbol"),
+                            state.seconds_until_entry_window,
+                            target_timestamp,
+                        )
+                    elif float(entry_window["server_timestamp"]) > (
+                        float(target_timestamp) + float(entry_window["entry_window_end_second"])
+                    ):
+                        logger.warning(
+                            "[ENTRY_WINDOW_MISSED] user_id=%s symbol=%s server_time=%s "
+                            "timeframe=%s current_candle_seconds=%s window_end=%s",
+                            user_id,
+                            selected.get("symbol"),
+                            entry_window["server_time"],
+                            state.timeframe,
+                            entry_window["current_candle_seconds"],
+                            entry_window["entry_window_end_second"],
+                        )
+                        state = auto_trader.expire_pending_signal(
+                            user_id,
+                            reason="ENTRY_WINDOW_MISSED",
+                            wait_seconds=max(1, int(entry_window["seconds_until_entry_window"])),
+                        )
+                        logger.warning(
+                            "[SIGNAL_EXPIRED] user_id=%s cycle_id=%s reason=ENTRY_WINDOW_MISSED",
+                            user_id,
+                            state.cycle_id,
+                        )
+                        return 200, build_robot_payload(state, user_id=user_id)
+                    else:
+                        state.status = STATUS_WAITING_ENTRY_WINDOW
+                        state.rejection_reason = None
+                        state.seconds_until_entry_window = int(entry_window["seconds_until_entry_window"])
                 waiting_log = "[WAITING_GALE_ENTRY]" if state.gale_pending else "[WAITING_NEXT_CANDLE_ENTRY]"
                 logger.info(
                     "%s user_id=%s symbol=%s server_time=%s timeframe=%s current_candle_seconds=%s "

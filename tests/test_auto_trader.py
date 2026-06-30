@@ -2241,7 +2241,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         user_id = "user-state-account-connected"
         state = main.auto_trader.start(user_id)
         state.connected = True
-        state.active_mode = "PRACTICE"
+        state.active_mode = "REAL"
 
         with patch.object(main, "call_bullex_service", new=AsyncMock()) as upstream:
             response = await main.robot_state({"user_id": user_id})
@@ -2723,7 +2723,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(data["worker_running"])
         stop_worker.assert_awaited_once_with(user_id)
 
-    async def test_execute_robot_cycle_expires_missed_pending_signal(self) -> None:
+    async def test_execute_robot_cycle_schedules_missed_pending_signal_for_next_candle(self) -> None:
         user_id = "user-expired-entry"
         state = main.auto_trader.start(user_id)
         state.connected = True
@@ -2765,12 +2765,12 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 main,
                 "refresh_entry_window",
-                new=AsyncMock(return_value=(200, main.build_success({"connected": True, "active_mode": "PRACTICE"}), entry_window)),
+                new=AsyncMock(return_value=(200, main.build_success({"connected": True, "active_mode": "REAL"}), entry_window)),
             ),
             patch.object(
                 main,
                 "reconcile_robot_connection_from_payload",
-                new=AsyncMock(return_value=(state, True, "PRACTICE", "bullex_service")),
+                new=AsyncMock(return_value=(state, True, "REAL", "bullex_service")),
             ),
             patch.object(main, "persist_robot"),
         ):
@@ -2778,10 +2778,12 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
 
         data = payload["data"]
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], "SIGNAL_EXPIRED")
-        self.assertEqual(data["operation_message"], "Entrada perdida por atraso. Aguardando novo sinal.")
-        self.assertEqual(data["last_order_error"], "ENTRY_WINDOW_MISSED")
-        self.assertIsNone(data["pending_signal"])
+        self.assertEqual(data["status"], "WAITING_NEXT_CANDLE_ENTRY")
+        self.assertEqual(data["entry_target"], "NEXT_CANDLE_OPEN")
+        self.assertEqual(data["seconds_until_entry"], 55)
+        self.assertIsNotNone(data["pending_signal"])
+        self.assertEqual(data["pending_signal"]["symbol"], "EURUSD-OTC")
+        self.assertEqual(data["best_candidate"]["symbol"], "EURUSD-OTC")
 
     async def test_robot_state_ignores_legacy_allow_real_flag_for_real_readiness(self) -> None:
         user_id = "user-real-allow-required"
@@ -3029,6 +3031,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_missed_next_candle_window_keeps_pending_signal_locked(self) -> None:
         user_id = "user-window-missed"
         state = main.auto_trader.start(user_id)
+        state.active_mode = "REAL"
         main.auto_trader.set_pending_signal(
             user_id,
             {
@@ -3043,7 +3046,7 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
             if path == "/sessions/status":
                 return 200, main.build_success(
-                    {"connected": True, "active_mode": "PRACTICE", "server_time": 30.0}
+                    {"connected": True, "active_mode": "REAL", "server_time": 30.0}
                 )
             raise AssertionError(f"unexpected path: {path}")
 
@@ -3061,7 +3064,8 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["data"]["seconds_until_entry_window"], 30)
         scan.assert_not_awaited()
         output = "\n".join(logs.output)
-        self.assertIn("[MISSED_NEXT_CANDLE_ENTRY_WINDOW]", output)
+        self.assertIn("[ENTRY_SCHEDULED_NEXT_CANDLE]", output)
+        self.assertIn("[WAITING_NEXT_CANDLE_ENTRY]", output)
 
     async def test_m5_sends_five_minute_expiration(self) -> None:
         user_id = "user-m5"
