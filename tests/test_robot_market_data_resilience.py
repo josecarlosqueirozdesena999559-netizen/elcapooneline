@@ -72,6 +72,37 @@ class RobotMarketDataResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[ACTIVE_TIMEOUT]", output)
         self.assertIn("[ASSET_SCORE]", output)
 
+    async def test_batch_timeout_does_not_cooldown_every_active(self) -> None:
+        async def fake_analyze_active_signal(
+            user_id: str,
+            symbol: str,
+            timeframe: str = "M1",
+            endtime: int | None = None,
+            strategy_mode: str = "conservative",
+        ):
+            await asyncio.sleep(1)
+
+        assets = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC"]
+        with (
+            patch.object(main, "ANALYSIS_ASSETS", assets),
+            patch.object(main, "ACTIVE_DATA_TIMEOUT_SECONDS", 0.02),
+            patch.object(main, "analyze_active_signal", side_effect=fake_analyze_active_signal),
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            status_code, payload = await main.scan_local_signals(
+                "batch-timeout-user",
+                limit=10,
+                include_wait=False,
+                max_assets=10,
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"], [])
+        self.assertEqual(main.active_cooldowns.get("batch-timeout-user"), None)
+        output = "\n".join(logs.output)
+        self.assertIn("[ANALYSIS_BATCH_TIMEOUT]", output)
+
     async def test_active_cooldown_uses_cached_candles_and_payout(self) -> None:
         user_id = "cache-cooldown-user"
         symbol = "EURUSD-OTC"

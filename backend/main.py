@@ -3609,7 +3609,7 @@ async def analyze_active_signal(
                     user_id,
                     symbol,
                     seconds=PAYOUT_COOLDOWN_SECONDS,
-                    log_label="ACTIVE_TIMEOUT",
+                    log_label="PAYOUT_TIMEOUT",
                     status=STATUS_PAYOUT_COOLDOWN,
                     reason="PAYOUT_TIMEOUT",
                 )
@@ -3694,15 +3694,6 @@ async def scan_local_signals(
                 cached_signal["from_cache"] = True
                 logger.info("[ACTIVE_CACHE] user_id=%s symbol=%s path=/candles reason=ANALYSIS_TIMEOUT", user_id, symbol)
                 return symbol, 200, build_success(cached_signal)
-            set_named_cooldown(
-                active_cooldowns,
-                user_id,
-                symbol,
-                seconds=ACTIVE_COOLDOWN_SECONDS,
-                log_label="ACTIVE_TIMEOUT",
-                status=STATUS_ACTIVE_COOLDOWN,
-                reason="ACTIVE_TIMEOUT",
-            )
             logger.warning("[ACTIVE_TIMEOUT] user_id=%s symbol=%s phase=analysis", user_id, symbol)
             return symbol, 200, build_success(
                 {
@@ -3713,6 +3704,7 @@ async def scan_local_signals(
                     "quality_reason": "ACTIVE_TIMEOUT",
                     "blocked_filters": ["ACTIVE_TIMEOUT"],
                     "approved_filters": [],
+                    "_analysis_timeout": True,
                 }
             )
         except Exception as exc:
@@ -3730,6 +3722,32 @@ async def scan_local_signals(
             )
 
     results = await asyncio.gather(*(analyze_one(symbol) for symbol in analysis_assets), return_exceptions=False)
+    timed_out_symbols = [
+        symbol
+        for symbol, _status_code, payload in results
+        if isinstance(payload, dict)
+        and payload.get("ok")
+        and isinstance(payload.get("data"), dict)
+        and payload["data"].get("_analysis_timeout")
+    ]
+    all_assets_timed_out = bool(analysis_assets) and len(timed_out_symbols) == len(analysis_assets)
+    if all_assets_timed_out:
+        logger.warning(
+            "[ANALYSIS_BATCH_TIMEOUT] user_id=%s assets=%s action=retry_next_tick",
+            user_id,
+            ",".join(timed_out_symbols),
+        )
+    else:
+        for symbol in timed_out_symbols:
+            set_named_cooldown(
+                active_cooldowns,
+                user_id,
+                symbol,
+                seconds=ACTIVE_COOLDOWN_SECONDS,
+                log_label="ACTIVE_TIMEOUT",
+                status=STATUS_ACTIVE_COOLDOWN,
+                reason="ACTIVE_TIMEOUT",
+            )
 
     for symbol, status_code, payload in results:
         try:
@@ -3862,12 +3880,19 @@ async def select_fallback_candidate(
         try:
             payout = cached_payout
             if payout is None:
-                payout_status, payout_payload = await call_bullex_service(
-                    "GET",
-                    "/payouts",
-                    user_id,
-                    params={"active": symbol},
-                )
+                try:
+                    payout_status, payout_payload = await asyncio.wait_for(
+                        call_bullex_service(
+                            "GET",
+                            "/payouts",
+                            user_id,
+                            params={"active": symbol},
+                        ),
+                        timeout=ACTIVE_DATA_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("[ACTIVE_SKIPPED] user_id=%s symbol=%s reason=FALLBACK_PAYOUT_TIMEOUT", user_id, symbol)
+                    continue
                 log_ignored_disconnect(user_id, "/payouts", payout_payload)
                 payout = (
                     extract_payout(payout_payload, symbol)
@@ -3895,12 +3920,19 @@ async def select_fallback_candidate(
                 }
                 if endtime is not None:
                     candle_params["endtime"] = endtime
-                candle_status, candle_payload = await call_bullex_service(
-                    "GET",
-                    "/candles",
-                    user_id,
-                    params=candle_params,
-                )
+                try:
+                    candle_status, candle_payload = await asyncio.wait_for(
+                        call_bullex_service(
+                            "GET",
+                            "/candles",
+                            user_id,
+                            params=candle_params,
+                        ),
+                        timeout=ACTIVE_DATA_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("[ACTIVE_SKIPPED] user_id=%s symbol=%s reason=FALLBACK_CANDLES_TIMEOUT", user_id, symbol)
+                    continue
                 log_ignored_disconnect(user_id, "/candles", candle_payload)
                 candles = extract_candles(candle_payload) if candle_status < 400 else []
             if not candles:
