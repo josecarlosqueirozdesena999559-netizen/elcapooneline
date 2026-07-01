@@ -2904,6 +2904,22 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
     if user_id is not None:
         worker_task = robot_tasks.get(str(user_id))
         last_tick_at = robot_worker_last_tick_at.get(str(user_id))
+        if (
+            worker_task is not None
+            and not worker_task.done()
+            and last_tick_at is not None
+            and (utc_now() - last_tick_at).total_seconds() > 30
+            and data.get("enabled")
+        ):
+            logger.warning("[WORKER_STALE_RESTART] user_id=%s last_tick_at=%s", user_id, last_tick_at)
+            worker_task.cancel()
+            try:
+                asyncio.get_running_loop()
+                robot_tasks[str(user_id)] = asyncio.create_task(robot_worker(str(user_id)))
+            except RuntimeError:
+                robot_tasks.pop(str(user_id), None)
+            worker_task = robot_tasks.get(str(user_id))
+            last_tick_at = robot_worker_last_tick_at.get(str(user_id))
         data["worker_running"] = bool(worker_task is not None and not worker_task.done())
         data["worker_last_tick_at"] = last_tick_at.isoformat() if last_tick_at is not None else None
         has_locked_signal = bool(data.get("pending_signal") or data.get("best_candidate"))
@@ -4158,10 +4174,43 @@ async def fetch_trade_result(user_id: str, order_id: str) -> tuple[int, dict[str
     return status_code, payload
 
 
+def reset_cycle_after_result(user_id: str) -> Any:
+    logger.info("[CYCLE_RESET_STARTED] user_id=%s", user_id)
+    state = auto_trader.reset_cycle_after_result(user_id)
+    logger.info(
+        "[CYCLE_RESET_DONE] user_id=%s cycle_id=%s next_cycle_at=%s",
+        user_id,
+        state.cycle_id,
+        state.next_cycle_at,
+    )
+    logger.info("[READY_NEXT_CYCLE] user_id=%s cycle_id=%s", user_id, state.cycle_id)
+    persist_robot(user_id)
+    return state
+
+
+def result_display_expired(state: Any) -> bool:
+    if getattr(state, "result_display_until", None) is None:
+        return False
+    if str(getattr(state, "status", "") or "").upper() not in {"WIN", "LOSS", "RESULT_RECEIVED", "GALE_RESULT_RECEIVED"}:
+        return False
+    return utc_now() >= state.result_display_until
+
+
+def waiting_result_stale(state: Any) -> bool:
+    if str(getattr(state, "status", "") or "").upper() != STATUS_WAITING_RESULT:
+        return False
+    trade_result = str(((getattr(state, "last_trade", None) or {}).get("result")) or "").upper()
+    if getattr(state, "operation_in_progress", False) or trade_result not in {"", "WIN", "LOSS", "TIMEOUT"}:
+        return False
+    base = getattr(state, "last_entry_at", None) or getattr(state, "current_cycle_started_at", None)
+    return base is not None and (utc_now() - base).total_seconds() > 90
+
+
 async def finish_monitored_trade(user_id: str, order_id: str, result: str, profit: float) -> None:
     should_pause_worker = False
-    async with auto_trader.lock(user_id):
-        finalized, state = auto_trader.finish_trade(user_id, order_id, result, profit)
+    async with auto_trader.result_lock(user_id):
+        async with auto_trader.cycle_lock(user_id):
+            finalized, state = auto_trader.finish_trade(user_id, order_id, result, profit)
         if not finalized and state.gale_pending:
             logger.info(
                 "[TRADE_RESULT] user_id=%s order_id=%s result=LOSS profit=%s",
@@ -4219,6 +4268,13 @@ async def finish_monitored_trade(user_id: str, order_id: str, result: str, profi
                 order_id,
                 result,
                 state.last_trade.get("profit"),
+            )
+            logger.info(
+                "[CYCLE_RESULT_%s] user_id=%s order_id=%s profit=%s",
+                str(state.cycle_result or result).upper(),
+                user_id,
+                order_id,
+                state.profit,
             )
             logger.info(
                 "[STATE] RESULT_%s user_id=%s order_id=%s",
@@ -4340,8 +4396,10 @@ async def execute_robot_cycle(
     *,
     required_mode: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    async with auto_trader.lock(user_id):
+    async with auto_trader.cycle_lock(user_id):
         state = recover_sync_timeout_if_needed(user_id)
+        if result_display_expired(state) or waiting_result_stale(state):
+            state = reset_cycle_after_result(user_id)
         had_pending_signal = state.pending_signal is not None
         running_analysis = state.analysis_result == "RUNNING" or state.last_analysis_result == "RUNNING"
         if not had_pending_signal and not running_analysis:
@@ -4562,6 +4620,15 @@ async def execute_robot_cycle(
                     selected.get("confidence"),
                     selected.get("payout"),
                     bool(selected.get("fallback_candidate_used")),
+                )
+                logger.info(
+                    "[BEST_CANDIDATE_FOUND] user_id=%s cycle_id=%s symbol=%s direction=%s confidence=%s payout=%s",
+                    user_id,
+                    state.cycle_id,
+                    selected.get("symbol"),
+                    selected.get("direction") or selected.get("signal"),
+                    selected.get("confidence"),
+                    selected.get("payout"),
                 )
                 state = auto_trader.set_pending_signal(user_id, selected)
                 if selected.get("fallback_candidate_used"):
@@ -4893,6 +4960,15 @@ async def execute_robot_cycle(
                     selected["strategy_score"],
                 )
                 logger.info(
+                    "[BEST_CANDIDATE_FOUND] user_id=%s cycle_id=%s symbol=%s direction=%s confidence=%s payout=%s",
+                    user_id,
+                    state.cycle_id,
+                    selected["symbol"],
+                    selected["direction"],
+                    selected["confidence"],
+                    selected["payout"],
+                )
+                logger.info(
                     "[BEST_CANDIDATE_SELECTED] user_id=%s symbol=%s direction=%s strategy_score=%s confidence=%s payout=%s strategy_name=%s strategy_reason=%s used_strategies=%s",
                     user_id,
                     selected["symbol"],
@@ -4962,6 +5038,13 @@ async def execute_robot_cycle(
                             selected.get("symbol"),
                             state.seconds_until_entry_window,
                             target_timestamp,
+                        )
+                        logger.info(
+                            "[ENTRY_SCHEDULED] user_id=%s cycle_id=%s symbol=%s seconds_until_entry=%s target=NEXT_CANDLE_OPEN",
+                            user_id,
+                            state.cycle_id,
+                            selected.get("symbol"),
+                            state.seconds_until_entry_window,
                         )
                         logger.info("[STATE] WAITING_ENTRY user_id=%s cycle_id=%s", user_id, state.cycle_id)
                     elif float(entry_window["server_timestamp"]) > (
@@ -5392,6 +5475,7 @@ async def execute_robot_cycle(
                 state = auto_trader.record_trade(user_id, trade)
                 logger.info("[STATE] ORDER_OPEN user_id=%s cycle_id=%s order_id=%s", user_id, state.cycle_id, order_id)
                 logger.info("[STATE] WAITING_RESULT user_id=%s cycle_id=%s order_id=%s", user_id, state.cycle_id, order_id)
+                logger.info("[WAITING_RESULT] user_id=%s cycle_id=%s order_id=%s", user_id, state.cycle_id, order_id)
                 invalidate_account_cache(user_id)
                 state.entry_window_open = False
                 logger.info(
@@ -5525,6 +5609,8 @@ async def robot_worker(user_id: str) -> None:
             logger.info("[WORKER_HEARTBEAT] user_id=%s", user_id)
             logger.info("[ROBOT_RUNNING] user_id=%s", user_id)
             state = auto_trader.get(user_id)
+            if result_display_expired(state) or waiting_result_stale(state):
+                state = reset_cycle_after_result(user_id)
             result_waiting = bool(
                 state.operation_in_progress
                 and str((state.last_trade or {}).get("result") or "").strip().upper() not in {"WIN", "LOSS", "TIMEOUT"}
@@ -5547,6 +5633,11 @@ async def robot_worker(user_id: str) -> None:
                 logger.warning("[CPU_LOOP_PROTECTION] user_id=%s reason=%s", user_id, reason)
                 logger.warning("[BACKOFF_IGNORED_FOR_ROBOT_WORKER] user_id=%s reason=%s", user_id, reason)
             if state.operation_in_progress or result_waiting:
+                logger.info(
+                    "[ANALYSIS_SKIPPED_WAITING_RESULT] user_id=%s order_id=%s",
+                    user_id,
+                    (state.last_trade or {}).get("order_id"),
+                )
                 logger.info(
                     "[SKIP_ANALYSIS_WAITING_RESULT] user_id=%s order_id=%s",
                     user_id,
@@ -5651,6 +5742,18 @@ def ensure_robot_worker(user_id: str) -> None:
         logger.warning("[SESSION_CHECK_SKIPPED] user_id=%s worker_start=true reason=%s retry_in=%.2f", user_id, reason, remaining)
         return
     task = robot_tasks.get(user_id)
+    last_tick_at = robot_worker_last_tick_at.get(user_id)
+    stale_worker = (
+        task is not None
+        and not task.done()
+        and last_tick_at is not None
+        and (utc_now() - last_tick_at).total_seconds() > 30
+    )
+    if stale_worker:
+        logger.warning("[WORKER_STALE_RESTART] user_id=%s last_tick_at=%s", user_id, last_tick_at)
+        task.cancel()
+        robot_tasks.pop(user_id, None)
+        task = None
     if task is None or task.done():
         robot_tasks[user_id] = asyncio.create_task(robot_worker(user_id))
         logger.info("[WORKER_CREATED] user_id=%s", user_id)

@@ -231,6 +231,30 @@ class AutoTraderResultTests(unittest.TestCase):
         self.assertTrue(can_run)
         self.assertEqual(waiting_analysis.status, STATUS_WAITING_NEXT_CYCLE)
 
+    def test_reset_cycle_after_result_clears_attempts_and_pending_state(self) -> None:
+        trader = AutoTrader()
+        user_id = "user-reset-after-result"
+        state = trader.start(user_id)
+        state.order_attempts = 3
+        state.fallback_candidate_used = True
+        state.pending_signal = {"symbol": "EURUSD-OTC", "signal": "CALL"}
+        state.last_signal = dict(state.pending_signal)
+        state.operation_in_progress = True
+        state.status = "WIN"
+        state.result_display_until = utc_now() - timedelta(seconds=1)
+
+        reset = trader.reset_cycle_after_result(user_id)
+
+        self.assertFalse(reset.operation_in_progress)
+        self.assertIsNone(reset.pending_signal)
+        self.assertIsNone(reset.last_signal)
+        self.assertEqual(reset.order_attempts, 0)
+        self.assertFalse(reset.fallback_candidate_used)
+        self.assertIsNone(reset.analysis_started_at)
+        self.assertIsNone(reset.sync_started_at)
+        self.assertIsNotNone(reset.cycle_id)
+        self.assertIsNotNone(reset.next_cycle_at)
+
     def test_syncing_timeout_recovers_to_analysis_when_connected_and_enabled(self) -> None:
         trader = AutoTrader()
         state = trader.start("user-sync")

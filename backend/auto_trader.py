@@ -560,6 +560,10 @@ class RobotState:
 class AutoTrader:
     _states: dict[str, RobotState] = field(default_factory=dict)
     _locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    _analysis_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    _order_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    _result_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    _cycle_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     _histories: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     _completed_order_ids: dict[str, set[str]] = field(default_factory=dict)
     _sources: dict[str, StateSource] = field(default_factory=dict)
@@ -719,6 +723,18 @@ class AutoTrader:
     def lock(self, user_id: str) -> asyncio.Lock:
         return self._locks.setdefault(user_id, asyncio.Lock())
 
+    def analysis_lock(self, user_id: str) -> asyncio.Lock:
+        return self._analysis_locks.setdefault(user_id, asyncio.Lock())
+
+    def order_lock(self, user_id: str) -> asyncio.Lock:
+        return self._order_locks.setdefault(user_id, asyncio.Lock())
+
+    def result_lock(self, user_id: str) -> asyncio.Lock:
+        return self._result_locks.setdefault(user_id, asyncio.Lock())
+
+    def cycle_lock(self, user_id: str) -> asyncio.Lock:
+        return self._cycle_locks.setdefault(user_id, asyncio.Lock())
+
     def update_config(self, user_id: str, update: RobotConfigUpdate) -> RobotState:
         state = self.get(user_id)
         changes = update.model_dump(exclude_none=True)
@@ -858,6 +874,54 @@ class AutoTrader:
         self._clear_gale_state(state)
         return state
 
+    def reset_cycle_after_result(self, user_id: str) -> RobotState:
+        state = self.get(user_id)
+        now = utc_now()
+        state.operation_in_progress = False
+        state.pending_signal = None
+        state.last_signal = None
+        state.order_attempts = 0
+        state.fallback_candidate_used = False
+        if not state.martingale_enabled:
+            state.gale_pending = False
+            state.gale_active = False
+            state.gale_step = 0
+            state.gale_amount = 0.0
+            state.gale_direction = None
+            state.gale_original_order_id = None
+            state.gale_parent_trade = None
+        state.analysis_started_at = None
+        state.sync_started_at = None
+        state.rejected_at = None
+        state.last_order_error = None
+        state.entry_window_open = False
+        state.seconds_until_entry_window = 0
+        state.analysis_window_open = False
+        state.seconds_until_analysis_window = 0
+        state.analysis_result = None
+        state.last_analysis_result = None
+        state.analysis_message = None
+        state.rejection_reason = None
+        state.last_rejection_reason = None
+        state.best_candidate = None
+        state.cycle_best_candidate = None
+        state.cycle_best_trade_candidate = None
+        state.candidates = []
+        state.candidates_count = 0
+        state.strategy_score = 0
+        state.strategy_name = None
+        state.strategy_reason = None
+        state.used_strategies = []
+        state.candle_reading = None
+        state.entry_reason = None
+        state.block_reasons = []
+        state.metrics = {}
+        state.current_cycle_started_at = now
+        state.cycle_id = self._new_cycle_id()
+        state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes) if state.enabled else None
+        state.status = STATUS_WAITING_NEXT_CYCLE if state.enabled else STATUS_STOPPED
+        return state
+
     def prepare_cycle(self, user_id: str) -> tuple[bool, RobotState]:
         state = self.get(user_id)
         now = utc_now()
@@ -873,25 +937,16 @@ class AutoTrader:
         if state.status in {STATUS_RESULT_RECEIVED, STATUS_GALE_RESULT_RECEIVED, STATUS_WIN, STATUS_LOSS} and state.result_display_until is not None:
             if now < state.result_display_until:
                 return False, state
-            if state.status == STATUS_GALE_RESULT_RECEIVED:
-                self._clear_gale_state(state)
-            state.status = STATUS_WAITING_NEXT_CYCLE
-            state.next_cycle_at = now + timedelta(minutes=state.cycle_minutes)
-            state.pending_signal = None
-            state.best_candidate = None
-            state.cycle_best_candidate = None
-            state.cycle_best_trade_candidate = None
-            state.candidates = []
-            state.candidates_count = 0
-            state.strategy_score = 0
-            state.strategy_name = None
-            state.strategy_reason = None
-            state.used_strategies = []
-            state.candle_reading = None
-            state.entry_reason = None
-            state.block_reasons = []
-            state.metrics = {}
+            state = self.reset_cycle_after_result(user_id)
         last_trade_result = str((state.last_trade or {}).get("result") or "").upper()
+        if (
+            state.status == STATUS_WAITING_RESULT
+            and not state.operation_in_progress
+            and state.last_entry_at is not None
+            and (now - state.last_entry_at).total_seconds() > 90
+        ):
+            state = self.reset_cycle_after_result(user_id)
+            last_trade_result = str((state.last_trade or {}).get("result") or "").upper()
         result_waiting = (
             state.status in {STATUS_PENDING_RESULT, STATUS_PENDING_GALE_RESULT, STATUS_WAITING_RESULT}
             and last_trade_result not in {"WIN", "LOSS", "TIMEOUT"}
