@@ -436,7 +436,7 @@ class RobotState:
         display_countdown_label = None
         display_countdown_seconds = 0
         if data["status"] == STATUS_WAITING_NEXT_CYCLE:
-            display_countdown_label = "Entrada em"
+            display_countdown_label = "Próxima entrada em"
             display_countdown_seconds = max(0, int(data["seconds_until_next_cycle"]))
         elif data["status"] in {STATUS_WAITING_NEXT_CANDLE_ENTRY, STATUS_WAITING_GALE_ENTRY, STATUS_WAITING_ENTRY}:
             display_countdown_label = "Entrada no inicio da proxima vela em"

@@ -2132,6 +2132,68 @@ class AutoTraderCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("/orders/buy-demo", calls)
         self.assertNotIn("/orders/buy-real", calls)
 
+    async def test_waiting_next_cycle_does_not_analyze_or_order(self) -> None:
+        user_id = "user-wait-next-cycle"
+        state = main.auto_trader.start(user_id)
+        state.next_cycle_at = utc_now() + timedelta(minutes=5)
+        state.status = STATUS_WAITING_NEXT_CYCLE
+
+        with (
+            patch.object(main, "call_bullex_service", new=AsyncMock()) as upstream,
+            patch.object(main, "scan_local_signals", new=AsyncMock()) as scan,
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["data"]["status"], STATUS_WAITING_NEXT_CYCLE)
+        self.assertEqual(payload["data"]["display_countdown_label"], "Próxima entrada em")
+        upstream.assert_not_awaited()
+        scan.assert_not_awaited()
+        output = "\n".join(logs.output)
+        self.assertIn("[WAITING_NEXT_CYCLE]", output)
+        self.assertIn("[ANALYSIS_SKIPPED_NEXT_CYCLE]", output)
+
+    async def test_invalid_buy_real_payload_does_not_call_bullex(self) -> None:
+        user_id = "user-invalid-real-payload"
+        state = main.auto_trader.start(user_id)
+        state.entry_value = 3
+        main.auto_trader.set_pending_signal(
+            user_id,
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "confidence": 94,
+                "payout": 91,
+            },
+        )
+        entry_window = main.get_entry_window(state.timeframe, SERVER_TIME_M1_OPEN, server_time_source="bullex")
+
+        with (
+            patch.object(
+                main,
+                "refresh_entry_window",
+                new=AsyncMock(return_value=(200, main.build_success({"connected": True, "active_mode": "REAL"}), entry_window)),
+            ),
+            patch.object(
+                main,
+                "reconcile_robot_connection_from_payload",
+                new=AsyncMock(return_value=(state, True, "REAL", "bullex_service")),
+            ),
+            patch.object(main, "validate_buy_real_order_payload", return_value="BUY_REAL_PAYLOAD_MISSING_ACTIVE"),
+            patch.object(main, "submit_bullex_order", new=AsyncMock()) as submit,
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["data"]["status"], STATUS_WAITING_NEXT_CYCLE)
+        self.assertIsNone(payload["data"]["pending_signal"])
+        submit.assert_not_awaited()
+        output = "\n".join(logs.output)
+        self.assertIn("[BUY_REAL_PAYLOAD_INVALID]", output)
+        self.assertIn("[NEXT_CYCLE_SCHEDULED]", output)
+
     async def test_disconnected_account_does_not_scan_or_order(self) -> None:
         user_id = "user-disconnected"
         state = main.auto_trader.start(user_id)

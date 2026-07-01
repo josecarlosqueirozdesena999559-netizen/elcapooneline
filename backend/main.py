@@ -2930,7 +2930,6 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         )
         if data.get("enabled") and data["worker_running"] and data.get("status") in {
             STATUS_STOPPED,
-            STATUS_WAITING_NEXT_CYCLE,
         } and not (has_locked_signal or has_open_operation or has_result_display):
             data["status"] = STATUS_ANALYZING
     data.update(strip_ai_fields(extra))
@@ -3320,6 +3319,30 @@ async def submit_bullex_order(
         user_id,
         json_body=body,
     )
+
+
+def validate_buy_real_order_payload(body: dict[str, Any]) -> str | None:
+    required = ("active", "action", "amount", "expiration", "confirm_real")
+    missing = [field for field in required if field not in body or body.get(field) in {None, ""}]
+    if missing:
+        return "BUY_REAL_PAYLOAD_MISSING_" + "_".join(missing).upper()
+    if str(body.get("action") or "").strip().lower() not in {"call", "put"}:
+        return "BUY_REAL_PAYLOAD_INVALID_ACTION"
+    try:
+        amount = float(body.get("amount"))
+    except (TypeError, ValueError):
+        return "BUY_REAL_PAYLOAD_INVALID_AMOUNT"
+    if amount <= 0:
+        return "BUY_REAL_PAYLOAD_INVALID_AMOUNT"
+    try:
+        expiration = int(body.get("expiration"))
+    except (TypeError, ValueError):
+        return "BUY_REAL_PAYLOAD_INVALID_EXPIRATION"
+    if expiration <= 0:
+        return "BUY_REAL_PAYLOAD_INVALID_EXPIRATION"
+    if body.get("confirm_real") is not True:
+        return "BUY_REAL_PAYLOAD_CONFIRM_REAL_REQUIRED"
+    return None
 
 
 def persist_robot(user_id: str) -> None:
@@ -4174,7 +4197,7 @@ async def fetch_trade_result(user_id: str, order_id: str) -> tuple[int, dict[str
     return status_code, payload
 
 
-def reset_cycle_after_result(user_id: str) -> Any:
+def reset_cycle_after_finish(user_id: str) -> Any:
     logger.info("[CYCLE_RESET_STARTED] user_id=%s", user_id)
     state = auto_trader.reset_cycle_after_result(user_id)
     logger.info(
@@ -4183,9 +4206,20 @@ def reset_cycle_after_result(user_id: str) -> Any:
         state.cycle_id,
         state.next_cycle_at,
     )
+    logger.info("[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s", user_id, state.next_cycle_at)
+    logger.info(
+        "[WAITING_NEXT_CYCLE] user_id=%s cycle_id=%s next_cycle_at=%s",
+        user_id,
+        state.cycle_id,
+        state.next_cycle_at,
+    )
     logger.info("[READY_NEXT_CYCLE] user_id=%s cycle_id=%s", user_id, state.cycle_id)
     persist_robot(user_id)
     return state
+
+
+def reset_cycle_after_result(user_id: str) -> Any:
+    return reset_cycle_after_finish(user_id)
 
 
 def result_display_expired(state: Any) -> bool:
@@ -4405,6 +4439,20 @@ async def execute_robot_cycle(
         if not had_pending_signal and not running_analysis:
             can_run, state = auto_trader.prepare_cycle(user_id)
             if not can_run:
+                if state.status == STATUS_WAITING_NEXT_CYCLE and state.enabled:
+                    logger.info(
+                        "[WAITING_NEXT_CYCLE] user_id=%s cycle_id=%s next_cycle_at=%s seconds=%s",
+                        user_id,
+                        state.cycle_id,
+                        state.next_cycle_at,
+                        state.to_dict()["seconds_until_next_cycle"],
+                    )
+                    logger.info(
+                        "[ANALYSIS_SKIPPED_NEXT_CYCLE] user_id=%s cycle_id=%s",
+                        user_id,
+                        state.cycle_id,
+                    )
+                    return 200, build_robot_payload(state, user_id=user_id)
                 if state.status != STATUS_WAITING_NEXT_CYCLE or not state.enabled:
                     return 200, build_robot_payload(state)
             elif state.to_dict()["seconds_until_next_cycle"] <= 0:
@@ -5220,6 +5268,23 @@ async def execute_robot_cycle(
                 }
                 if state.account_mode == "REAL":
                     order_body["confirm_real"] = True
+                    payload_reason = validate_buy_real_order_payload(order_body)
+                    if payload_reason is not None:
+                        logger.error(
+                            "[BUY_REAL_PAYLOAD_INVALID] user_id=%s reason=%s payload=%s",
+                            user_id,
+                            payload_reason,
+                            strip_ai_fields(order_body),
+                        )
+                        state.last_order_error = payload_reason
+                        state = reset_cycle_after_finish(user_id)
+                        logger.info(
+                            "[NEXT_CYCLE_SCHEDULED] user_id=%s next_cycle_at=%s",
+                            user_id,
+                            state.next_cycle_at,
+                        )
+                        return 200, build_robot_payload(state, user_id=user_id)
+                    logger.info("[BUY_REAL_PAYLOAD] user_id=%s payload=%s", user_id, strip_ai_fields(order_body))
                     logger.info(
                         "[REAL BUY ATTEMPT] user_id=%s active=%s direction=%s amount=%s expiration=%s",
                         user_id,
