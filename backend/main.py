@@ -723,6 +723,72 @@ def stale_successful_response(
     return cached if utc_now() <= stale_until else None
 
 
+def cached_market_response(
+    user_id: str,
+    path: str,
+    params: dict[str, Any],
+    *,
+    max_age_seconds: int = STALE_MARKET_DATA_SECONDS,
+) -> BullexResponseCacheEntry | None:
+    exact = stale_successful_response(
+        user_id,
+        build_cache_key(path, params),
+        max_age_seconds=max_age_seconds,
+    )
+    if exact is not None:
+        return exact
+
+    symbol = normalize_binary_active(str(params.get("active") or ""))
+    if not symbol:
+        return None
+    cache = get_session_cache(user_id)
+    candidates: list[BullexResponseCacheEntry] = []
+    for cache_key, entry in cache.last_successful_responses.items():
+        if not cache_key.startswith(f"{path}?") or utc_now() > entry.expires_at + timedelta(seconds=max_age_seconds):
+            continue
+        if f"active={symbol}" not in cache_key:
+            continue
+        if path == "/candles":
+            interval = str(params.get("interval") or "")
+            count = str(params.get("count") or "")
+            if interval and f"interval={interval}" not in cache_key:
+                continue
+            if count and f"count={count}" not in cache_key:
+                continue
+        candidates.append(entry)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item.expires_at)
+
+
+def cached_candles_for_active(
+    user_id: str,
+    symbol: str,
+    timeframe: str,
+    *,
+    endtime: int | None = None,
+) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {
+        "active": normalize_binary_active(symbol),
+        "interval": TIMEFRAME_SECONDS[timeframe],
+        "count": ROBOT_CANDLE_COUNT,
+    }
+    if endtime is not None:
+        params["endtime"] = endtime
+    cached = cached_market_response(user_id, "/candles", params)
+    return extract_candles(cached.payload) if cached is not None else []
+
+
+def cached_payout_for_active(user_id: str, symbol: str) -> float | None:
+    normalized_symbol = normalize_binary_active(symbol)
+    cached = cached_market_response(
+        user_id,
+        "/payouts",
+        {"active": normalized_symbol},
+    )
+    return extract_payout(cached.payload, normalized_symbol) if cached is not None else None
+
+
 def select_analysis_assets_for_cycle(
     user_id: str,
     *,
@@ -3374,32 +3440,41 @@ async def analyze_active_signal(
     endtime: int | None = None,
     strategy_mode: str = "conservative",
 ) -> tuple[int, dict[str, Any]]:
+    cached_candles = cached_candles_for_active(user_id, symbol, timeframe, endtime=endtime)
+    cached_payout = cached_payout_for_active(user_id, symbol)
+    used_cache = bool(cached_candles or cached_payout is not None)
     if active_cooldown_remaining(user_id, symbol) is not None:
-        logger.warning("[ACTIVE_SKIPPED] user_id=%s symbol=%s reason=ACTIVE_COOLDOWN", user_id, symbol)
-        return 200, build_success(
-            {
-                "symbol": symbol,
-                "signal": "WAIT",
-                "confidence": 0,
-                "trade_allowed": False,
-                "quality_reason": "ACTIVE_COOLDOWN",
-                "blocked_filters": ["ACTIVE_COOLDOWN"],
-                "approved_filters": [],
-            }
-        )
+        if cached_candles:
+            logger.info("[ACTIVE_CACHE] user_id=%s symbol=%s path=/candles reason=ACTIVE_COOLDOWN", user_id, symbol)
+        else:
+            logger.warning("[ACTIVE_SKIPPED] user_id=%s symbol=%s reason=ACTIVE_COOLDOWN", user_id, symbol)
+            return 200, build_success(
+                {
+                    "symbol": symbol,
+                    "signal": "WAIT",
+                    "confidence": 0,
+                    "trade_allowed": False,
+                    "quality_reason": "ACTIVE_COOLDOWN",
+                    "blocked_filters": ["ACTIVE_COOLDOWN"],
+                    "approved_filters": [],
+                }
+            )
     if payout_cooldown_remaining(user_id, symbol) is not None:
-        logger.warning("[ACTIVE_SKIPPED] user_id=%s symbol=%s reason=PAYOUT_COOLDOWN", user_id, symbol)
-        return 200, build_success(
-            {
-                "symbol": symbol,
-                "signal": "WAIT",
-                "confidence": 0,
-                "trade_allowed": False,
-                "quality_reason": "PAYOUT_COOLDOWN",
-                "blocked_filters": ["PAYOUT_COOLDOWN"],
-                "approved_filters": [],
-            }
-        )
+        if cached_payout is not None:
+            logger.info("[ACTIVE_CACHE] user_id=%s symbol=%s path=/payouts reason=PAYOUT_COOLDOWN", user_id, symbol)
+        else:
+            logger.warning("[ACTIVE_SKIPPED] user_id=%s symbol=%s reason=PAYOUT_COOLDOWN", user_id, symbol)
+            return 200, build_success(
+                {
+                    "symbol": symbol,
+                    "signal": "WAIT",
+                    "confidence": 0,
+                    "trade_allowed": False,
+                    "quality_reason": "PAYOUT_COOLDOWN",
+                    "blocked_filters": ["PAYOUT_COOLDOWN"],
+                    "approved_filters": [],
+                }
+            )
     interval = TIMEFRAME_SECONDS[timeframe]
     candle_params: dict[str, Any] = {
         "active": symbol,
@@ -3408,75 +3483,100 @@ async def analyze_active_signal(
     }
     if endtime is not None:
         candle_params["endtime"] = endtime
-    try:
-        status_code, payload = await asyncio.wait_for(
-            call_bullex_service(
-                "GET",
-                "/candles",
-                user_id,
-                params=candle_params,
-            ),
-            timeout=ACTIVE_DATA_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        set_named_cooldown(
-            active_cooldowns,
-            user_id,
-            symbol,
-            seconds=ACTIVE_COOLDOWN_SECONDS,
-            log_label="ACTIVE_TIMEOUT",
-            status=STATUS_ACTIVE_COOLDOWN,
-            reason="CANDLES_TIMEOUT",
-        )
-        return 200, build_success(
-            {
-                "symbol": symbol,
-                "signal": "WAIT",
-                "confidence": 0,
-                "trade_allowed": False,
-                "quality_reason": "CANDLES_TIMEOUT",
-                "blocked_filters": ["CANDLES_TIMEOUT"],
-                "approved_filters": [],
-            }
-        )
-    log_ignored_disconnect(user_id, "/candles", payload)
-    if not payload.get("ok"):
-        if is_session_disconnected(payload):
-            return 409, build_error(SESSION_DISCONNECTED)
-        set_named_cooldown(
-            active_cooldowns,
-            user_id,
-            symbol,
-            seconds=ACTIVE_COOLDOWN_SECONDS,
-            log_label="ACTIVE_SKIPPED",
-            status=STATUS_ACTIVE_COOLDOWN,
-            reason=str(payload.get("error") or "CANDLES_UNAVAILABLE"),
-        )
-        return status_code, payload
+    payload = build_success(cached_candles) if cached_candles else None
+    if payload is None:
+        try:
+            status_code, payload = await asyncio.wait_for(
+                call_bullex_service(
+                    "GET",
+                    "/candles",
+                    user_id,
+                    params=candle_params,
+                ),
+                timeout=ACTIVE_DATA_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            cached_candles = cached_candles_for_active(user_id, symbol, timeframe, endtime=endtime)
+            if cached_candles:
+                logger.info("[ACTIVE_CACHE] user_id=%s symbol=%s path=/candles reason=CANDLES_TIMEOUT", user_id, symbol)
+                used_cache = True
+                payload = build_success(cached_candles)
+            else:
+                set_named_cooldown(
+                    active_cooldowns,
+                    user_id,
+                    symbol,
+                    seconds=ACTIVE_COOLDOWN_SECONDS,
+                    log_label="ACTIVE_TIMEOUT",
+                    status=STATUS_ACTIVE_COOLDOWN,
+                    reason="CANDLES_TIMEOUT",
+                )
+                return 200, build_success(
+                    {
+                        "symbol": symbol,
+                        "signal": "WAIT",
+                        "confidence": 0,
+                        "trade_allowed": False,
+                        "quality_reason": "CANDLES_TIMEOUT",
+                        "blocked_filters": ["CANDLES_TIMEOUT"],
+                        "approved_filters": [],
+                    }
+                )
+        log_ignored_disconnect(user_id, "/candles", payload)
+        if not payload.get("ok"):
+            if is_session_disconnected(payload):
+                return 409, build_error(SESSION_DISCONNECTED)
+            cached_candles = cached_candles_for_active(user_id, symbol, timeframe, endtime=endtime)
+            if cached_candles:
+                logger.info("[ACTIVE_CACHE] user_id=%s symbol=%s path=/candles reason=CANDLES_UNAVAILABLE", user_id, symbol)
+                used_cache = True
+                payload = build_success(cached_candles)
+            else:
+                set_named_cooldown(
+                    active_cooldowns,
+                    user_id,
+                    symbol,
+                    seconds=ACTIVE_COOLDOWN_SECONDS,
+                    log_label="ACTIVE_SKIPPED",
+                    status=STATUS_ACTIVE_COOLDOWN,
+                    reason=str(payload.get("error") or "CANDLES_UNAVAILABLE"),
+                )
+                return status_code, payload
 
-    try:
-        payout_status, payout_payload = await asyncio.wait_for(
-            call_bullex_service(
-                "GET",
-                "/payouts",
-                user_id,
-                params={"active": symbol},
-            ),
-            timeout=ACTIVE_DATA_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        set_named_cooldown(
-            payout_cooldowns,
-            user_id,
-            symbol,
-            seconds=PAYOUT_COOLDOWN_SECONDS,
-            log_label="ACTIVE_TIMEOUT",
-            status=STATUS_PAYOUT_COOLDOWN,
-            reason="PAYOUT_TIMEOUT",
-        )
-        payout_status = 200
-        payout_payload = build_success([])
-    log_ignored_disconnect(user_id, "/payouts", payout_payload)
+    payout_status = 200
+    payout = cached_payout
+    payout_payload = build_success([{"symbol": symbol, "payout": payout}]) if payout is not None else None
+    if payout_payload is None:
+        try:
+            payout_status, payout_payload = await asyncio.wait_for(
+                call_bullex_service(
+                    "GET",
+                    "/payouts",
+                    user_id,
+                    params={"active": symbol},
+                ),
+                timeout=ACTIVE_DATA_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            cached_payout = cached_payout_for_active(user_id, symbol)
+            if cached_payout is not None:
+                logger.info("[ACTIVE_CACHE] user_id=%s symbol=%s path=/payouts reason=PAYOUT_TIMEOUT", user_id, symbol)
+                used_cache = True
+                payout_status = 200
+                payout_payload = build_success([{"symbol": symbol, "payout": cached_payout}])
+            else:
+                set_named_cooldown(
+                    payout_cooldowns,
+                    user_id,
+                    symbol,
+                    seconds=PAYOUT_COOLDOWN_SECONDS,
+                    log_label="ACTIVE_TIMEOUT",
+                    status=STATUS_PAYOUT_COOLDOWN,
+                    reason="PAYOUT_TIMEOUT",
+                )
+                payout_status = 200
+                payout_payload = build_success([])
+        log_ignored_disconnect(user_id, "/payouts", payout_payload)
     payout = extract_payout(payout_payload, symbol) if payout_payload.get("ok") else None
     if payout is None and payout_status >= 400:
         set_named_cooldown(
@@ -3495,6 +3595,8 @@ async def analyze_active_signal(
         strategy_mode=strategy_mode,
         payout=payout,
     )
+    if used_cache:
+        signal["from_cache"] = True
     if payout_status >= 400 and payout is None:
         signal["blocked_filters"] = list(signal.get("blocked_filters") or []) + ["PAYOUT_UNAVAILABLE"]
         signal["trade_allowed"] = False
@@ -3540,6 +3642,19 @@ async def scan_local_signals(
             )
             return symbol, status_code, payload
         except asyncio.TimeoutError:
+            cached_candles = cached_candles_for_active(user_id, symbol, timeframe, endtime=endtime)
+            if cached_candles:
+                cached_payout = cached_payout_for_active(user_id, symbol)
+                cached_signal = analyze_signal(
+                    symbol,
+                    cached_candles,
+                    timeframe=timeframe,
+                    strategy_mode=strategy_mode,
+                    payout=cached_payout,
+                )
+                cached_signal["from_cache"] = True
+                logger.info("[ACTIVE_CACHE] user_id=%s symbol=%s path=/candles reason=ANALYSIS_TIMEOUT", user_id, symbol)
+                return symbol, 200, build_success(cached_signal)
             set_named_cooldown(
                 active_cooldowns,
                 user_id,
@@ -3691,25 +3806,35 @@ async def select_fallback_candidate(
     for index, symbol in enumerate(assets):
         if index > 0:
             await asyncio.sleep(ROBOT_ASSET_QUEUE_SLEEP_SECONDS)
+        cached_candles = cached_candles_for_active(user_id, symbol, state.timeframe, endtime=endtime)
+        cached_payout = cached_payout_for_active(user_id, symbol)
         if active_cooldown_remaining(user_id, symbol) is not None:
-            logger.warning("[ACTIVE_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
-            continue
+            if cached_candles:
+                logger.info("[ACTIVE_CACHE] user_id=%s symbol=%s path=/candles reason=FALLBACK_ACTIVE_COOLDOWN", user_id, symbol)
+            else:
+                logger.warning("[ACTIVE_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
+                continue
         if payout_cooldown_remaining(user_id, symbol) is not None:
-            logger.warning("[PAYOUT_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
-            continue
+            if cached_payout is not None:
+                logger.info("[ACTIVE_CACHE] user_id=%s symbol=%s path=/payouts reason=FALLBACK_PAYOUT_COOLDOWN", user_id, symbol)
+            else:
+                logger.warning("[PAYOUT_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
+                continue
         try:
-            payout_status, payout_payload = await call_bullex_service(
-                "GET",
-                "/payouts",
-                user_id,
-                params={"active": symbol},
-            )
-            log_ignored_disconnect(user_id, "/payouts", payout_payload)
-            payout = (
-                extract_payout(payout_payload, symbol)
-                if payout_status < 400 and payout_payload.get("ok")
-                else None
-            )
+            payout = cached_payout
+            if payout is None:
+                payout_status, payout_payload = await call_bullex_service(
+                    "GET",
+                    "/payouts",
+                    user_id,
+                    params={"active": symbol},
+                )
+                log_ignored_disconnect(user_id, "/payouts", payout_payload)
+                payout = (
+                    extract_payout(payout_payload, symbol)
+                    if payout_status < 400 and payout_payload.get("ok")
+                    else None
+                )
             if payout is None:
                 set_named_cooldown(
                     payout_cooldowns,
@@ -3722,21 +3847,23 @@ async def select_fallback_candidate(
                 )
                 continue
 
-            candle_params: dict[str, Any] = {
-                "active": symbol,
-                "interval": TIMEFRAME_SECONDS[state.timeframe],
-                "count": ROBOT_CANDLE_COUNT,
-            }
-            if endtime is not None:
-                candle_params["endtime"] = endtime
-            candle_status, candle_payload = await call_bullex_service(
-                "GET",
-                "/candles",
-                user_id,
-                params=candle_params,
-            )
-            log_ignored_disconnect(user_id, "/candles", candle_payload)
-            candles = extract_candles(candle_payload) if candle_status < 400 else []
+            candles = cached_candles
+            if not candles:
+                candle_params: dict[str, Any] = {
+                    "active": symbol,
+                    "interval": TIMEFRAME_SECONDS[state.timeframe],
+                    "count": ROBOT_CANDLE_COUNT,
+                }
+                if endtime is not None:
+                    candle_params["endtime"] = endtime
+                candle_status, candle_payload = await call_bullex_service(
+                    "GET",
+                    "/candles",
+                    user_id,
+                    params=candle_params,
+                )
+                log_ignored_disconnect(user_id, "/candles", candle_payload)
+                candles = extract_candles(candle_payload) if candle_status < 400 else []
             if not candles:
                 continue
         except Exception as exc:
@@ -3849,13 +3976,17 @@ async def update_cycle_analysis(
         symbol = normalize_binary_active(str(raw_signal.get("symbol") or ""))
         if not symbol:
             continue
-        if active_cooldown_remaining(user_id, symbol) is not None:
+        if active_cooldown_remaining(user_id, symbol) is not None and not raw_signal.get("from_cache"):
             logger.warning("[ACTIVE_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
             continue
         payout = raw_signal.get("payout")
         if payout is None and payout_cooldown_remaining(user_id, symbol) is not None:
-            logger.warning("[PAYOUT_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
-            continue
+            payout = cached_payout_for_active(user_id, symbol)
+            if payout is not None:
+                logger.info("[ACTIVE_CACHE] user_id=%s symbol=%s path=/payouts reason=CANDIDATE_PAYOUT_COOLDOWN", user_id, symbol)
+            elif not raw_signal.get("from_cache"):
+                logger.warning("[PAYOUT_COOLDOWN] user_id=%s symbol=%s", user_id, symbol)
+                continue
         if payout is None and is_binary_asset_allowed(symbol):
             payout_status, payout_payload = await call_bullex_service(
                 "GET",
