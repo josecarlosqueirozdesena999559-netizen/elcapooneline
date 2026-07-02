@@ -73,7 +73,7 @@ def analyze_signal(
         reasons = put_reasons
 
     if extreme_candle:
-        reasons.append("Ultimo candle exagerado reduz o score.")
+        reasons.append("Último candle exagerado reduz o score.")
 
     signal = _build_signal(
         symbol=symbol,
@@ -220,12 +220,12 @@ def _score_direction(
     sequence_score = _sequence_score(direction, candles[-3:])
     score += sequence_score
     if sequence_score:
-        reasons.append("Sequencia dos ultimos 3 candles confirma direcao.")
+        reasons.append("Sequência dos últimos 3 candles confirma direção.")
 
     force_score = _current_candle_force_score(direction, candles[-1])
     score += force_score
     if force_score:
-        reasons.append("Ultimo candle tem forca na direcao.")
+        reasons.append("Último candle tem força na direção.")
 
     wick_score = _wick_score(direction, candles[-1])
     score += wick_score
@@ -235,7 +235,7 @@ def _score_direction(
     last_5_score = _last_5_score(direction, candles[-5:])
     score += last_5_score
     if last_5_score:
-        reasons.append("Ultimos 5 candles sustentam a direcao.")
+        reasons.append("Últimos 5 candles sustentam a direção.")
 
     return score, reasons or ["Sem confluencias suficientes."]
 
@@ -397,7 +397,7 @@ def _apply_quality_filters(
         if penalties_text:
             signal["signal_explanation"] += f" Penalizacoes no score: {penalties_text}."
     else:
-        filters = ", ".join(hard_blocks) if hard_blocks else "sem direcao valida"
+        filters = ", ".join(hard_blocks) if hard_blocks else "sem direção válida"
         signal["signal_explanation"] = f"Sinal sem entrada: {filters}."
     signal["entry_reason"] = signal["signal_explanation"]
     signal["narrator_text"] = signal["signal_explanation"]
@@ -602,6 +602,6 @@ def _attach_candle_analysis(
     signal["candle_reading"] = (
         f"{symbol} {timeframe}: EMA9 {'acima' if ema9 > ema21 else 'abaixo'} da EMA21, "
         f"RSI {rsi:.1f}, candle atual {current_direction.lower()} com corpo de {body_ratio:.0%}, "
-        f"ultimas 3 velas {_direction_label(last_3).lower()} e volatilidade {_volatility_label(atr_pct).lower()}."
+        f"últimas 3 velas {_direction_label(last_3).lower()} e volatilidade {_volatility_label(atr_pct).lower()}."
     )
     signal["entry_reason"] = signal.get("reason")

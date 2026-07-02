@@ -148,11 +148,39 @@ class StrategyFilterTests(unittest.TestCase):
         state.stop_win = 3
         trader.record_trade(
             user_id,
+            {"order_id": "daily-win-loss-1", "active": "EURUSD-OTC", "amount": 2},
+        )
+        trader.finish_trade(user_id, "daily-win-loss-1", "LOSS", -2)
+        trader.record_trade(
+            user_id,
             {"order_id": "daily-win-1", "active": "EURUSD-OTC", "amount": 2},
         )
         trader.finish_trade(user_id, "daily-win-1", "WIN", 3)
 
         self.assertEqual(main.daily_stop_reason(user_id, state), "STOP_WIN_HIT")
+
+    def test_daily_management_summary_uses_gross_profit_and_loss(self) -> None:
+        user_id = "user-daily-management"
+        trader = main.auto_trader
+        state = trader.start(user_id)
+        state.stop_win = 4
+        state.stop_loss = 3
+        trader.record_trade(
+            user_id,
+            {"order_id": "daily-management-loss", "active": "EURUSD-OTC", "amount": 3},
+        )
+        trader.finish_trade(user_id, "daily-management-loss", "LOSS", -3)
+        trader.record_trade(
+            user_id,
+            {"order_id": "daily-management-win", "active": "EURUSD-OTC", "amount": 4},
+        )
+        trader.finish_trade(user_id, "daily-management-win", "WIN", 4)
+
+        summary = main.build_management_summary(user_id, state)
+
+        self.assertEqual(summary["gross_profit"], 4.0)
+        self.assertEqual(summary["gross_loss"], 3.0)
+        self.assertEqual(summary["net_profit"], 1.0)
 
 
 class StrategyRejectedCycleTests(unittest.IsolatedAsyncioTestCase):

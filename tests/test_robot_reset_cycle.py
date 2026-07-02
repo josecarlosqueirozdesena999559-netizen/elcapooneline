@@ -92,6 +92,9 @@ class RobotResetCycleTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         main.auto_trader.finish_trade(user_id, "reset-score-1", "LOSS", -2)
+        trade = main.auto_trader.get(user_id).last_trade
+        main.robot_persistence.save_trade(user_id, trade)
+        main.robot_persistence.save_trade_history(user_id, trade)
 
         with (
             patch.object(main, "stop_robot_worker"),
@@ -107,6 +110,8 @@ class RobotResetCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed.losses, 0)
         self.assertEqual(refreshed.profit, 0.0)
         self.assertEqual(main.auto_trader.history(user_id)["trades"], [])
+        self.assertEqual(main.robot_persistence.load_trades(user_id), [])
+        self.assertEqual(main.robot_persistence.load_trade_history(user_id, 30), [])
 
     async def test_reset_score_clears_score_history_and_keeps_robot_running(self) -> None:
         user_id = "user-reset-score-only"

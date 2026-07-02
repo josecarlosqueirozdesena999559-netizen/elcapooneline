@@ -282,9 +282,12 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
 
         payload = state.to_dict()
 
-        self.assertEqual(payload["status"], STATUS_WAITING_NEXT_CANDLE_ENTRY)
-        self.assertEqual(payload["status_message"], "Sinal preparado")
         self.assertIn("Entrada preparada", payload["voice_message"])
+        self.assertIn("Ativo GBPUSD-OTC", payload["voice_message"])
+        self.assertIn("Direção PUT, venda", payload["voice_message"])
+        self.assertIn("Tipo de entrada: abertura da próxima vela", payload["voice_message"])
+        self.assertIn("Estratégia:", payload["voice_message"])
+        self.assertIn("Motivo da entrada:", payload["voice_message"])
         self.assertIsNotNone(payload["voice_event_id"])
 
 

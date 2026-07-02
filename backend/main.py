@@ -2532,24 +2532,61 @@ def extract_payout(payload: dict[str, Any], symbol: str) -> float | None:
     return None
 
 
-def daily_stop_reason(user_id: str, state: Any) -> str | None:
+def build_management_summary(user_id: str, state: Any) -> dict[str, Any]:
     today = datetime.now(timezone.utc).date()
     reset_at = parse_datetime(getattr(state, "stop_reset_at", None))
-    daily_profit = 0.0
-    daily_loss = 0.0
-    for trade in auto_trader.history(user_id).get("trades", []):
+    gross_profit = 0.0
+    gross_loss = 0.0
+    net_profit = 0.0
+    trades_count = 0
+    try:
+        trades = load_robot_history_items(user_id, 1)
+    except Exception:
+        logger.warning("[MANAGEMENT_HISTORY_FALLBACK] user_id=%s", user_id, exc_info=True)
+        trades = auto_trader.history(user_id).get("trades", [])
+
+    for trade in trades:
+        result = str(trade.get("result") or trade.get("final_result") or "").strip().upper()
+        if result not in {"WIN", "LOSS"}:
+            continue
         finished_at = parse_datetime(trade.get("finished_at"))
         if finished_at is None or finished_at.date() != today:
             continue
         if reset_at is not None and finished_at < reset_at:
             continue
         trade_profit = float(trade.get("profit") or 0)
-        daily_profit += trade_profit
-        if trade_profit < 0:
-            daily_loss += abs(trade_profit)
-    if state.stop_loss > 0 and daily_loss >= state.stop_loss:
+        trades_count += 1
+        net_profit += trade_profit
+        if trade_profit > 0:
+            gross_profit += trade_profit
+        elif trade_profit < 0:
+            gross_loss += abs(trade_profit)
+
+    stop_win = float(getattr(state, "stop_win", 0) or 0)
+    stop_loss = float(getattr(state, "stop_loss", 0) or 0)
+    stop_reason = None
+    if stop_loss > 0 and gross_loss >= stop_loss:
+        stop_reason = STATUS_STOP_LOSS_HIT
+    elif stop_win > 0 and gross_profit >= stop_win:
+        stop_reason = STATUS_STOP_WIN_HIT
+
+    return {
+        "gross_profit": round(gross_profit, 2),
+        "gross_loss": round(gross_loss, 2),
+        "net_profit": round(net_profit, 2),
+        "trades_count": trades_count,
+        "stop_win": stop_win,
+        "stop_loss": stop_loss,
+        "stop_reason": stop_reason,
+        "reset_at": reset_at.isoformat() if reset_at is not None else None,
+    }
+
+
+def daily_stop_reason(user_id: str, state: Any) -> str | None:
+    summary = build_management_summary(user_id, state)
+    if summary["stop_reason"] == STATUS_STOP_LOSS_HIT:
         return "STOP_LOSS_HIT"
-    if state.stop_win > 0 and daily_profit >= state.stop_win:
+    if summary["stop_reason"] == STATUS_STOP_WIN_HIT:
         return "STOP_WIN_HIT"
     return None
 
@@ -2912,6 +2949,10 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         data["active_mode"] = "REAL"
     user_id = extra.pop("user_id", None)
     if user_id is not None:
+        data["management"] = build_management_summary(str(user_id), state)
+        data["management_stop_reason"] = data["management"]["stop_reason"]
+        data["management_gross_profit"] = data["management"]["gross_profit"]
+        data["management_gross_loss"] = data["management"]["gross_loss"]
         worker_task = robot_tasks.get(str(user_id))
         last_tick_at = robot_worker_last_tick_at.get(str(user_id))
         if (
@@ -3306,20 +3347,28 @@ def build_strategy_narration(candidate: dict[str, Any]) -> tuple[str, str, list[
     if "WICK_REJECTION" in approved or "upper_wick_ratio" in candidate or "lower_wick_ratio" in candidate:
         used.append("Pavios")
     if "LAST_5_CONFIRMATION" in approved or "directional_candles_5" in candidate:
-        used.append("Ultimos Candles")
+        used.append("Últimos Candles")
     if "VOLATILITY" in approved or "atr_pct" in candidate:
         used.append("Volatilidade")
     if candidate.get("payout") is not None:
         used.append("Payout")
     if not used:
-        used = ["Score de Estrategias", "Payout"]
+        used = ["Score de Estratégias", "Payout"]
 
     strategy_name = "Confluência " + " + ".join(used)
-    strategy_reason = str(
-        candidate.get("reason")
-        or candidate.get("signal_explanation")
-        or "Maior score entre os ativos analisados."
-    ).strip()
+    strategy_reason = str(candidate.get("reason") or candidate.get("signal_explanation") or "").strip()
+    if not strategy_reason:
+        symbol = normalize_binary_active(str(candidate.get("symbol") or ""))
+        direction = str(candidate.get("direction") or candidate.get("signal") or "").strip().upper()
+        confidence = int(candidate.get("confidence") or candidate.get("strategy_score") or candidate.get("score") or 0)
+        payout = candidate.get("payout")
+        direction_text = "CALL" if direction == "CALL" else "PUT" if direction == "PUT" else "direção definida pela estratégia"
+        payout_text = f" payout de {float(payout):.0f}%" if payout is not None else " payout confirmado"
+        strategy_reason = (
+            f"{symbol or 'Ativo selecionado'} com entrada {direction_text}, "
+            f"confiança {confidence} e{payout_text}. "
+            f"Leitura baseada em {', '.join(used)}."
+        )
     return strategy_name, strategy_reason, used
 
 
@@ -3979,8 +4028,8 @@ async def select_fallback_candidate(
             "quality_score": 70,
             "confidence": 70,
             "payout": payout,
-            "reason": "Fallback operacional pelo movimento simples das ultimas velas.",
-            "entry_reason": "Fallback operacional pelo movimento simples das ultimas velas.",
+            "reason": "Fallback operacional pelo movimento simples das últimas velas.",
+            "entry_reason": "Fallback operacional pelo movimento simples das últimas velas.",
             "candle_reading": "Leitura simplificada por fallback operacional.",
             "block_reasons": [],
             "metrics": {
@@ -4495,6 +4544,10 @@ async def execute_robot_cycle(
         state = recover_sync_timeout_if_needed(user_id)
         if result_display_expired(state) or waiting_result_stale(state):
             state = reset_cycle_after_result(user_id)
+        initial_stop_reason = daily_stop_reason(user_id, state) or robot_stop_reason(state)
+        if initial_stop_reason in {STATUS_STOP_WIN_HIT, STATUS_STOP_LOSS_HIT}:
+            state = await pause_robot_by_stop(user_id, initial_stop_reason)
+            return 200, build_robot_payload(state, user_id=user_id)
         had_pending_signal = state.pending_signal is not None
         running_analysis = state.analysis_result == "RUNNING" or state.last_analysis_result == "RUNNING"
         if not had_pending_signal and not running_analysis:
@@ -6706,6 +6759,8 @@ async def robot_reset_cycle(
     user_id = auth["user_id"]
     async with auto_trader.lock(user_id):
         state = auto_trader.reset_cycle(user_id, reset_score=True, reset_daily_profit=True)
+        robot_persistence.clear_finished_trades(user_id)
+        robot_persistence.clear_trade_history(user_id)
         persist_robot(user_id)
     await stop_robot_worker(user_id)
     logger.info("[RESET_CYCLE] user_id=%s cycle_id=%s", user_id, state.cycle_id)

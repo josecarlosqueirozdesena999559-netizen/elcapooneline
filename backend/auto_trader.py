@@ -114,6 +114,40 @@ def format_best_candidate_summary(candidate: dict[str, Any] | None) -> str | Non
     return f"{symbol} {direction} confianca {confidence}"
 
 
+def spoken_entry_direction(direction: str) -> str:
+    normalized = str(direction or "").strip().upper()
+    if normalized == "CALL":
+        return "CALL, compra"
+    if normalized == "PUT":
+        return "PUT, venda"
+    return normalized or "direção não definida"
+
+
+def entry_voice_details(signal: dict[str, Any], *, include_score: bool) -> str:
+    symbol = str(signal.get("symbol") or signal.get("active") or "").strip() or "ativo não definido"
+    direction = spoken_entry_direction(str(signal.get("direction") or signal.get("signal") or ""))
+    strategy = str(signal.get("strategy_name") or "Estratégia de maior confluência").strip()
+    reason = str(
+        signal.get("entry_reason")
+        or signal.get("strategy_reason")
+        or signal.get("reason")
+        or "Entrada aprovada pela leitura técnica do ciclo."
+    ).strip()
+    candle_reading = str(signal.get("candle_reading") or "").strip()
+    score = int(signal.get("strategy_score") or signal.get("score") or signal.get("confidence") or 0)
+    score_text = f" Score {score}." if include_score and score > 0 else ""
+    candle_text = f" Leitura das velas: {candle_reading}." if candle_reading else ""
+    return (
+        f"Ativo {symbol}. "
+        f"Direção {direction}. "
+        "Tipo de entrada: abertura da próxima vela. "
+        f"Estratégia: {strategy}. "
+        f"Motivo da entrada: {reason}."
+        f"{candle_text}"
+        f"{score_text}"
+    )
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -444,7 +478,7 @@ class RobotState:
             display_countdown_label = "Analisando por"
             display_countdown_seconds = max(0, int(data["seconds_until_next_cycle"]))
         elif data["status"] in {STATUS_WAITING_NEXT_CANDLE_ENTRY, STATUS_WAITING_GALE_ENTRY, STATUS_WAITING_ENTRY}:
-            display_countdown_label = "Entrada no inicio da proxima vela em"
+            display_countdown_label = "Entrada no início da próxima vela em"
             display_countdown_seconds = max(0, int(data["seconds_until_entry_window"]))
         elif data["status"] in TEMPORARY_WAIT_STATUSES:
             display_countdown_label = "Recuperando em"
@@ -469,7 +503,10 @@ class RobotState:
                 if data["status"] == STATUS_SIGNAL_FOUND
                 else "Entrada preparada"
             )
-            data["voice_message"] = "Entrada preparada. Vamos entrar no inicio da proxima vela."
+            data["voice_message"] = (
+                "Entrada preparada. "
+                f"{entry_voice_details(voice_signal, include_score=False)}"
+            )
             symbol = str(voice_signal.get("symbol") or "")
             direction = str(voice_signal.get("direction") or voice_signal.get("signal") or "")
             score = int(voice_signal.get("strategy_score") or voice_signal.get("score") or 0)
@@ -478,11 +515,9 @@ class RobotState:
             symbol = str(voice_signal.get("symbol") or "")
             direction = str(voice_signal.get("direction") or voice_signal.get("signal") or "")
             score = int(voice_signal.get("strategy_score") or voice_signal.get("score") or 0)
-            reason = str(voice_signal.get("strategy_reason") or voice_signal.get("reason") or "").strip()
-            reason_text = f" Motivo: {reason}." if reason else ""
             data["voice_message"] = (
-                f"Entrada liberada agora. Ativo {symbol}. Direção {direction}. Score {score}."
-                f"{reason_text}"
+                "Entrada liberada agora. "
+                f"{entry_voice_details(voice_signal, include_score=True)}"
             )
             data["voice_event_id"] = f"{self.cycle_id or ''}:{symbol}:{direction}:{score}:sending"
         if data["status"] in {STATUS_WIN, STATUS_LOSS} and self.last_trade is not None:
@@ -499,7 +534,7 @@ class RobotState:
             and not self.operation_in_progress
             and not self.pending_signal
         ):
-            data["strategy_reason"] = "Analisando mercado. A estrategia, direcao e ativo serao revelados quando o contador zerar."
+            data["strategy_reason"] = "Analisando mercado. A estratégia, direção e ativo serão revelados quando o contador zerar."
             data["used_strategies"] = []
             data["candle_reading"] = None
             data["entry_reason"] = None
@@ -1175,25 +1210,38 @@ class AutoTrader:
     def set_pending_signal(self, user_id: str, signal: dict[str, Any]) -> RobotState:
         state = self.get(user_id)
         signal = strip_ai_fields(signal)
+        symbol = str(signal.get("symbol") or "")
+        direction = str(signal.get("direction") or signal.get("signal") or "").upper()
+        confidence = int(signal.get("confidence") or signal.get("strategy_score") or signal.get("score") or 0)
+        payout = signal.get("payout")
+        payout_text = f" e payout de {float(payout):.0f}%" if payout is not None else ""
+        default_strategy_name = "Estratégia de maior confluência"
+        default_reason = (
+            f"{symbol} com direção {direction}, confiança {confidence}{payout_text}. "
+            "Entrada aprovada pela leitura técnica do ciclo."
+        )
         pending_signal = {
-            "symbol": signal["symbol"],
-            "direction": signal.get("direction") or signal["signal"],
-            "signal": signal.get("signal") or signal["direction"],
-            "confidence": signal["confidence"],
-            "payout": signal["payout"],
+            "symbol": symbol,
+            "direction": direction,
+            "signal": signal.get("signal") or direction,
+            "confidence": confidence,
+            "payout": payout,
             "strategy_score": int(signal.get("strategy_score") or 0),
             "score": int(signal.get("strategy_score") or signal.get("score") or 0),
-            "reason": signal.get("reason") or signal.get("signal_explanation"),
+            "reason": signal.get("reason") or signal.get("signal_explanation") or default_reason,
             "entry_reason": signal.get("entry_reason")
             or signal.get("reason")
-            or signal.get("signal_explanation"),
-            "candle_reading": signal.get("candle_reading"),
+            or signal.get("signal_explanation")
+            or default_reason,
+            "candle_reading": signal.get("candle_reading")
+            or f"Leitura técnica em {symbol}: direção {direction}, confiança {confidence}{payout_text}.",
             "block_reasons": list(signal.get("block_reasons") or signal.get("blocked_filters") or []),
             "metrics": dict(signal.get("metrics") or {}),
-            "strategy_name": signal.get("strategy_name"),
+            "strategy_name": signal.get("strategy_name") or default_strategy_name,
             "strategy_reason": signal.get("strategy_reason")
             or signal.get("reason")
-            or signal.get("signal_explanation"),
+            or signal.get("signal_explanation")
+            or default_reason,
             "used_strategies": list(signal.get("used_strategies") or []),
             "timeframe": state.timeframe,
             "quality_score": signal.get("quality_score", 0),
@@ -1511,6 +1559,44 @@ class AutoTrader:
 
         self._sources[user_id] = "memory"
         return state
+
+    def management_totals(
+        self,
+        user_id: str,
+        *,
+        include_trade: dict[str, Any] | None = None,
+    ) -> dict[str, float]:
+        state = self.get(user_id)
+        today = utc_now().date()
+        reset_at = parse_datetime(state.stop_reset_at)
+        trades = list(self._histories.get(user_id, []))
+        if include_trade is not None:
+            trades.append(dict(include_trade))
+
+        gross_profit = 0.0
+        gross_loss = 0.0
+        net_profit = 0.0
+        for trade in trades:
+            result = str(trade.get("result") or trade.get("final_result") or "").strip().upper()
+            if result not in {"WIN", "LOSS"}:
+                continue
+            finished_at = parse_datetime(trade.get("finished_at"))
+            if finished_at is None or finished_at.date() != today:
+                continue
+            if reset_at is not None and finished_at < reset_at:
+                continue
+            trade_profit = float(trade.get("profit") or 0)
+            net_profit += trade_profit
+            if trade_profit > 0:
+                gross_profit += trade_profit
+            elif trade_profit < 0:
+                gross_loss += abs(trade_profit)
+
+        return {
+            "gross_profit": round(gross_profit, 2),
+            "gross_loss": round(gross_loss, 2),
+            "net_profit": round(net_profit, 2),
+        }
 
     def expire_pending_signal(
         self,
@@ -1903,7 +1989,15 @@ class AutoTrader:
                 float((state.gale_parent_trade or {}).get("profit") or 0) + projected_trade_profit,
                 2,
             )
-        projected_total_profit = round(float(state.profit) + projected_cycle_profit, 2)
+        projected_trade = dict(trade)
+        projected_trade.update(
+            {
+                "result": normalized_result,
+                "profit": round(projected_trade_profit, 2),
+                "finished_at": utc_now().isoformat(),
+            }
+        )
+        projected_totals = self.management_totals(user_id, include_trade=projected_trade)
         should_trigger_gale = (
             normalized_result == "LOSS"
             and state.enabled
@@ -1911,7 +2005,7 @@ class AutoTrader:
             and state.martingale_enabled
             and int(state.martingale_steps or 1) >= 1
             and not state.gale_active
-            and not (state.stop_loss > 0 and projected_total_profit <= -state.stop_loss)
+            and not (state.stop_loss > 0 and projected_totals["gross_loss"] >= state.stop_loss)
         )
         if should_trigger_gale:
             triggered, triggered_state = self.trigger_gale(user_id, normalized_order_id, profit)
@@ -1967,14 +2061,15 @@ class AutoTrader:
         state.next_cycle_at = None
         state.profit = round(state.profit, 2)
         self._clear_gale_state(state, preserve_context=True)
-        if state.enabled:
-            if state.stop_win > 0 and state.profit >= state.stop_win:
-                state = self.pause_by_stop(user_id, STATUS_STOP_WIN_HIT)
-            elif state.stop_loss > 0 and state.profit <= -state.stop_loss:
-                state = self.pause_by_stop(user_id, STATUS_STOP_LOSS_HIT)
         history = self._histories.setdefault(user_id, [])
         history.append(dict(trade))
         del history[:-100]
+        if state.enabled:
+            management_totals = self.management_totals(user_id)
+            if state.stop_win > 0 and management_totals["gross_profit"] >= state.stop_win:
+                state = self.pause_by_stop(user_id, STATUS_STOP_WIN_HIT)
+            elif state.stop_loss > 0 and management_totals["gross_loss"] >= state.stop_loss:
+                state = self.pause_by_stop(user_id, STATUS_STOP_LOSS_HIT)
         return True, state
 
     def timeout_trade(self, user_id: str, order_id: Any) -> tuple[bool, RobotState]:
