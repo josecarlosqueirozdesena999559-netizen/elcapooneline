@@ -92,6 +92,25 @@ class RobotStatusContractTests(unittest.TestCase):
         self.assertIsNone(payload["analysis_message"])
         self.assertEqual(payload["status_message"], "Melhor ativo encontrado")
 
+    def test_waiting_next_cycle_payload_hides_stale_signal(self) -> None:
+        state = RobotState(status="WAITING_NEXT_CYCLE", enabled=True)
+        state.pending_signal = {
+            "symbol": "EURUSD-OTC",
+            "direction": "CALL",
+            "signal": "CALL",
+            "confidence": 95,
+            "payout": 90,
+        }
+        state.best_candidate = dict(state.pending_signal)
+
+        payload = main.build_robot_payload(state, user_id="status-waiting-cycle-user")["data"]
+
+        self.assertEqual(payload["status"], "WAITING_NEXT_CYCLE")
+        self.assertIsNone(payload["pending_signal"])
+        self.assertIsNone(payload["best_candidate"])
+        self.assertEqual(payload["analysis_message"], "Analisando mercado...")
+        self.assertEqual(payload["status_message"], "Analisando diversos ativos")
+
     def test_operation_payload_does_not_return_analyzing(self) -> None:
         state = RobotState(status=STATUS_ANALYZING, enabled=True)
         state.operation_in_progress = True

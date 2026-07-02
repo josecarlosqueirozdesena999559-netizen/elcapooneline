@@ -2960,6 +2960,15 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         data["status"] = visible_result_status if visible_result_status in {"WIN", "LOSS"} else visible_cycle_result
         data["analysis_message"] = None
         data["operation_message"] = data.get("operation_message") or data["status"]
+    elif data.get("status") == STATUS_WAITING_NEXT_CYCLE:
+        data["pending_signal"] = None
+        data["last_signal"] = None
+        data["best_candidate"] = None
+        data["cycle_best_candidate"] = None
+        data["cycle_best_trade_candidate"] = None
+        data["best_candidate_summary"] = None
+        data["analysis_message"] = "Analisando mercado..."
+        data["status_message"] = "Analisando diversos ativos"
     elif data.get("pending_signal"):
         data["status"] = STATUS_WAITING_ENTRY
         data["analysis_message"] = None
