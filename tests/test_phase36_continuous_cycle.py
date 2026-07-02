@@ -171,11 +171,11 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
             if path == "/sessions/status":
                 return 200, main.build_success(
-                    {"connected": True, "active_mode": "PRACTICE", "server_time": 300.0}
+                    {"connected": True, "active_mode": "REAL", "server_time": 300.0}
                 )
             if path == "/payouts":
                 return 200, main.build_success({"active": params["active"], "payout": 90})
-            if path == "/orders/buy-demo":
+            if path == "/orders/buy-real":
                 return 200, main.build_success({"order_id": "phase36-2"})
             raise AssertionError(f"unexpected path: {path}")
 
@@ -189,9 +189,38 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
 
         data = payload["data"]
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], STATUS_PENDING_RESULT)
+        self.assertEqual(data["status"], "WAITING_RESULT")
         self.assertEqual(data["best_candidate"]["symbol"], "GBPUSD-OTC")
         self.assertEqual(data["last_trade"]["active"], "GBPUSD-OTC")
+
+    async def test_cycle_due_without_candidate_retries_next_analysis_window_not_full_cycle(self) -> None:
+        user_id = "phase36-no-candidate-retry"
+        state = main.auto_trader.start(user_id)
+        state.cycle_minutes = 5
+        state.next_cycle_at = utc_now() - timedelta(seconds=1)
+
+        async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
+            if path == "/sessions/status":
+                return 200, main.build_success(
+                    {"connected": True, "active_mode": "REAL", "server_time": 300.0}
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        with (
+            patch.object(main, "call_bullex_service", new=AsyncMock(side_effect=fake_bullex)),
+            patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, main.build_success([])))),
+            patch.object(main, "select_fallback_candidate", new=AsyncMock(return_value=None)),
+            patch.object(main, "persist_robot"),
+        ):
+            status_code, payload = await main.execute_robot_cycle(user_id)
+
+        data = payload["data"]
+        self.assertEqual(status_code, 200)
+        self.assertEqual(data["status"], STATUS_WAITING_NEXT_CYCLE)
+        self.assertEqual(data["analysis_message"], "Analisando mercado...")
+        self.assertLess(data["seconds_until_next_cycle"], 90)
+        self.assertIsNone(data["pending_signal"])
+        self.assertIsNone(data["best_candidate"])
 
     async def test_result_display_then_new_cycle_starts_clean(self) -> None:
         user_id = "phase36-result"

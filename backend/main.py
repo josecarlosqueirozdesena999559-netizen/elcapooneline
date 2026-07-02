@@ -4709,9 +4709,17 @@ async def execute_robot_cycle(
                         (state.cycle_best_candidate or {}).get("payout"),
                     )
                     logger.info("[NO_SIGNAL_FOUND] user_id=%s reason=NO_TRADE", user_id)
-                    state = auto_trader.complete_cycle_without_trade(user_id, "NO_TRADE")
+                    state = auto_trader.wait_analysis_window(
+                        user_id,
+                        entry_window,
+                        clear_pending=True,
+                        analysis_result="NO_CANDIDATE_THIS_CANDLE",
+                        last_rejection_reason="NO_TRADE",
+                        force_next=True,
+                    )
+                    state.analysis_message = "Analisando mercado..."
                     logger.info(
-                        "[CYCLE_END] user_id=%s cycle_id=%s result=NO_TRADE next_cycle_at=%s",
+                        "[NEXT_ANALYSIS_RETRY_SCHEDULED] user_id=%s cycle_id=%s reason=NO_TRADE next_cycle_at=%s",
                         user_id,
                         state.cycle_id,
                         state.next_cycle_at,
