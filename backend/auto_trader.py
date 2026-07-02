@@ -475,7 +475,7 @@ class RobotState:
         display_countdown_label = None
         display_countdown_seconds = 0
         if data["status"] == STATUS_WAITING_NEXT_CYCLE:
-            display_countdown_label = "Analisando por"
+            display_countdown_label = "Próxima análise em"
             display_countdown_seconds = max(0, int(data["seconds_until_next_cycle"]))
         elif data["status"] in {STATUS_WAITING_NEXT_CANDLE_ENTRY, STATUS_WAITING_GALE_ENTRY, STATUS_WAITING_ENTRY}:
             display_countdown_label = "Entrada no início da próxima vela em"
@@ -542,12 +542,12 @@ class RobotState:
             data["metrics"] = {}
             data["last_signal"] = None
             data["pending_signal"] = None
-            data["analysis_message"] = "Analisando mercado..."
+            data["analysis_message"] = "Aguardando próxima análise..."
             if data.get("analysis_result") == "NO_TRADE":
                 data["analysis_message"] = "Sem entrada neste ciclo"
                 data["status_message"] = "Sem entrada neste ciclo"
             else:
-                data["status_message"] = "Analisando diversos ativos"
+                data["status_message"] = "Aguardando próximo ciclo"
         for deprecated_key in (
             "analysis_window_open",
             "seconds_until_analysis_window",
@@ -873,6 +873,19 @@ class AutoTrader:
         state.seconds_until_entry_window = 0
         state.analysis_window_open = False
         state.seconds_until_analysis_window = 0
+        state.best_candidate = None
+        state.cycle_best_candidate = None
+        state.cycle_best_trade_candidate = None
+        state.candidates = []
+        state.candidates_count = 0
+        state.strategy_score = 0
+        state.strategy_name = None
+        state.strategy_reason = None
+        state.used_strategies = []
+        state.candle_reading = None
+        state.entry_reason = None
+        state.block_reasons = []
+        state.metrics = {}
         if not pending_trade:
             state.result_received_at = None
             state.result_display_until = None

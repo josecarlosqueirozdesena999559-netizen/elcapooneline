@@ -3008,8 +3008,8 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         data["cycle_best_candidate"] = None
         data["cycle_best_trade_candidate"] = None
         data["best_candidate_summary"] = None
-        data["analysis_message"] = "Analisando mercado..."
-        data["status_message"] = "Analisando diversos ativos"
+        data["analysis_message"] = "Aguardando próxima análise..."
+        data["status_message"] = "Aguardando próximo ciclo"
     elif data.get("pending_signal"):
         data["status"] = STATUS_WAITING_ENTRY
         data["analysis_message"] = None
@@ -6677,8 +6677,6 @@ async def _robot_start_impl(auth: dict[str, str]) -> JSONResponse:
         state.entry_value,
     )
     state = auto_trader.start(user_id)
-    state.next_cycle_at = utc_now()
-    state.status = STATUS_ANALYZING
     robot_worker_restart_attempted.discard(user_id)
     logger.info(
         "[CYCLE_START] user_id=%s cycle_id=%s next_cycle_at=%s cycle_minutes=%s",
