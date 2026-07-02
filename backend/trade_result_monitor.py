@@ -10,7 +10,7 @@ from typing import Any
 logger = logging.getLogger("backend-gateway")
 
 PENDING_RESULT = "PENDING_RESULT"
-FINAL_RESULTS = {"WIN", "LOSS"}
+FINAL_RESULTS = {"WIN", "LOSS", "TIMEOUT"}
 
 FetchResult = Callable[[str, str], Awaitable[tuple[int, dict[str, Any]]]]
 FinishTrade = Callable[[str, str, str, float], Awaitable[None]]
@@ -33,10 +33,17 @@ def normalize_trade_result(payload: dict[str, Any]) -> tuple[str, float] | None:
     except (TypeError, ValueError):
         profit = 0.0
 
-    if raw_result in {"win", "won"}:
+    if raw_result in {"timeout", "timed_out", "expired"}:
+        return "TIMEOUT", 0.0
+    if raw_result in {"win", "won", "profit"}:
         return "WIN", profit
-    if raw_result in {"loose", "lose", "loss", "lost", "equal", "draw"}:
+    if raw_result in {"loose", "lose", "loss", "lost", "loss_amount", "equal", "draw"}:
         return "LOSS", profit
+    if "profit" in data:
+        if profit > 0:
+            return "WIN", profit
+        if profit < 0:
+            return "LOSS", profit
     return None
 
 
@@ -45,22 +52,27 @@ class TradeResultMonitor:
     fetch_result: FetchResult
     finish_trade: FinishTrade
     timeout_trade: TimeoutTrade
-    poll_seconds: float = 0.5
+    poll_seconds: float = 1.0
     timeout_seconds: float = 2100.0
-    _tasks: dict[tuple[str, str], asyncio.Task[None]] = field(default_factory=dict)
+    _tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
 
     def start(self, user_id: str, order_id: Any, expires_at: Any = None) -> bool:
         normalized_order_id = str(order_id or "").strip()
         if not normalized_order_id:
             return False
 
-        key = (user_id, normalized_order_id)
+        key = normalized_order_id
         task = self._tasks.get(key)
         if task is not None and not task.done():
+            logger.info(
+                "[ORDER_RESULT_MONITOR_REUSED] user_id=%s order_id=%s",
+                user_id,
+                normalized_order_id,
+            )
             return False
 
         self._tasks[key] = asyncio.create_task(self._monitor(user_id, normalized_order_id, expires_at))
-        logger.info("[RESULT_MONITOR_START] user_id=%s order_id=%s", user_id, normalized_order_id)
+        logger.info("[ORDER_RESULT_MONITOR_STARTED] user_id=%s order_id=%s", user_id, normalized_order_id)
         return True
 
     async def shutdown(self) -> None:
@@ -73,7 +85,7 @@ class TradeResultMonitor:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _monitor(self, user_id: str, order_id: str, expires_at: Any = None) -> None:
-        key = (user_id, order_id)
+        key = order_id
         logger.info("[ROBOT TRADE MONITOR START] user_id=%s order_id=%s", user_id, order_id)
         try:
             timeout_seconds = self.timeout_seconds
@@ -87,7 +99,7 @@ class TradeResultMonitor:
                     if expiration.tzinfo is None:
                         expiration = expiration.replace(tzinfo=timezone.utc)
                     delay = max(0.0, (expiration - datetime.now(timezone.utc)).total_seconds())
-                    timeout_seconds = delay + 30.0
+                    timeout_seconds = delay + 15.0
                 except (TypeError, ValueError):
                     logger.warning(
                         "[RESULT_MONITOR_EXPIRATION_INVALID] user_id=%s order_id=%s expires_at=%s",
@@ -102,9 +114,12 @@ class TradeResultMonitor:
                     normalized = normalize_trade_result(payload)
                     if normalized is not None:
                         result, profit = normalized
-                        await self.finish_trade(user_id, order_id, result, profit)
+                        if result == "TIMEOUT":
+                            await self.timeout_trade(user_id, order_id)
+                        else:
+                            await self.finish_trade(user_id, order_id, result, profit)
                         logger.info(
-                            "[RESULT_MONITOR_FINISHED] user_id=%s order_id=%s result=%s profit=%s",
+                            "[ORDER_RESULT_MONITOR_FINISHED] user_id=%s order_id=%s result=%s profit=%s",
                             user_id,
                             order_id,
                             result,
@@ -136,9 +151,14 @@ class TradeResultMonitor:
                         order_id,
                         exc,
                     )
-                await asyncio.sleep(max(0.5, float(self.poll_seconds)))
+                await asyncio.sleep(max(1.0, float(self.poll_seconds)))
 
             await self.timeout_trade(user_id, order_id)
+            logger.info(
+                "[ORDER_RESULT_MONITOR_FINISHED] user_id=%s order_id=%s result=TIMEOUT profit=0.0",
+                user_id,
+                order_id,
+            )
             logger.warning("[ROBOT TRADE TIMEOUT] user_id=%s order_id=%s", user_id, order_id)
         finally:
             current = asyncio.current_task()

@@ -108,6 +108,48 @@ class RobotResetCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed.profit, 0.0)
         self.assertEqual(main.auto_trader.history(user_id)["trades"], [])
 
+    async def test_reset_score_clears_score_history_and_keeps_robot_running(self) -> None:
+        user_id = "user-reset-score-only"
+        state = main.auto_trader.start(user_id)
+        state.status = "WAITING_NEXT_CYCLE"
+        state.worker_running = True
+        main.auto_trader.record_trade(
+            user_id,
+            {
+                "order_id": "score-only-1",
+                "active": "EURUSD-OTC",
+                "direction": "CALL",
+                "amount": 2,
+                "confidence": 90,
+                "payout": 88,
+                "result": "PENDING_RESULT",
+                "sent_at": "2026-06-18T12:00:00+00:00",
+            },
+        )
+        main.auto_trader.finish_trade(user_id, "score-only-1", "WIN", 1.8)
+        main.robot_persistence.save_trade(user_id, main.auto_trader.get(user_id).last_trade)
+        main.robot_persistence.save_trade_history(user_id, main.auto_trader.get(user_id).last_trade)
+
+        with patch.object(main, "persist_robot") as persist:
+            response = await main.robot_reset_score({"user_id": user_id})
+
+        payload = json.loads(response.body)["data"]
+        refreshed = main.auto_trader.get(user_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(refreshed.enabled)
+        self.assertEqual(refreshed.wins, 0)
+        self.assertEqual(refreshed.losses, 0)
+        self.assertEqual(refreshed.profit, 0.0)
+        self.assertIsNone(refreshed.last_trade)
+        self.assertEqual(main.auto_trader.history(user_id)["trades"], [])
+        self.assertEqual(main.robot_persistence.load_trades(user_id), [])
+        self.assertEqual(main.robot_persistence.load_trade_history(user_id, 30), [])
+        self.assertEqual(payload["wins"], 0)
+        self.assertEqual(payload["losses"], 0)
+        self.assertEqual(payload["profit"], 0.0)
+        persist.assert_called_once_with(user_id)
+
     async def test_robot_stop_clears_state_and_worker_immediately(self) -> None:
         user_id = "user-stop"
         state = main.auto_trader.start(user_id)

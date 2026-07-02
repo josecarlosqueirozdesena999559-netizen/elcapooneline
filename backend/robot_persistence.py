@@ -200,11 +200,19 @@ class RobotPersistence(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def clear_finished_trades(self, user_id: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def save_trade_history(self, user_id: str, trade: dict[str, Any]) -> None:
         raise NotImplementedError
 
     @abstractmethod
     def load_trade_history(self, user_id: str, days: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def clear_trade_history(self, user_id: str) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -425,6 +433,26 @@ class SQLiteRobotPersistence(RobotPersistence):
             ).fetchall()
         return list(reversed([json.loads(row["trade_json"]) for row in rows]))
 
+    def clear_finished_trades(self, user_id: str) -> None:
+        user_id = require_user_id(user_id)
+        finished_results = {"WIN", "LOSS", "TIMEOUT"}
+        with self._connect() as connection:
+            rows = connection.execute(
+                "select order_id, trade_json from robot_trades where user_id = ?",
+                (user_id,),
+            ).fetchall()
+            finished_order_ids = [
+                row["order_id"]
+                for row in rows
+                if str((json.loads(row["trade_json"]) or {}).get("result") or "").strip().upper()
+                in finished_results
+            ]
+            for order_id in finished_order_ids:
+                connection.execute(
+                    "delete from robot_trades where user_id = ? and order_id = ?",
+                    (user_id, order_id),
+                )
+
     def save_trade_history(self, user_id: str, trade: dict[str, Any]) -> None:
         item = build_trade_history_item(user_id, trade)
         with self._connect() as connection:
@@ -493,6 +521,14 @@ class SQLiteRobotPersistence(RobotPersistence):
                 (user_id, cutoff),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def clear_trade_history(self, user_id: str) -> None:
+        user_id = require_user_id(user_id)
+        with self._connect() as connection:
+            connection.execute(
+                "delete from robot_trade_history where user_id = ?",
+                (user_id,),
+            )
 
     def save_restore_status(
         self,
@@ -823,6 +859,14 @@ class SupabaseRobotPersistence(RobotPersistence):
         )
         return list(reversed([row.get("trade_json") or {} for row in rows]))
 
+    def clear_finished_trades(self, user_id: str) -> None:
+        user_id = require_user_id(user_id)
+        self._request(
+            "DELETE",
+            f"/robot_trades?user_id=eq.{quote(user_id, safe='')}"
+            "&result=in.(WIN,LOSS,TIMEOUT)",
+        )
+
     def save_trade_history(self, user_id: str, trade: dict[str, Any]) -> None:
         self._ensure_user(user_id)
         item = build_trade_history_item(user_id, trade)
@@ -841,6 +885,13 @@ class SupabaseRobotPersistence(RobotPersistence):
             f"/robot_trade_history?user_id=eq.{quote(user_id, safe='')}"
             f"&finished_at=gte.{quote(cutoff, safe=':-')}"
             "&select=*&order=finished_at.desc,id.desc",
+        )
+
+    def clear_trade_history(self, user_id: str) -> None:
+        user_id = require_user_id(user_id)
+        self._request(
+            "DELETE",
+            f"/robot_trade_history?user_id=eq.{quote(user_id, safe='')}",
         )
 
     def save_restore_status(

@@ -212,7 +212,7 @@ class EndpointResilienceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn(user_id, main.robot_tasks)
 
-    async def test_sessions_status_is_throttled_for_15_seconds(self) -> None:
+    async def test_sessions_status_is_throttled_for_10_seconds(self) -> None:
         user_id = "user-throttle"
         main.mark_user_active(user_id)
         requests: list[str] = []

@@ -249,7 +249,7 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(main.is_user_active(user_id))
         self.assertNotIn(user_id, main.active_users)
 
-    async def test_account_uses_ten_second_cache_without_upstream_call(self) -> None:
+    async def test_account_uses_short_cache_without_upstream_call(self) -> None:
         user_id = "fast-account-cache-hit"
         self.cache_account(user_id)
         cached = main.get_session_cache(user_id).responses["/account"]
@@ -271,6 +271,31 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["data"]["balance"], 42.5)
         upstream_client.assert_not_called()
         self.assertIn("[ACCOUNT_CACHE_HIT]", "\n".join(logs.output))
+
+    async def test_order_result_uses_one_second_cache_without_upstream_loop(self) -> None:
+        user_id = "order-result-cache-hit"
+        client = RecordingClientContext()
+
+        with (
+            patch("backend.main.httpx.AsyncClient", return_value=client),
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            first_status, first_payload = await main.call_bullex_service(
+                "GET",
+                "/orders/order-123/result",
+                user_id,
+            )
+            second_status, second_payload = await main.call_bullex_service(
+                "GET",
+                "/orders/order-123/result",
+                user_id,
+            )
+
+        self.assertEqual(first_status, 200)
+        self.assertEqual(second_status, 200)
+        self.assertEqual(first_payload, second_payload)
+        self.assertEqual(len(client.requests), 1)
+        self.assertIn("[ORDER_RESULT_POLL_THROTTLED]", "\n".join(logs.output))
 
     async def test_session_restore_bypasses_stale_status_cache(self) -> None:
         user_id = "restore-bypasses-cache"

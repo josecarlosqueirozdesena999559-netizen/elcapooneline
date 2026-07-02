@@ -283,9 +283,9 @@ class AutoTraderResultTests(unittest.TestCase):
 
 
 class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
-    def test_default_poll_interval_is_realtime(self) -> None:
+    def test_default_poll_interval_is_cpu_safe(self) -> None:
         monitor = TradeResultMonitor(AsyncMock(), AsyncMock(), AsyncMock())
-        self.assertEqual(monitor.poll_seconds, 0.5)
+        self.assertEqual(monitor.poll_seconds, 1.0)
 
     def test_normalizes_bullex_results(self) -> None:
         self.assertEqual(
@@ -295,6 +295,18 @@ class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             normalize_trade_result({"ok": True, "data": {"result": "loose", "profit": -2}}),
             ("LOSS", -2.0),
+        )
+        self.assertEqual(
+            normalize_trade_result({"ok": True, "data": {"result": "PROFIT", "profit": 1.5}}),
+            ("WIN", 1.5),
+        )
+        self.assertEqual(
+            normalize_trade_result({"ok": True, "data": {"result": "LOSS_AMOUNT", "profit": -2}}),
+            ("LOSS", -2.0),
+        )
+        self.assertEqual(
+            normalize_trade_result({"ok": True, "data": {"result": "TIMEOUT", "profit": None}}),
+            ("TIMEOUT", 0.0),
         )
         self.assertIsNone(
             normalize_trade_result({"ok": True, "data": {"result": "PENDING_RESULT", "profit": None}})
@@ -313,6 +325,7 @@ class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(monitor.start("user-monitor", "104"))
         self.assertFalse(monitor.start("user-monitor", "104"))
+        self.assertFalse(monitor.start("another-user", "104"))
         with patch("backend.trade_result_monitor.asyncio.sleep", new=AsyncMock()):
             await asyncio.gather(*list(monitor._tasks.values()))
 
@@ -350,6 +363,19 @@ class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
         finish.assert_not_awaited()
         timeout.assert_awaited_once_with("user-monitor", "105")
 
+    async def test_monitor_stops_on_upstream_timeout_result(self) -> None:
+        fetch = AsyncMock(return_value=(200, {"ok": True, "data": {"result": "TIMEOUT"}, "error": None}))
+        finish = AsyncMock()
+        timeout = AsyncMock()
+        monitor = TradeResultMonitor(fetch, finish, timeout, poll_seconds=1, timeout_seconds=10)
+
+        monitor.start("user-monitor", "timeout-result")
+        await asyncio.gather(*list(monitor._tasks.values()))
+
+        fetch.assert_awaited_once_with("user-monitor", "timeout-result")
+        finish.assert_not_awaited()
+        timeout.assert_awaited_once_with("user-monitor", "timeout-result")
+
     async def test_monitor_uses_expiration_timeout_instead_of_default_ceiling(self) -> None:
         fetch = AsyncMock(return_value=(200, {"ok": True, "data": {"result": "PENDING_RESULT"}, "error": None}))
         finish = AsyncMock()
@@ -358,7 +384,7 @@ class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
         expires_at = utc_now() - timedelta(seconds=1)
 
         with (
-            patch("backend.trade_result_monitor.monotonic", side_effect=[0, 0, 31]),
+            patch("backend.trade_result_monitor.monotonic", side_effect=[0, 0, 16]),
             patch("backend.trade_result_monitor.asyncio.sleep", new=AsyncMock()),
         ):
             monitor.start("user-monitor-expiration", "107", expires_at.isoformat())

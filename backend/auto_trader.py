@@ -1488,6 +1488,25 @@ class AutoTrader:
         self._sources[user_id] = "memory"
         return state
 
+    def reset_score(self, user_id: str) -> RobotState:
+        state = self.get(user_id)
+        now = utc_now()
+        state.wins = 0
+        state.losses = 0
+        state.profit = 0.0
+        state.stop_reset_at = now
+        self._histories[user_id] = []
+
+        last_trade_result = str((state.last_trade or {}).get("result") or "").strip().upper()
+        if not state.operation_in_progress and last_trade_result in {"WIN", "LOSS", "TIMEOUT"}:
+            state.last_trade = None
+            state.cycle_result = None
+            state.result_received_at = None
+            state.result_display_until = None
+
+        self._sources[user_id] = "memory"
+        return state
+
     def expire_pending_signal(
         self,
         user_id: str,

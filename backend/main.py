@@ -177,14 +177,15 @@ ANALYSIS_ASSETS = [
 ]
 ROBOT_MAX_ASSETS_PER_CYCLE = len(ANALYSIS_ASSETS)
 CHART_ALLOWED_ASSET_SET = set(ANALYSIS_ASSETS)
-SESSION_CACHE_TTL_SECONDS = 15
+SESSION_CACHE_TTL_SECONDS = 10
 SESSION_STATUS_THROTTLE_SECONDS = 10
 ROBOT_SESSION_REFRESH_SECONDS = 15
 SESSION_OFFLINE_TTL_SECONDS = 60
 SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
 SESSION_CACHEABLE_PATHS = {"/sessions/status", "/account"}
 ACTIVE_USER_TTL_SECONDS = 300
-ACCOUNT_CACHE_TTL_SECONDS = 30
+ACCOUNT_CACHE_TTL_SECONDS = 15
+ORDER_RESULT_CACHE_TTL_SECONDS = 1
 BULLEX_UPSTREAM_TIMEOUT_SECONDS = 5.0
 BULLEX_MARKET_DATA_TIMEOUT_SECONDS = 2.0
 BULLEX_CONNECT_TIMEOUT_SECONDS = 60.0
@@ -445,7 +446,7 @@ def schedule_background_refresh(
     *,
     params: dict[str, Any] | None = None,
 ) -> None:
-    if method != "GET" or path not in {"/candles", "/payouts", "/account"}:
+    if method != "GET" or path not in {"/candles", "/payouts"}:
         return
     cache_key = build_cache_key(path, params)
     task_key = (user_id, path, cache_key)
@@ -671,6 +672,8 @@ def connection_guard_reason(user_id: str) -> tuple[str, float] | None:
 
 
 def request_cache_ttl_seconds(path: str, params: dict[str, Any] | None = None) -> int | None:
+    if is_order_result_path(path):
+        return ORDER_RESULT_CACHE_TTL_SECONDS
     if path == "/sessions/status":
         return SESSION_CACHE_TTL_SECONDS
     if path == "/account":
@@ -1468,6 +1471,13 @@ async def call_bullex_service(
             elif path == "/sessions/status":
                 logger.info(
                     "[SESSION_STATUS_CACHE_HIT] user_id=%s path=%s ttl_remaining=%.2f",
+                    user_id,
+                    path,
+                    (cached.expires_at - now).total_seconds(),
+                )
+            elif is_order_result_path(path):
+                logger.info(
+                    "[ORDER_RESULT_POLL_THROTTLED] user_id=%s path=%s ttl_remaining=%.2f",
                     user_id,
                     path,
                     (cached.expires_at - now).total_seconds(),
@@ -3343,6 +3353,10 @@ def validate_buy_real_order_payload(body: dict[str, Any]) -> str | None:
     if body.get("confirm_real") is not True:
         return "BUY_REAL_PAYLOAD_CONFIRM_REAL_REQUIRED"
     return None
+
+
+def is_order_result_path(path: str) -> bool:
+    return path.startswith("/orders/") and path.endswith("/result")
 
 
 def persist_robot(user_id: str) -> None:
@@ -6693,6 +6707,29 @@ async def robot_reset_cycle(
 
 @app.options("/robot/reset-cycle")
 async def robot_reset_cycle_options() -> JSONResponse:
+    return json_response(200, build_success({"preflight": True}))
+
+
+@app.post("/robot/reset-score")
+async def robot_reset_score(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
+    user_id = auth["user_id"]
+    async with auto_trader.lock(user_id):
+        state = auto_trader.reset_score(user_id)
+        robot_persistence.clear_finished_trades(user_id)
+        robot_persistence.clear_trade_history(user_id)
+        persist_robot(user_id)
+    logger.info(
+        "[ROBOT_SCORE_RESET] user_id=%s wins=%s losses=%s profit=%s",
+        user_id,
+        state.wins,
+        state.losses,
+        state.profit,
+    )
+    return json_response(200, build_robot_payload(state, user_id=user_id))
+
+
+@app.options("/robot/reset-score")
+async def robot_reset_score_options() -> JSONResponse:
     return json_response(200, build_success({"preflight": True}))
 
 
