@@ -468,6 +468,9 @@ class RobotState:
             data["operation_message"] = SIGNAL_EXPIRED_MESSAGE
         elif self.status == STATUS_SIGNAL_REJECTED and self.last_order_error == "PAYOUT_TOO_LOW":
             data["operation_message"] = "Entrada bloqueada: payout abaixo do minimo."
+        elif self.status == STATUS_ORDER_REJECTED:
+            data["operation_message"] = self.last_order_error or self.rejection_reason or "Ordem rejeitada"
+            data["status_message"] = data["operation_message"]
         if self.status == STATUS_ANALYZING and data["status"] == STATUS_ANALYZING:
             data["last_analysis_result"] = "RUNNING"
             data["analysis_result"] = "RUNNING"
@@ -1766,6 +1769,19 @@ class AutoTrader:
         state.entry_window_open = False
         state.seconds_until_entry_window = 0
         state.last_analysis_result = STATUS_ORDER_REJECTED
+        state.best_candidate = None
+        state.cycle_best_candidate = None
+        state.cycle_best_trade_candidate = None
+        state.candidates = []
+        state.candidates_count = 0
+        state.strategy_score = 0
+        state.strategy_name = None
+        state.strategy_reason = None
+        state.used_strategies = []
+        state.candle_reading = None
+        state.entry_reason = None
+        state.block_reasons = []
+        state.metrics = {}
         self._clear_gale_state(state)
         return state
 

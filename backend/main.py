@@ -1718,6 +1718,15 @@ async def call_bullex_service(
     except ValueError:
         payload = build_error("INVALID_BULLEX_RESPONSE")
 
+    if response.status_code == 422 and path == "/orders/buy-real":
+        logger.error(
+            "[BUY_REAL_UPSTREAM_VALIDATION_ERROR] user_id=%s payload=%s detail=%s",
+            user_id,
+            strip_ai_fields(json_body or {}),
+            payload,
+        )
+        return response.status_code, build_error("BUY_REAL_PAYLOAD_REQUIRED_FIELDS")
+
     response_contract_valid = (
         isinstance(payload, dict)
         and "ok" in payload
@@ -3286,6 +3295,8 @@ def readable_order_error(error: Any) -> str:
         return "Ativo nao encontrado na BullEx"
     if "account mismatch" in normalized or "mode mismatch" in normalized or "modo da conta" in normalized:
         return "Conta BullEx incompativel com o modo selecionado"
+    if "field required" in normalized or "payload required fields" in normalized or "buy real payload required fields" in normalized:
+        return "Compra REAL bloqueada por payload incompleto. Atualize backend-gateway e bullex-service no VPS."
     return raw_error
 
 
@@ -5500,7 +5511,7 @@ async def execute_robot_cycle(
                     if state.account_mode == "REAL":
                         persist_robot(user_id)
                         logger.warning("[REAL BUY BLOCKED reason=%s] user_id=%s", reason, user_id)
-                        return 502, build_error(reason)
+                        return 502, build_robot_payload(state, user_id=user_id)
                     return 502, build_robot_payload(state)
                 mark_disconnected_from_payload(user_id, order_payload)
                 if not order_payload.get("ok"):
@@ -5547,7 +5558,7 @@ async def execute_robot_cycle(
                     if state.account_mode == "REAL":
                         persist_robot(user_id)
                         logger.warning("[REAL BUY BLOCKED reason=%s] user_id=%s", reason, user_id)
-                        return order_status, build_error(reason)
+                        return order_status, build_robot_payload(state, user_id=user_id)
                     return order_status, build_robot_payload(state)
 
                 order_data = order_payload.get("data") if isinstance(order_payload.get("data"), dict) else {}
