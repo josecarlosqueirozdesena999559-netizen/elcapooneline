@@ -62,6 +62,43 @@ class AutoTraderStateTests(unittest.TestCase):
         self.assertEqual(trader.source("user-a"), "memory")
         self.assertEqual(trader.source("user-b"), "default")
 
+    def test_analysis_countdown_does_not_reveal_entry_before_cycle_ends(self) -> None:
+        user_id = "user-analysis-countdown-contract"
+        state = main.auto_trader.start(user_id)
+        state.connected = True
+        main.auto_trader.set_analysis_candidates(
+            user_id,
+            [
+                {
+                    "symbol": "EURUSD-OTC",
+                    "signal": "CALL",
+                    "direction": "CALL",
+                    "confidence": 94,
+                    "payout": 90,
+                    "strategy_score": 94,
+                    "trade_allowed": True,
+                }
+            ],
+            {
+                "symbol": "EURUSD-OTC",
+                "signal": "CALL",
+                "direction": "CALL",
+                "confidence": 94,
+                "payout": 90,
+                "strategy_score": 94,
+                "trade_allowed": True,
+            },
+        )
+
+        payload = main.build_robot_payload(state)["data"]
+
+        self.assertEqual(payload["status"], STATUS_WAITING_NEXT_CYCLE)
+        self.assertEqual(payload["display_countdown_label"], "Analisando por")
+        self.assertGreater(payload["display_countdown_seconds"], 0)
+        self.assertIsNone(payload["pending_signal"])
+        self.assertEqual(payload["analysis_message"], "Analisando mercado...")
+        self.assertEqual(payload["status_message"], "Analisando diversos ativos")
+
     def test_updating_user_b_does_not_change_user_a(self) -> None:
         trader = AutoTrader()
         trader.update_config(

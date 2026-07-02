@@ -436,7 +436,7 @@ class RobotState:
         display_countdown_label = None
         display_countdown_seconds = 0
         if data["status"] == STATUS_WAITING_NEXT_CYCLE:
-            display_countdown_label = "Próxima entrada em"
+            display_countdown_label = "Analisando por"
             display_countdown_seconds = max(0, int(data["seconds_until_next_cycle"]))
         elif data["status"] in {STATUS_WAITING_NEXT_CANDLE_ENTRY, STATUS_WAITING_GALE_ENTRY, STATUS_WAITING_ENTRY}:
             display_countdown_label = "Entrada no inicio da proxima vela em"
@@ -492,9 +492,9 @@ class RobotState:
         if (
             self.status == STATUS_WAITING_NEXT_CYCLE
             and not self.operation_in_progress
-            and not (self.pending_signal or self.best_candidate)
+            and not self.pending_signal
         ):
-            data["strategy_reason"] = "Analisando mercado em silêncio. A entrada será revelada quando o contador zerar."
+            data["strategy_reason"] = "Analisando mercado. A estrategia, direcao e ativo serao revelados quando o contador zerar."
             data["used_strategies"] = []
             data["candle_reading"] = None
             data["entry_reason"] = None
@@ -502,13 +502,12 @@ class RobotState:
             data["metrics"] = {}
             data["last_signal"] = None
             data["pending_signal"] = None
-            data["analysis_message"] = "Analisando mercado em silêncio..."
+            data["analysis_message"] = "Analisando mercado..."
             if data.get("analysis_result") == "NO_TRADE":
                 data["analysis_message"] = "Sem entrada neste ciclo"
                 data["status_message"] = "Sem entrada neste ciclo"
-            elif data.get("best_candidate_summary"):
-                data["analysis_message"] = ANALYSIS_MESSAGE
-                data["status_message"] = f"Melhor candidato: {data['best_candidate_summary']}"
+            else:
+                data["status_message"] = "Analisando diversos ativos"
         for deprecated_key in (
             "analysis_window_open",
             "seconds_until_analysis_window",

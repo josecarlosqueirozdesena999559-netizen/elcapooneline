@@ -175,6 +175,7 @@ ANALYSIS_ASSETS = [
     "GBPJPY-OTC",
     "AUDJPY-OTC",
 ]
+ROBOT_MAX_ASSETS_PER_CYCLE = len(ANALYSIS_ASSETS)
 CHART_ALLOWED_ASSET_SET = set(ANALYSIS_ASSETS)
 SESSION_CACHE_TTL_SECONDS = 15
 SESSION_STATUS_THROTTLE_SECONDS = 10
@@ -204,7 +205,6 @@ CANDLES_REQUEST_TIMEOUT_SECONDS = 5.0
 ACTIVE_COOLDOWN_SECONDS = 15
 PAYOUT_COOLDOWN_SECONDS = 15
 STALE_MARKET_DATA_SECONDS = 120
-ROBOT_MAX_ASSETS_PER_CYCLE = 10
 ROBOT_ASSET_QUEUE_SLEEP_SECONDS = 0.0
 ROBOT_CANDLE_COUNT = 100
 ACTIVE_DATA_TIMEOUT_SECONDS = 2.0
@@ -2954,7 +2954,7 @@ def build_robot_payload(state: Any, **extra: Any) -> dict[str, Any]:
         data["status"] = STATUS_WAITING_ENTRY
         data["analysis_message"] = None
         data["status_message"] = data.get("status_message") or "Melhor ativo encontrado"
-    elif data.get("best_candidate") and data.get("status") in {STATUS_ANALYZING, STATUS_WAITING_NEXT_CYCLE, STATUS_SIGNAL_FOUND}:
+    elif data.get("best_candidate") and data.get("status") in {STATUS_ANALYZING, STATUS_SIGNAL_FOUND}:
         data["status"] = STATUS_SIGNAL_FOUND
         data["analysis_message"] = None
         data["status_message"] = data.get("status_message") or "Melhor ativo encontrado"
