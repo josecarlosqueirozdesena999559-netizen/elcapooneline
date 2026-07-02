@@ -52,10 +52,10 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(data["pending_signal"])
         self.assertIsNone(data["best_candidate"])
         self.assertIsNone(data["voice_message"])
-        self.assertIn("silêncio", data["analysis_message"])
+        self.assertEqual(data["analysis_message"], "Analisando mercado...")
         worker.assert_called_once_with(user_id)
 
-    async def test_waiting_cycle_updates_best_candidate_without_pending_signal(self) -> None:
+    async def test_waiting_cycle_does_not_preselect_candidate_before_timer_finishes(self) -> None:
         user_id = "phase36-analysis"
         state = main.auto_trader.start(user_id)
         state.next_cycle_at = utc_now() + timedelta(minutes=5)
@@ -69,9 +69,10 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
                 return 200, main.build_success({"active": params["active"], "payout": 90})
             raise AssertionError(f"unexpected path: {path}")
 
+        scan = AsyncMock(return_value=(200, main.build_success([make_signal()])))
         with (
             patch.object(main, "call_bullex_service", new=AsyncMock(side_effect=fake_bullex)),
-            patch.object(main, "scan_local_signals", new=AsyncMock(return_value=(200, main.build_success([make_signal()])))),
+            patch.object(main, "scan_local_signals", new=scan),
             patch.object(main, "persist_robot"),
         ):
             status_code, payload = await main.execute_robot_cycle(user_id)
@@ -80,15 +81,16 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_code, 200)
         self.assertEqual(data["status"], STATUS_WAITING_NEXT_CYCLE)
         self.assertIsNone(data["pending_signal"])
-        self.assertEqual(main.auto_trader.get(user_id).best_candidate["symbol"], "EURUSD-OTC")
+        self.assertIsNone(main.auto_trader.get(user_id).best_candidate)
         self.assertIsNone(data["best_candidate"])
         self.assertIsNone(data["voice_message"])
-        self.assertIn("silêncio", data["analysis_message"])
-        self.assertEqual(data["display_countdown_label"], "Entrada em")
+        self.assertEqual(data["analysis_message"], "Analisando mercado...")
+        self.assertEqual(data["display_countdown_label"], "Analisando por")
         self.assertNotIn("analysis_window_open", data)
         self.assertNotEqual(data["status"], "WAITING_ANALYSIS_WINDOW")
+        scan.assert_not_awaited()
 
-    async def test_cycle_due_sends_current_best_candidate_immediately(self) -> None:
+    async def test_cycle_due_ignores_stale_candidate_and_analyzes_fresh(self) -> None:
         user_id = "phase36-entry"
         state = main.auto_trader.start(user_id)
         state.next_cycle_at = utc_now() - timedelta(seconds=1)
@@ -99,14 +101,16 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_bullex(method, path, call_user_id, json_body=None, params=None):
             if path == "/sessions/status":
                 return 200, main.build_success(
-                    {"connected": True, "active_mode": "PRACTICE", "server_time": 300.0}
+                    {"connected": True, "active_mode": "REAL", "server_time": 300.0}
                 )
-            if path == "/orders/buy-demo":
+            if path == "/orders/buy-real":
                 return 200, main.build_success({"order_id": "phase36-1"})
             raise AssertionError(f"unexpected path: {path}")
 
+        scan = AsyncMock(return_value=(200, main.build_success([make_signal("GBPUSD-OTC", "PUT")])))
         with (
             patch.object(main, "call_bullex_service", new=AsyncMock(side_effect=fake_bullex)),
+            patch.object(main, "scan_local_signals", new=scan),
             patch.object(main.trade_result_monitor, "start"),
             patch.object(main, "persist_robot"),
         ):
@@ -114,11 +118,13 @@ class Phase36ContinuousCycleTests(unittest.IsolatedAsyncioTestCase):
 
         data = payload["data"]
         self.assertEqual(status_code, 200)
-        self.assertEqual(data["status"], STATUS_PENDING_RESULT)
+        self.assertEqual(data["status"], "WAITING_RESULT")
         self.assertTrue(data["operation_in_progress"])
         self.assertTrue(data["result_waiting"])
         self.assertIsNone(data["pending_signal"])
-        self.assertEqual(data["last_trade"]["active"], "EURUSD-OTC")
+        self.assertEqual(data["last_trade"]["active"], "GBPUSD-OTC")
+        self.assertEqual(data["last_trade"]["direction"], "PUT")
+        scan.assert_awaited_once()
 
     async def test_expiration_uses_fresh_bullex_time_after_order(self) -> None:
         user_id = "phase36-fresh-expiration"

@@ -4015,6 +4015,12 @@ async def update_cycle_analysis(
     force: bool = False,
 ) -> Any:
     now = utc_now()
+    if force:
+        state.best_candidate = None
+        state.cycle_best_candidate = None
+        state.cycle_best_trade_candidate = None
+        state.candidates = []
+        state.candidates_count = 0
     if not force and state.last_analysis_at is not None:
         elapsed = (now - state.last_analysis_at).total_seconds()
         if elapsed < 3:
@@ -4669,13 +4675,11 @@ async def execute_robot_cycle(
                 and not state.operation_in_progress
             ):
                 if seconds_until_next_cycle > 0:
-                    state = await update_cycle_analysis(user_id, state, entry_window)
                     logger.info(
-                        "[ENTRY_WINDOW] user_id=%s cycle_id=%s next_cycle_at=%s best_candidate=%s",
+                        "[ENTRY_WINDOW] user_id=%s cycle_id=%s next_cycle_at=%s phase=waiting_next_cycle",
                         user_id,
                         state.cycle_id,
                         state.next_cycle_at,
-                        (state.cycle_best_candidate or state.best_candidate or {}).get("symbol"),
                     )
                     return 200, build_robot_payload(state)
 
@@ -4684,8 +4688,7 @@ async def execute_robot_cycle(
                     user_id,
                     state.cycle_id,
                 )
-                if state.cycle_best_candidate is None and state.best_candidate is None:
-                    state = await update_cycle_analysis(user_id, state, entry_window, force=True)
+                state = await update_cycle_analysis(user_id, state, entry_window, force=True)
                 selected = resolve_cycle_entry_candidate(state)
                 if selected is None:
                     logger.info(

@@ -315,6 +315,8 @@ class RobotState:
             self.rejection_reason = None
             self.pending_signal = None
             self.best_candidate = None
+            self.cycle_best_candidate = None
+            self.cycle_best_trade_candidate = None
             self.candidates = []
             self.candidates_count = 0
             self.strategy_score = 0
@@ -328,6 +330,9 @@ class RobotState:
             data["status"] = self.status
             data["next_cycle_at"] = self.next_cycle_at.isoformat() if self.next_cycle_at is not None else None
             data["pending_signal"] = None
+            data["best_candidate"] = None
+            data["cycle_best_candidate"] = None
+            data["cycle_best_trade_candidate"] = None
             data["candidates"] = []
             data["candidates_count"] = 0
             data["strategy_score"] = 0
@@ -1685,6 +1690,7 @@ class AutoTrader:
         trade.setdefault("expires_at", trade["expected_expire_at"])
         state.last_trade = trade
         state.last_entry_at = sent_at
+        state.pending_signal = None
         state.result_received_at = None
         state.result_display_until = None
         state.operation_in_progress = True
