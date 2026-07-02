@@ -56,12 +56,15 @@ class TradeResultMonitor:
     timeout_seconds: float = 2100.0
     _tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
 
+    def _task_key(self, user_id: str, order_id: str) -> str:
+        return f"{str(user_id).strip()}:{str(order_id).strip()}"
+
     def start(self, user_id: str, order_id: Any, expires_at: Any = None) -> bool:
         normalized_order_id = str(order_id or "").strip()
         if not normalized_order_id:
             return False
 
-        key = normalized_order_id
+        key = self._task_key(user_id, normalized_order_id)
         task = self._tasks.get(key)
         if task is not None and not task.done():
             logger.info(
@@ -85,10 +88,11 @@ class TradeResultMonitor:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _monitor(self, user_id: str, order_id: str, expires_at: Any = None) -> None:
-        key = order_id
+        key = self._task_key(user_id, order_id)
         logger.info("[ROBOT TRADE MONITOR START] user_id=%s order_id=%s", user_id, order_id)
         try:
-            timeout_seconds = self.timeout_seconds
+            timeout_seconds = float(self.timeout_seconds)
+            poll_seconds = max(1.0, float(self.poll_seconds))
             if expires_at is not None:
                 try:
                     expiration = (
@@ -151,7 +155,7 @@ class TradeResultMonitor:
                         order_id,
                         exc,
                     )
-                await asyncio.sleep(max(1.0, float(self.poll_seconds)))
+                await asyncio.sleep(poll_seconds)
 
             await self.timeout_trade(user_id, order_id)
             logger.info(

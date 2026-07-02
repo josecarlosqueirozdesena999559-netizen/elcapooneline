@@ -179,6 +179,9 @@ ROBOT_MAX_ASSETS_PER_CYCLE = len(ANALYSIS_ASSETS)
 CHART_ALLOWED_ASSET_SET = set(ANALYSIS_ASSETS)
 SESSION_CACHE_TTL_SECONDS = 10
 SESSION_STATUS_THROTTLE_SECONDS = 10
+ROBOT_STATE_MIN_POLL_SECONDS = 2
+ACCOUNT_MIN_POLL_SECONDS = 10
+SESSION_STATUS_MIN_POLL_SECONDS = 10
 ROBOT_SESSION_REFRESH_SECONDS = 15
 SESSION_OFFLINE_TTL_SECONDS = 60
 SESSION_FAILURE_BACKOFF_SECONDS = (10, 30, 60, 300)
@@ -1782,11 +1785,16 @@ async def call_bullex_service(
     cacheable_success = (
         method == "GET"
         and ttl_seconds is not None
-        and response.is_success
-        and payload.get("ok")
         and (
-            path not in SESSION_CACHEABLE_PATHS
-            or payload_connected_state(payload) is not False
+            (
+                response.is_success
+                and payload.get("ok")
+                and (
+                    path not in SESSION_CACHEABLE_PATHS
+                    or payload_connected_state(payload) is not False
+                )
+            )
+            or is_order_result_path(path)
         )
     )
     if cacheable_success:
@@ -1853,10 +1861,24 @@ async def call_bullex_service(
     return response.status_code, payload
 
 
-def json_response(status_code: int, payload: dict[str, Any]) -> JSONResponse:
+def polling_headers(seconds: int) -> dict[str, str]:
+    safe_seconds = max(1, int(seconds))
+    return {
+        "Cache-Control": f"private, max-age={safe_seconds}",
+        "Retry-After": str(safe_seconds),
+    }
+
+
+def json_response(
+    status_code: int,
+    payload: dict[str, Any],
+    *,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
         content=normalize_service_payload(payload),
+        headers=headers,
     )
 
 
@@ -5821,12 +5843,15 @@ async def robot_worker(user_id: str) -> None:
                     continue
             if guard is not None:
                 reason, remaining = guard
+                sleep_seconds = max(1.0, min(float(remaining), float(SESSION_OFFLINE_TTL_SECONDS)))
                 if reason == "offline":
                     logger.warning("[USER_OFFLINE_SKIPPED] user_id=%s retry_in=%.2f", user_id, remaining)
                 else:
                     logger.warning("[BACKOFF_ACTIVE] user_id=%s retry_in=%.2f", user_id, remaining)
                 logger.warning("[CPU_LOOP_PROTECTION] user_id=%s reason=%s", user_id, reason)
-                logger.warning("[BACKOFF_IGNORED_FOR_ROBOT_WORKER] user_id=%s reason=%s", user_id, reason)
+                logger.info("[ROBOT_WORKER_BACKOFF_SLEEP] user_id=%s reason=%s seconds=%.2f", user_id, reason, sleep_seconds)
+                await asyncio.sleep(sleep_seconds)
+                continue
             if state.operation_in_progress or result_waiting:
                 logger.info(
                     "[ANALYSIS_SKIPPED_WAITING_RESULT] user_id=%s order_id=%s",
@@ -6248,13 +6273,16 @@ async def _robot_state_impl(auth: dict[str, str]) -> JSONResponse:
             real_block_reason=block_reason,
             real_balance_warning=real_balance_warning,
         ),
+        headers=polling_headers(ROBOT_STATE_MIN_POLL_SECONDS),
     )
 
 
 @app.get("/robot/state")
 async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     try:
-        return await _robot_state_impl(auth)
+        response = await _robot_state_impl(auth)
+        response.headers.update(polling_headers(ROBOT_STATE_MIN_POLL_SECONDS))
+        return response
     except Exception as exc:
         logger.info(
             "[ROBOT_STATE_RECOVERED] user_id=%s reason=%s",
@@ -6262,7 +6290,11 @@ async def robot_state(auth: dict[str, str] = Depends(require_headers)) -> JSONRe
             exc.__class__.__name__,
             exc_info=True,
         )
-        return json_response(200, build_robot_state_fallback_payload(auth.get("user_id"), exc))
+        return json_response(
+            200,
+            build_robot_state_fallback_payload(auth.get("user_id"), exc),
+            headers=polling_headers(ROBOT_STATE_MIN_POLL_SECONDS),
+        )
 
 
 def build_robot_stats(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -7149,7 +7181,9 @@ async def _bullex_status_impl(auth: dict[str, str]) -> JSONResponse:
 @app.get("/bullex/status")
 async def bullex_status(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     try:
-        return await _bullex_status_impl(auth)
+        response = await _bullex_status_impl(auth)
+        response.headers.update(polling_headers(SESSION_STATUS_MIN_POLL_SECONDS))
+        return response
     except Exception as exc:
         logger.warning(
             "[STATUS_RECOVERED] user_id=%s reason=%s",
@@ -7157,12 +7191,18 @@ async def bullex_status(auth: dict[str, str] = Depends(require_headers)) -> JSON
             exc.__class__.__name__,
             exc_info=True,
         )
-        return json_response(200, build_controlled_upstream_error(exc))
+        return json_response(
+            200,
+            build_controlled_upstream_error(exc),
+            headers=polling_headers(SESSION_STATUS_MIN_POLL_SECONDS),
+        )
 
 
 @app.get("/bullex/balance")
 async def bullex_balance(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
-    return await _bullex_account_impl(auth)
+    response = await _bullex_account_impl(auth)
+    response.headers.update(polling_headers(ACCOUNT_MIN_POLL_SECONDS))
+    return response
 
 
 @app.post("/bullex/change-mode")
@@ -7615,7 +7655,9 @@ async def _bullex_account_impl(auth: dict[str, str]) -> JSONResponse:
 @app.get("/bullex/account")
 async def bullex_account(auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     try:
-        return await _bullex_account_impl(auth)
+        response = await _bullex_account_impl(auth)
+        response.headers.update(polling_headers(ACCOUNT_MIN_POLL_SECONDS))
+        return response
     except Exception as exc:
         logger.warning(
             "[ACCOUNT_RECOVERED] user_id=%s reason=%s",
@@ -7623,10 +7665,14 @@ async def bullex_account(auth: dict[str, str] = Depends(require_headers)) -> JSO
             exc.__class__.__name__,
             exc_info=True,
         )
-        return json_response(200, build_controlled_upstream_error(exc))
+        return json_response(
+            200,
+            build_controlled_upstream_error(exc),
+            headers=polling_headers(ACCOUNT_MIN_POLL_SECONDS),
+        )
 
 
 @app.get("/bullex/order-result/{order_id}")
 async def bullex_order_result(order_id: str, auth: dict[str, str] = Depends(require_headers)) -> JSONResponse:
     status_code, payload = await call_bullex_service("GET", f"/orders/{order_id}/result", auth["user_id"])
-    return json_response(status_code, payload)
+    return json_response(status_code, payload, headers=polling_headers(ORDER_RESULT_CACHE_TTL_SECONDS))

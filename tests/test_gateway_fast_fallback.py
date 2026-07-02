@@ -177,6 +177,31 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(payload["data"]["retry_in"], 0)
         upstream_client.assert_not_called()
 
+    async def test_robot_worker_sleeps_during_session_backoff(self) -> None:
+        user_id = "worker-backoff-user"
+        main.mark_user_active(user_id)
+        state = main.auto_trader.start(user_id)
+        state.connected = True
+        state.active_mode = "REAL"
+        main.get_session_cache(user_id).next_retry_at = main.utc_now() + timedelta(seconds=10)
+
+        async def stop_after_sleep(seconds: float) -> None:
+            self.assertGreaterEqual(seconds, 9)
+            state.enabled = False
+
+        with (
+            patch("backend.main.asyncio.sleep", new=AsyncMock(side_effect=stop_after_sleep)) as sleep,
+            patch.object(main, "execute_robot_cycle", new=AsyncMock()) as execute_cycle,
+            self.assertLogs("backend-gateway", level="INFO") as logs,
+        ):
+            await main.robot_worker(user_id)
+
+        sleep.assert_awaited()
+        execute_cycle.assert_not_awaited()
+        output = "\n".join(logs.output)
+        self.assertIn("[ROBOT_WORKER_BACKOFF_SLEEP]", output)
+        self.assertNotIn("[BACKOFF_IGNORED_FOR_ROBOT_WORKER]", output)
+
     def test_offline_failure_does_not_create_user_backoff(self) -> None:
         user_id = "offline-backoff-user"
         main.auto_trader.start(user_id)
@@ -296,6 +321,26 @@ class GatewayFastFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_payload, second_payload)
         self.assertEqual(len(client.requests), 1)
         self.assertIn("[ORDER_RESULT_POLL_THROTTLED]", "\n".join(logs.output))
+
+    async def test_polling_endpoints_expose_minimum_retry_headers(self) -> None:
+        user_id = "poll-headers-user"
+        main.mark_user_active(user_id)
+
+        with (
+            patch.object(main, "_robot_state_impl", new=AsyncMock(return_value=main.json_response(200, main.build_success({})))),
+            patch.object(main, "_bullex_status_impl", new=AsyncMock(return_value=main.json_response(200, main.build_success({})))),
+            patch.object(main, "_bullex_account_impl", new=AsyncMock(return_value=main.json_response(200, main.build_success({})))),
+            patch.object(main, "call_bullex_service", new=AsyncMock(return_value=(200, main.build_success({"result": "PENDING_RESULT"})))),
+        ):
+            robot = await main.robot_state({"user_id": user_id})
+            status = await main.bullex_status({"user_id": user_id})
+            account = await main.bullex_account({"user_id": user_id})
+            order = await main.bullex_order_result("order-headers", {"user_id": user_id})
+
+        self.assertEqual(robot.headers["retry-after"], "2")
+        self.assertEqual(status.headers["retry-after"], "10")
+        self.assertEqual(account.headers["retry-after"], "10")
+        self.assertEqual(order.headers["retry-after"], "1")
 
     async def test_session_restore_bypasses_stale_status_cache(self) -> None:
         user_id = "restore-bypasses-cache"

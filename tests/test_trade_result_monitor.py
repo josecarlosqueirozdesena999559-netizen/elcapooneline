@@ -325,13 +325,26 @@ class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(monitor.start("user-monitor", "104"))
         self.assertFalse(monitor.start("user-monitor", "104"))
-        self.assertFalse(monitor.start("another-user", "104"))
         with patch("backend.trade_result_monitor.asyncio.sleep", new=AsyncMock()):
             await asyncio.gather(*list(monitor._tasks.values()))
 
         self.assertEqual(fetch.await_count, 2)
         finish.assert_awaited_once_with("user-monitor", "104", "WIN", 1.76)
         timeout.assert_not_awaited()
+
+    async def test_monitor_allows_same_order_id_for_different_users(self) -> None:
+        fetch = AsyncMock(return_value=(200, {"ok": True, "data": {"result": "win", "profit": 1}, "error": None}))
+        finish = AsyncMock()
+        timeout = AsyncMock()
+        monitor = TradeResultMonitor(fetch, finish, timeout, poll_seconds=1, timeout_seconds=1)
+
+        self.assertTrue(monitor.start("user-a", "same-order"))
+        self.assertTrue(monitor.start("user-b", "same-order"))
+        self.assertEqual(len(monitor._tasks), 2)
+
+        await asyncio.gather(*list(monitor._tasks.values()))
+
+        self.assertEqual(fetch.await_count, 2)
 
     async def test_monitor_fetches_immediately_instead_of_waiting_expiration(self) -> None:
         fetch = AsyncMock(
