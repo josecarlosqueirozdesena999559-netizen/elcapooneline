@@ -5,7 +5,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from threading import BoundedSemaphore, RLock
+from threading import BoundedSemaphore, Lock, RLock
 from typing import Any
 
 from fastapi import FastAPI, Header, Request
@@ -74,6 +74,9 @@ ASSETS_TTL_SECONDS = 300
 PAYOUT_TTL_SECONDS = 60
 CANDLES_TTL_SECONDS = 60
 STALE_MARKET_DATA_SECONDS = 120
+INSTRUMENTS_CACHE_TTL_SECONDS = 300
+INSTRUMENTS_TIMEOUT_SECONDS = 8
+INSTRUMENTS_BACKOFF_SECONDS = (10, 30, 60)
 MIN_API_CALL_SPACING_SECONDS = 0.05
 SESSION_STATUS_THROTTLE_SECONDS = 10
 SESSION_OFFLINE_TTL_SECONDS = 60
@@ -175,6 +178,16 @@ class LoginProgress:
     active: bool = False
 
 
+@dataclass
+class InstrumentsCacheState:
+    assets: list[dict[str, Any]] | None = None
+    expires_at: float = 0.0
+    updated_at: float = 0.0
+    failure_count: int = 0
+    next_retry_at: float = 0.0
+    lock: Lock = field(default_factory=Lock)
+
+
 class SessionManager:
     def __init__(self, store: SessionStore | None = None) -> None:
         self.sessions: dict[str, ManagedSession] = {}
@@ -186,6 +199,11 @@ class SessionManager:
         self.last_status_cache: dict[str, dict[str, Any]] = {}
         self._probe_cache: dict[str, SessionProbeState] = {}
         self._login_progress: dict[str, LoginProgress] = {}
+        self._instruments_cache: dict[str, InstrumentsCacheState] = {}
+        self._instruments_cache_guard = RLock()
+        self._market_data_executor = ThreadPoolExecutor(
+            max_workers=int(os.getenv("BULLEX_MARKET_DATA_WORKERS", "4"))
+        )
         self.store = store
         self._runtime_lock = RLock()
         self._max_concurrent_api_calls = read_max_concurrent_api_calls()
@@ -235,8 +253,14 @@ class SessionManager:
         probe.failure_count = 0
         probe.next_retry_at = 0.0
         probe.offline_until = 0.0
+        with self._instruments_cache_guard:
+            self._instruments_cache.pop(user_id, None)
         self.last_account_cache.pop(user_id, None)
         self.last_status_cache.pop(user_id, None)
+
+    def get_instruments_cache_state(self, user_id: str) -> InstrumentsCacheState:
+        with self._instruments_cache_guard:
+            return self._instruments_cache.setdefault(user_id, InstrumentsCacheState())
 
     def login_progress_payload(self, user_id: str) -> dict[str, Any]:
         progress = self.get_login_progress(user_id)
@@ -1445,9 +1469,128 @@ def normalize_candles(raw_candles: Any) -> list[dict[str, Any]]:
     return [normalize_candle(candle) for candle in raw_candles if isinstance(candle, dict)]
 
 
-def read_assets(client: Bullex) -> list[dict[str, Any]]:
-    client.update_ACTIVES_OPCODE()
+def clone_assets(assets: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    if assets is None:
+        return None
+    return [dict(asset) for asset in assets]
+
+
+def cached_assets_if_valid(state: InstrumentsCacheState) -> list[dict[str, Any]] | None:
+    cached = clone_assets(state.assets)
+    if cached is not None and time.monotonic() < state.expires_at:
+        return cached
+    return None
+
+
+def stale_assets_if_available(state: InstrumentsCacheState) -> list[dict[str, Any]] | None:
+    return clone_assets(state.assets)
+
+
+def instruments_backoff_seconds(failure_count: int) -> int:
+    index = min(max(failure_count, 1), len(INSTRUMENTS_BACKOFF_SECONDS)) - 1
+    return INSTRUMENTS_BACKOFF_SECONDS[index]
+
+
+def read_assets_uncached(client: Bullex) -> list[dict[str, Any]]:
+    client.update_ACTIVES_OPCODE(timeout=INSTRUMENTS_TIMEOUT_SECONDS)
     return normalize_assets(client.get_all_ACTIVES_OPCODE())
+
+
+def read_assets(client: Bullex, *, user_id: str) -> list[dict[str, Any]]:
+    state = session_manager.get_instruments_cache_state(user_id)
+    now = time.monotonic()
+    cached = cached_assets_if_valid(state)
+    if cached is not None:
+        logger.info("[INSTRUMENTS_CACHE_HIT] user_id=%s ttl_remaining_ms=%s", user_id, int((state.expires_at - now) * 1000))
+        return cached
+
+    if state.next_retry_at > now:
+        logger.warning("[INSTRUMENTS_BACKOFF_ACTIVE] user_id=%s retry_in_ms=%s", user_id, int((state.next_retry_at - now) * 1000))
+        cached = stale_assets_if_available(state)
+        if cached is not None:
+            logger.warning("[INSTRUMENTS_CACHE_STALE_USED] user_id=%s reason=backoff", user_id)
+            return cached
+        raise ServiceError("INSTRUMENTS_BACKOFF_ACTIVE", 503)
+
+    lock_acquired = state.lock.acquire(blocking=False)
+    if not lock_acquired:
+        logger.info("[READ_ASSETS_LOCK_WAIT] user_id=%s", user_id)
+        cached = stale_assets_if_available(state)
+        if cached is not None:
+            logger.info("[READ_ASSETS_LOCK_REUSED] user_id=%s", user_id)
+            logger.warning("[INSTRUMENTS_CACHE_STALE_USED] user_id=%s reason=lock_busy", user_id)
+            return cached
+        if not state.lock.acquire(timeout=INSTRUMENTS_TIMEOUT_SECONDS):
+            logger.warning("[GET_INSTRUMENTS_TIMEOUT] user_id=%s timeout_seconds=%s phase=lock_wait", user_id, INSTRUMENTS_TIMEOUT_SECONDS)
+            raise ServiceError("INSTRUMENTS_TIMEOUT", 504)
+        logger.info("[READ_ASSETS_LOCK_REUSED] user_id=%s", user_id)
+        state.lock.release()
+        cached = stale_assets_if_available(state)
+        if cached is not None:
+            return cached
+        raise ServiceError("INSTRUMENTS_TEMPORARY_UNAVAILABLE", 503)
+
+    now = time.monotonic()
+    cached = cached_assets_if_valid(state)
+    if cached is not None:
+        state.lock.release()
+        logger.info("[INSTRUMENTS_CACHE_HIT] user_id=%s ttl_remaining_ms=%s", user_id, int((state.expires_at - now) * 1000))
+        return cached
+    if state.next_retry_at > now:
+        state.lock.release()
+        logger.warning("[INSTRUMENTS_BACKOFF_ACTIVE] user_id=%s retry_in_ms=%s", user_id, int((state.next_retry_at - now) * 1000))
+        cached = stale_assets_if_available(state)
+        if cached is not None:
+            logger.warning("[INSTRUMENTS_CACHE_STALE_USED] user_id=%s reason=backoff", user_id)
+            return cached
+        raise ServiceError("INSTRUMENTS_BACKOFF_ACTIVE", 503)
+
+    logger.info("[GET_INSTRUMENTS_START] user_id=%s timeout_seconds=%s", user_id, INSTRUMENTS_TIMEOUT_SECONDS)
+    started_at = time.monotonic()
+    try:
+        future = session_manager._market_data_executor.submit(read_assets_uncached, client)
+    except Exception:
+        state.lock.release()
+        raise
+    try:
+        assets = future.result(timeout=INSTRUMENTS_TIMEOUT_SECONDS)
+    except FutureTimeoutError as exc:
+        if future.cancel():
+            state.lock.release()
+        else:
+            future.add_done_callback(lambda _: state.lock.release())
+        state.failure_count += 1
+        state.next_retry_at = time.monotonic() + instruments_backoff_seconds(state.failure_count)
+        logger.warning("[GET_INSTRUMENTS_TIMEOUT] user_id=%s timeout_seconds=%s", user_id, INSTRUMENTS_TIMEOUT_SECONDS)
+        cached = stale_assets_if_available(state)
+        if cached is not None:
+            logger.warning("[INSTRUMENTS_CACHE_STALE_USED] user_id=%s reason=timeout", user_id)
+            return cached
+        raise ServiceError("INSTRUMENTS_TIMEOUT", 504) from exc
+    except Exception as exc:
+        state.lock.release()
+        state.failure_count += 1
+        state.next_retry_at = time.monotonic() + instruments_backoff_seconds(state.failure_count)
+        logger.warning("[GET_INSTRUMENTS_ERROR] user_id=%s error=%s", user_id, type(exc).__name__, exc_info=True)
+        cached = stale_assets_if_available(state)
+        if cached is not None:
+            logger.warning("[INSTRUMENTS_CACHE_STALE_USED] user_id=%s reason=error", user_id)
+            return cached
+        raise ServiceError("INSTRUMENTS_TEMPORARY_UNAVAILABLE", 503) from exc
+
+    state.assets = clone_assets(assets) or []
+    state.updated_at = time.monotonic()
+    state.expires_at = state.updated_at + INSTRUMENTS_CACHE_TTL_SECONDS
+    state.failure_count = 0
+    state.next_retry_at = 0.0
+    state.lock.release()
+    logger.info(
+        "[GET_INSTRUMENTS_FINISH] user_id=%s assets=%s ms=%s",
+        user_id,
+        len(state.assets),
+        int((time.monotonic() - started_at) * 1000),
+    )
+    return clone_assets(state.assets) or []
 
 
 def read_digital_payout(client: Bullex, active: str) -> int | float | None:
@@ -1798,12 +1941,15 @@ def list_assets(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
     cached = session_manager.get_cached_probe(user_id, cache_key, path="/assets")
     if cached is not None:
         _, payload = cached
+        logger.info("[INSTRUMENTS_CACHE_HIT] user_id=%s source=http_cache", user_id)
         return payload
 
     def operation(session: ManagedSession) -> list[dict[str, Any]]:
         ensure_session_ready(session)
         try:
-            return read_assets(session.client)
+            return read_assets(session.client, user_id=user_id)
+        except ServiceError:
+            raise
         except SESSION_EXCEPTION_TYPES as exc:
             logger.warning("[SESSION-DEAD] %s %s", user_id, type(exc).__name__)
             raise ServiceError(SESSION_DISCONNECTED, 409) from exc
@@ -1811,15 +1957,22 @@ def list_assets(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
             logger.exception("falha ao listar ativos")
             raise ServiceError(SESSION_DISCONNECTED, 409) from exc
 
-    payload = build_success(session_manager.run(user_id, operation))
-    session_manager._mark_probe_success(
-        user_id,
-        cache_key,
-        200,
-        payload,
-        ttl_seconds=ASSETS_TTL_SECONDS,
-    )
-    return payload
+    try:
+        payload = build_success(session_manager.run(user_id, operation, disconnect_on_error=False))
+        session_manager._mark_probe_success(
+            user_id,
+            cache_key,
+            200,
+            payload,
+            ttl_seconds=ASSETS_TTL_SECONDS,
+        )
+        return payload
+    except ServiceError:
+        cached = stale_cached_probe(user_id, cache_key, max_age_seconds=INSTRUMENTS_CACHE_TTL_SECONDS * 12)
+        if cached is not None:
+            logger.warning("[INSTRUMENTS_CACHE_STALE_USED] user_id=%s reason=assets_endpoint_error", user_id)
+            return cached[1]
+        raise
 
 
 @app.get("/candles")
@@ -1902,7 +2055,9 @@ def get_payouts(active: str | None = None, x_user_id: str | None = Header(defaul
             symbols = [active]
         else:
             try:
-                symbols = [asset["symbol"] for asset in read_assets(session.client)]
+                symbols = [asset["symbol"] for asset in read_assets(session.client, user_id=user_id)]
+            except ServiceError:
+                raise
             except SESSION_EXCEPTION_TYPES as exc:
                 logger.warning("[SESSION-DEAD] %s %s", user_id, type(exc).__name__)
                 raise ServiceError(SESSION_DISCONNECTED, 409) from exc

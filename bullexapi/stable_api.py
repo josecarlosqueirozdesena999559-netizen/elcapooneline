@@ -214,11 +214,12 @@ class Bullex:
     def get_all_ACTIVES_OPCODE(self):
         return OP_code.ACTIVES
 
-    def update_ACTIVES_OPCODE(self):
+    def update_ACTIVES_OPCODE(self, timeout=8):
+        deadline = time.time() + timeout
         # update from binary option
-        self.get_ALL_Binary_ACTIVES_OPCODE()
+        self.get_ALL_Binary_ACTIVES_OPCODE(timeout=max(0.1, deadline - time.time()))
         # crypto /dorex/cfd
-        self.instruments_input_all_in_ACTIVES()
+        self.instruments_input_all_in_ACTIVES(timeout=max(0.1, deadline - time.time()))
         dicc = {}
         for lis in sorted(OP_code.ACTIVES.items(), key=operator.itemgetter(1)):
             dicc[lis[0]] = lis[1]
@@ -249,68 +250,83 @@ class Bullex:
             pass
         return self.api.leaderboard_deals_client
 
-    def get_instruments(self, type):
+    def get_instruments(self, type, timeout=8):
         # type="crypto"/"forex"/"cfd"
         time.sleep(self.suspend)
         self.api.instruments = None
-        while self.api.instruments == None:
+        deadline = time.time() + timeout
+        last_error = None
+        while self.api.instruments == None and time.time() < deadline:
             try:
                 self.api.get_instruments(type)
-                start = time.time()
-                while self.api.instruments == None and time.time() - start < 10:
-                    pass
-            except:
+                while self.api.instruments == None and time.time() < deadline:
+                    time.sleep(0.05)
+            except Exception as exc:
+                last_error = exc
                 logging.error('**error** api.get_instruments need reconnect')
-                self.connect()
+                time.sleep(0.5)
+                if time.time() < deadline:
+                    self.connect()
+        if self.api.instruments == None:
+            raise TimeoutError(f"get_instruments({type}) exceeded {timeout}s") from last_error
         return self.api.instruments
 
-    def instruments_input_to_ACTIVES(self, type):
-        instruments = self.get_instruments(type)
-        for ins in instruments["instruments"]:
+    def instruments_input_to_ACTIVES(self, type, timeout=8):
+        instruments = self.get_instruments(type, timeout=timeout)
+        if not isinstance(instruments, dict):
+            return
+        for ins in instruments.get("instruments", []):
             OP_code.ACTIVES[ins["id"]] = ins["active_id"]
 
-    def instruments_input_all_in_ACTIVES(self):
-        self.instruments_input_to_ACTIVES("crypto")
-        self.instruments_input_to_ACTIVES("forex")
-        self.instruments_input_to_ACTIVES("cfd")
+    def instruments_input_all_in_ACTIVES(self, timeout=8):
+        deadline = time.time() + timeout
+        for instruments_type in ("crypto", "forex", "cfd"):
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError("instruments_input_all_in_ACTIVES exceeded timeout")
+            self.instruments_input_to_ACTIVES(instruments_type, timeout=remaining)
 
-    def get_ALL_Binary_ACTIVES_OPCODE(self):
-        init_info = self.get_all_init()
+    def get_ALL_Binary_ACTIVES_OPCODE(self, timeout=8):
+        init_info = self.get_all_init(timeout=timeout)
+        if not isinstance(init_info, dict):
+            return
         for dirr in (["binary", "turbo"]):
             for i in init_info["result"][dirr]["actives"]:
                 OP_code.ACTIVES[(init_info["result"][dirr]
                                  ["actives"][i]["name"]).split(".")[1]] = int(i)
 
     # _________________________self.api.get_api_option_init_all() wss______________________
-    def get_all_init(self):
-
-        while True:
+    def get_all_init(self, timeout=8):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
             self.api.api_option_init_all_result = None
-            while True:
+            while time.time() < deadline:
                 try:
                     self.api.get_api_option_init_all()
                     break
-                except:
+                except Exception:
                     logging.error('**error** get_all_init need reconnect')
+                    if time.time() >= deadline:
+                        break
                     self.connect()
-                    time.sleep(5)
-            start = time.time()
-            while True:
-                if time.time() - start > 30:
-                    logging.error('**warning** get_all_init late 30 sec')
-                    break
+                    time.sleep(min(0.5, max(0.05, deadline - time.time())))
+            while time.time() < deadline:
                 try:
                     if self.api.api_option_init_all_result != None:
                         break
-                except:
+                except Exception:
                     pass
+                time.sleep(0.05)
             try:
                 if self.api.api_option_init_all_result["isSuccessful"] == True:
                     return self.api.api_option_init_all_result
-            except:
+            except Exception:
                 pass
+            time.sleep(0.05)
+        logging.error('**warning** get_all_init exceeded %s sec', timeout)
+        raise TimeoutError(f"get_all_init exceeded {timeout}s")
 
-    def get_all_init_v2(self):
+    def get_all_init_v2(self, timeout=8):
         self.api.api_option_init_all_result_v2 = None
 
         if self.check_connect() == False:
@@ -319,9 +335,10 @@ class Bullex:
         self.api.get_api_option_init_all_v2()
         start_t = time.time()
         while self.api.api_option_init_all_result_v2 == None:
-            if time.time() - start_t >= 30:
-                logging.error('**warning** get_all_init_v2 late 30 sec')
+            if time.time() - start_t >= timeout:
+                logging.error('**warning** get_all_init_v2 late %s sec', timeout)
                 return None
+            time.sleep(0.05)
         return self.api.api_option_init_all_result_v2
 
         # return OP_code.ACTIVES
@@ -359,11 +376,19 @@ class Bullex:
                 if start < time.time() < end:
                     self.OPEN_TIME["digital"][name]["open"] = True
 
-    def __get_other_open(self):
+    def __get_other_open(self, timeout=8):
         # Crypto and etc pairs
+        deadline = time.time() + timeout
         instrument_list = ["cfd", "forex", "crypto"]
         for instruments_type in instrument_list:
-            ins_data = self.get_instruments(instruments_type)["instruments"]
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                logging.error('**warning** get_all_open_time other instruments exceeded %s sec', timeout)
+                return
+            instruments = self.get_instruments(instruments_type, timeout=remaining)
+            if not isinstance(instruments, dict):
+                continue
+            ins_data = instruments.get("instruments", [])
             for detail in ins_data:
                 name = detail["name"]
                 schedule = detail["schedule"]
@@ -377,13 +402,13 @@ class Bullex:
     def get_all_open_time(self):
         # all pairs openned
         self.OPEN_TIME = nested_dict(3, dict)
-        binary = threading.Thread(target=self.__get_binary_open)
-        digital = threading.Thread(target=self.__get_digital_open)
-        other = threading.Thread(target=self.__get_other_open)
+        binary = threading.Thread(target=self.__get_binary_open, daemon=True)
+        digital = threading.Thread(target=self.__get_digital_open, daemon=True)
+        other = threading.Thread(target=self.__get_other_open, args=(8,), daemon=True)
 
         binary.start(), digital.start(), other.start()
 
-        binary.join(), digital.join(), other.join()
+        binary.join(8), digital.join(8), other.join(8)
         return self.OPEN_TIME
 
     # --------for binary option detail
