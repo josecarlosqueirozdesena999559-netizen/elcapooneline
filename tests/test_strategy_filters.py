@@ -11,13 +11,17 @@ class StrategyFilterTests(unittest.TestCase):
     def setUp(self) -> None:
         main.auto_trader = AutoTrader()
 
-    def test_trend_clear_reduces_score_without_blocking(self) -> None:
+    def test_sideways_market_blocks_trade(self) -> None:
         signal = {
             "symbol": "EURUSD-OTC",
             "signal": "CALL",
             "confidence": 95,
             "trend": "SIDEWAYS",
             "strength": 5,
+            "body_ratio": 0.7,
+            "upper_wick_ratio": 0.1,
+            "lower_wick_ratio": 0.1,
+            "price_action_setup": "CONTINUATION",
         }
 
         allowed, selected, _ = main.apply_strategy_guard(
@@ -27,8 +31,8 @@ class StrategyFilterTests(unittest.TestCase):
             payout=90,
         )
 
-        self.assertTrue(allowed)
-        self.assertTrue(selected["trade_allowed"])
+        self.assertFalse(allowed)
+        self.assertFalse(selected["trade_allowed"])
         self.assertIn("TREND_CLEAR", selected["blocked_filters"])
         self.assertIn("SIDEWAYS_FILTER", selected["blocked_filters"])
         self.assertLess(selected["strategy_score"], selected["confidence"])
@@ -49,6 +53,7 @@ class StrategyFilterTests(unittest.TestCase):
             "atr_pct": 0.001,
             "directional_candles_5": 4,
             "alternating_last_3": False,
+            "price_action_setup": "CONTINUATION",
         }
 
         allowed, selected, _ = main.apply_strategy_guard(
@@ -62,7 +67,7 @@ class StrategyFilterTests(unittest.TestCase):
         self.assertIn("RSI_RANGE", selected["blocked_filters"])
         self.assertLess(selected["strategy_score"], selected["confidence"])
 
-    def test_wick_against_direction_reduces_score_without_blocking(self) -> None:
+    def test_wick_against_direction_blocks_trade(self) -> None:
         signal = {
             "symbol": "EURUSD-OTC",
             "signal": "CALL",
@@ -78,6 +83,7 @@ class StrategyFilterTests(unittest.TestCase):
             "atr_pct": 0.001,
             "directional_candles_5": 4,
             "alternating_last_3": False,
+            "price_action_setup": "CONTINUATION",
         }
 
         allowed, selected, _ = main.apply_strategy_guard(
@@ -87,7 +93,8 @@ class StrategyFilterTests(unittest.TestCase):
             payout=90,
         )
 
-        self.assertTrue(allowed)
+        self.assertFalse(allowed)
+        self.assertFalse(selected["trade_allowed"])
         self.assertIn("WICK_REJECTION", selected["blocked_filters"])
         self.assertLess(selected["strategy_score"], selected["confidence"])
 
@@ -119,6 +126,12 @@ class StrategyFilterTests(unittest.TestCase):
                 "blocked_filters": [],
                 "approved_filters": [],
                 "quality_score": 95,
+                "trend": "UP",
+                "strength": 35,
+                "body_ratio": 0.7,
+                "upper_wick_ratio": 0.1,
+                "lower_wick_ratio": 0.1,
+                "price_action_setup": "CONTINUATION",
             },
             payout=90,
         )

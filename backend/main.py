@@ -112,6 +112,12 @@ CRITICAL_TRADE_BLOCKS = {
     "ACTIVE_CLOSED",
     "OPERATION_IN_PROGRESS",
     "CANDLES_UNAVAILABLE",
+    "SIDEWAYS_FILTER",
+    "WICK_REJECTION",
+    "CANDLE_STRENGTH",
+    "DOJI_FILTER",
+    "PRICE_ACTION_SETUP",
+    "REVERSAL_AGAINST",
 }
 ANALYSIS_DETAIL_FIELDS = (
     "ema9",
@@ -128,6 +134,11 @@ ANALYSIS_DETAIL_FIELDS = (
     "lower_wick_ratio",
     "directional_candles_5",
     "alternating_last_3",
+    "current_candle_direction",
+    "price_action_setup",
+    "near_support_resistance",
+    "zigzag_reversal",
+    "reversal_against",
     "candle_reading",
     "entry_reason",
     "block_reasons",
@@ -2710,7 +2721,12 @@ def apply_strategy_guard(
     if {"ema9", "ema21"}.issubset(selected):
         ema9 = float(selected.get("ema9") or 0)
         ema21 = float(selected.get("ema21") or 0)
-        ema_ok = (direction == "CALL" and ema9 > ema21) or (direction == "PUT" and ema9 < ema21)
+        has_reversal_setup = str(selected.get("price_action_setup") or "").upper() == "REVERSAL"
+        ema_ok = (
+            (direction == "CALL" and ema9 > ema21)
+            or (direction == "PUT" and ema9 < ema21)
+            or has_reversal_setup
+        )
         set_filter("EMA_TREND", ema_ok)
     if "rsi" in selected:
         rsi = float(selected.get("rsi") or 50)
@@ -2725,9 +2741,13 @@ def apply_strategy_guard(
     if "atr_pct" in selected and float(selected.get("atr_pct") or 0) < 0.0001:
         set_filter("VOLATILITY", False)
     if "directional_candles_5" in selected and int(selected.get("directional_candles_5") or 0) < 3:
-        set_filter("LAST_5_CONFIRMATION", False)
+        set_filter("LAST_5_CONFIRMATION", str(selected.get("price_action_setup") or "").upper() == "REVERSAL")
     if selected.get("alternating_last_3") and "NO_ALTERNATING_LAST_3" not in blocked_filters:
         set_filter("NO_ALTERNATING_LAST_3", False)
+    if str(selected.get("price_action_setup") or "").upper() not in {"CONTINUATION", "REVERSAL", "SUPPORT_RESISTANCE"}:
+        set_filter("PRICE_ACTION_SETUP", False)
+    if bool(selected.get("reversal_against")):
+        set_filter("REVERSAL_AGAINST", False)
 
     symbol = normalize_binary_active(str(selected.get("symbol") or ""))
     cooldown = asset_cooldown_reason(user_id, symbol)
@@ -2748,6 +2768,8 @@ def apply_strategy_guard(
         "LAST_5_CONFIRMATION": 5,
         "NO_ALTERNATING_LAST_3": 5,
         "ASSET_COOLDOWN": 10,
+        "PRICE_ACTION_SETUP": 12,
+        "REVERSAL_AGAINST": 15,
     }
     strategy_score = max(
         0,
@@ -3379,6 +3401,14 @@ def build_strategy_narration(candidate: dict[str, Any]) -> tuple[str, str, list[
         used.append("Candle Force")
     if "WICK_REJECTION" in approved or "upper_wick_ratio" in candidate or "lower_wick_ratio" in candidate:
         used.append("Pavios")
+    if "PRICE_ACTION_SETUP" in approved or "price_action_setup" in candidate:
+        setup = str(candidate.get("price_action_setup") or "").upper()
+        if setup == "REVERSAL":
+            used.append("ZigZag/Reversao")
+        elif setup == "SUPPORT_RESISTANCE":
+            used.append("Suporte/Resistencia")
+        else:
+            used.append("Price Action")
     if "LAST_5_CONFIRMATION" in approved or "directional_candles_5" in candidate:
         used.append("Últimos Candles")
     if "VOLATILITY" in approved or "atr_pct" in candidate:
@@ -7335,6 +7365,7 @@ async def bullex_candles(
                 "/candles",
                 user_id,
                 params=params,
+                force_refresh=True,
             ),
             timeout=CANDLES_REQUEST_TIMEOUT_SECONDS,
         )

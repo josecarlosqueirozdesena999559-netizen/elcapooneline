@@ -227,6 +227,13 @@ def _score_direction(
     if force_score:
         reasons.append("Último candle tem força na direção.")
 
+    price_action_score = _price_action_setup_score(direction, candles)
+    score += price_action_score
+    if price_action_score >= 18:
+        reasons.append("Setup de reversao confirmado pelos candles.")
+    elif price_action_score:
+        reasons.append("Setup de continuacao confirmado pelos candles.")
+
     wick_score = _wick_score(direction, candles[-1])
     score += wick_score
     if wick_score:
@@ -275,6 +282,8 @@ def _attach_indicators(
     lower_wick_ratio = lower_wick / candle_range if candle_range else 0.0
     direction = signal.get("signal")
     directional_last_5 = _directional_count(str(direction), candles[-5:])
+    price_action_setup = _price_action_setup(str(direction), candles)
+    opposite_direction = "PUT" if direction == "CALL" else "CALL" if direction == "PUT" else "WAIT"
 
     signal.update(
         {
@@ -291,6 +300,11 @@ def _attach_indicators(
             "lower_wick_ratio": round(lower_wick_ratio, 4),
             "directional_candles_5": directional_last_5,
             "alternating_last_3": _alternating_last_3(candles[-3:]),
+            "current_candle_direction": _candle_direction(last),
+            "price_action_setup": price_action_setup,
+            "near_support_resistance": _near_support_resistance(str(direction), candles),
+            "zigzag_reversal": _is_reversal_setup(str(direction), candles),
+            "reversal_against": _price_action_setup(opposite_direction, candles) == "REVERSAL",
         }
     )
 
@@ -318,6 +332,9 @@ def _apply_quality_filters(
         "VOLATILITY": 5,
         "LAST_5_CONFIRMATION": 5,
         "NO_ALTERNATING_LAST_3": 5,
+        "PRICE_ACTION_SETUP": 12,
+        "REVERSAL_AGAINST": 15,
+        "SUPPORT_RESISTANCE": 8,
     }
 
     def check(name: str, passed: bool) -> None:
@@ -335,18 +352,23 @@ def _apply_quality_filters(
         blocked.append("PAYOUT_UNAVAILABLE")
     else:
         check("MIN_PAYOUT", float(payout) >= profile["payout"])
-    check("TREND_CLEAR", signal.get("trend") != "SIDEWAYS" and int(signal.get("strength") or 0) >= profile["strength"])
-    check("SIDEWAYS_FILTER", signal.get("trend") != "SIDEWAYS")
-
     ema9 = float(signal.get("ema9") or 0)
     ema21 = float(signal.get("ema21") or 0)
     rsi = float(signal.get("rsi") or 50)
+    price_action_setup = str(signal.get("price_action_setup") or "WEAK")
+    has_reversal_setup = price_action_setup == "REVERSAL"
+    check(
+        "TREND_CLEAR",
+        has_reversal_setup
+        or (signal.get("trend") != "SIDEWAYS" and int(signal.get("strength") or 0) >= profile["strength"]),
+    )
+    check("SIDEWAYS_FILTER", has_reversal_setup or signal.get("trend") != "SIDEWAYS")
     if direction == "CALL":
-        check("EMA_TREND", ema9 > ema21)
+        check("EMA_TREND", ema9 > ema21 or has_reversal_setup)
         check("RSI_RANGE", 55 <= rsi <= 75)
         check("WICK_REJECTION", float(signal.get("upper_wick_ratio") or 1) <= 0.45)
     elif direction == "PUT":
-        check("EMA_TREND", ema9 < ema21)
+        check("EMA_TREND", ema9 < ema21 or has_reversal_setup)
         check("RSI_RANGE", 25 <= rsi <= 45)
         check("WICK_REJECTION", float(signal.get("lower_wick_ratio") or 1) <= 0.45)
 
@@ -354,8 +376,11 @@ def _apply_quality_filters(
     check("CANDLE_STRENGTH", body_ratio >= profile["body_ratio"])
     check("DOJI_FILTER", body_ratio >= profile["body_ratio"])
     check("VOLATILITY", float(signal.get("atr_pct") or 0) >= 0.0001)
-    check("LAST_5_CONFIRMATION", int(signal.get("directional_candles_5") or 0) >= 3)
+    check("LAST_5_CONFIRMATION", int(signal.get("directional_candles_5") or 0) >= 3 or has_reversal_setup)
     check("NO_ALTERNATING_LAST_3", not bool(signal.get("alternating_last_3")))
+    check("PRICE_ACTION_SETUP", price_action_setup in {"CONTINUATION", "REVERSAL", "SUPPORT_RESISTANCE"})
+    check("SUPPORT_RESISTANCE", bool(signal.get("near_support_resistance")) or price_action_setup == "CONTINUATION")
+    check("REVERSAL_AGAINST", not bool(signal.get("reversal_against")))
 
     confidence = int(signal.get("confidence") or 0)
     strategy_score = max(0, confidence - sum(penalties.get(name, 0) for name in blocked))
@@ -372,6 +397,12 @@ def _apply_quality_filters(
             "PAYOUT_UNAVAILABLE",
             "OPERATION_IN_PROGRESS",
             "CANDLES_UNAVAILABLE",
+            "SIDEWAYS_FILTER",
+            "WICK_REJECTION",
+            "CANDLE_STRENGTH",
+            "DOJI_FILTER",
+            "PRICE_ACTION_SETUP",
+            "REVERSAL_AGAINST",
         }
     ]
     quality_score = strategy_score
@@ -418,6 +449,119 @@ def _directional_count(direction: str, candles: list[dict[str, float]]) -> int:
     if direction == "PUT":
         return sum(1 for candle in candles if candle["close"] < candle["open"])
     return 0
+
+
+def _candle_direction(candle: dict[str, float]) -> str:
+    if candle["close"] > candle["open"]:
+        return "GREEN"
+    if candle["close"] < candle["open"]:
+        return "RED"
+    return "DOJI"
+
+
+def _candle_shape(candle: dict[str, float]) -> tuple[float, float, float]:
+    candle_range = max(candle["max"] - candle["min"], 0)
+    if candle_range <= 0:
+        return 0.0, 0.0, 0.0
+    body = abs(candle["close"] - candle["open"])
+    upper_wick = max(0.0, candle["max"] - max(candle["open"], candle["close"]))
+    lower_wick = max(0.0, min(candle["open"], candle["close"]) - candle["min"])
+    return body / candle_range, upper_wick / candle_range, lower_wick / candle_range
+
+
+def _price_action_setup(direction: str, candles: list[dict[str, float]]) -> str:
+    if direction not in {"CALL", "PUT"} or len(candles) < 8:
+        return "WEAK"
+    if _is_reversal_setup(direction, candles):
+        return "REVERSAL"
+    if _near_support_resistance(direction, candles) and _current_candle_force_score(direction, candles[-1]) >= 14:
+        return "SUPPORT_RESISTANCE"
+    if _is_continuation_setup(direction, candles):
+        return "CONTINUATION"
+    return "WEAK"
+
+
+def _price_action_setup_score(direction: SignalValue, candles: list[dict[str, float]]) -> int:
+    setup = _price_action_setup(str(direction), candles)
+    if setup == "REVERSAL":
+        return 18
+    if setup == "SUPPORT_RESISTANCE":
+        return 15
+    if setup == "CONTINUATION":
+        return 12
+    return 0
+
+
+def _is_reversal_setup(direction: str, candles: list[dict[str, float]]) -> bool:
+    if len(candles) < 8:
+        return False
+    previous = candles[-6:-1]
+    last = candles[-1]
+    body_ratio, upper_wick_ratio, lower_wick_ratio = _candle_shape(last)
+    previous_direction = _direction_label(previous)
+    previous_red = _directional_count("PUT", previous)
+    previous_green = _directional_count("CALL", previous)
+    near_level = _near_support_resistance(direction, candles)
+    if direction == "CALL":
+        return (
+            previous_direction == "DOWN"
+            and previous_red >= 3
+            and last["close"] > last["open"]
+            and body_ratio >= 0.4
+            and lower_wick_ratio >= 0.2
+            and upper_wick_ratio <= 0.35
+            and near_level
+        )
+    return (
+        previous_direction == "UP"
+        and previous_green >= 3
+        and last["close"] < last["open"]
+        and body_ratio >= 0.4
+        and upper_wick_ratio >= 0.2
+        and lower_wick_ratio <= 0.35
+        and near_level
+    )
+
+
+def _is_continuation_setup(direction: str, candles: list[dict[str, float]]) -> bool:
+    if len(candles) < 5:
+        return False
+    last = candles[-1]
+    body_ratio, upper_wick_ratio, lower_wick_ratio = _candle_shape(last)
+    last_5 = candles[-5:]
+    direction_label = _direction_label(last_5)
+    directional = _directional_count(direction, last_5)
+    if direction == "CALL":
+        return (
+            direction_label == "UP"
+            and directional >= 3
+            and last["close"] > last["open"]
+            and body_ratio >= 0.55
+            and upper_wick_ratio <= 0.3
+        )
+    return (
+        direction_label == "DOWN"
+        and directional >= 3
+        and last["close"] < last["open"]
+        and body_ratio >= 0.55
+        and lower_wick_ratio <= 0.3
+    )
+
+
+def _near_support_resistance(direction: str, candles: list[dict[str, float]]) -> bool:
+    if direction not in {"CALL", "PUT"} or len(candles) < 12:
+        return False
+    recent = candles[-20:]
+    last = candles[-1]
+    recent_range = max(candle["max"] for candle in recent) - min(candle["min"] for candle in recent)
+    tolerance = max(recent_range * 0.18, _average_range(recent) * 0.8)
+    if tolerance <= 0:
+        return False
+    if direction == "CALL":
+        support = min(candle["min"] for candle in recent[:-1])
+        return abs(last["min"] - support) <= tolerance
+    resistance = max(candle["max"] for candle in recent[:-1])
+    return abs(last["max"] - resistance) <= tolerance
 
 
 def _alternating_last_3(candles: list[dict[str, float]]) -> bool:
@@ -566,6 +710,8 @@ def _attach_candle_analysis(
     last_5 = candles[-5:]
     current_direction = "UP" if last["close"] > last["open"] else "DOWN" if last["close"] < last["open"] else "DOJI"
     direction = str(signal.get("signal") or "WAIT")
+    price_action_setup = _price_action_setup(direction, candles)
+    opposite_direction = "PUT" if direction == "CALL" else "CALL" if direction == "PUT" else "WAIT"
     metrics = {
         "symbol": symbol,
         "timeframe": timeframe,
@@ -585,6 +731,10 @@ def _attach_candle_analysis(
         "last_3_colors": _candle_colors(last_3),
         "last_5_direction": _direction_label(last_5),
         "last_5_colors": _candle_colors(last_5),
+        "price_action_setup": price_action_setup,
+        "near_support_resistance": _near_support_resistance(direction, candles),
+        "zigzag_reversal": _is_reversal_setup(direction, candles),
+        "reversal_against": _price_action_setup(opposite_direction, candles) == "REVERSAL",
         "sideways": _is_sideways(candles, avg_range, signal.get("last_price")),
         "volatility": _volatility_label(atr_pct),
         "atr": round(avg_range, 6),
@@ -596,6 +746,9 @@ def _attach_candle_analysis(
         "RSI14",
         "Candle strength",
         "Wick rejection",
+        "ZigZag reversal",
+        "Support/Resistance",
+        "Price action",
         "Last candles confirmation",
         "Volatility",
     ]

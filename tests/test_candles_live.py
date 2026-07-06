@@ -14,6 +14,32 @@ class CandlesLiveTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         main.chart_candles_cache.clear()
 
+    async def test_bullex_candles_bypasses_gateway_cache_for_chart_realtime(self) -> None:
+        service = AsyncMock(
+            return_value=(
+                200,
+                main.build_success(
+                    {
+                        "server_time": 125.0,
+                        "candles": [
+                            {"from": 120, "open": 1.2, "max": 1.4, "min": 1.1, "close": 1.35}
+                        ],
+                    }
+                ),
+            )
+        )
+
+        with patch.object(main, "call_bullex_service", new=service):
+            response = await main.bullex_candles(
+                symbol="EURUSD-OTC",
+                timeframe="M1",
+                auth={"user_id": "chart-realtime-user"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        service.assert_awaited_once()
+        self.assertTrue(service.await_args.kwargs["force_refresh"])
+
     async def test_bullex_candles_returns_current_forming_candle(self) -> None:
         calls: list[tuple[str, dict[str, Any] | None]] = []
 
