@@ -98,6 +98,37 @@ class StrategyFilterTests(unittest.TestCase):
         self.assertIn("WICK_REJECTION", selected["blocked_filters"])
         self.assertLess(selected["strategy_score"], selected["confidence"])
 
+    def test_support_resistance_conflict_blocks_trade(self) -> None:
+        signal = {
+            "symbol": "EURUSD-OTC",
+            "signal": "CALL",
+            "confidence": 95,
+            "trend": "UP",
+            "strength": 35,
+            "ema9": 1.02,
+            "ema21": 1.01,
+            "rsi": 60,
+            "body_ratio": 0.7,
+            "upper_wick_ratio": 0.1,
+            "lower_wick_ratio": 0.1,
+            "atr_pct": 0.001,
+            "directional_candles_5": 4,
+            "alternating_last_3": False,
+            "price_action_setup": "CONTINUATION",
+            "level_conflict": True,
+        }
+
+        allowed, selected, reason = main.apply_strategy_guard(
+            "user-level-conflict",
+            main.auto_trader.start("user-level-conflict"),
+            signal,
+            payout=90,
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "LEVEL_CONFLICT")
+        self.assertIn("LEVEL_CONFLICT", selected["blocked_filters"])
+
     def test_two_consecutive_losses_reduce_asset_score(self) -> None:
         user_id = "user-cooldown"
         trader = main.auto_trader

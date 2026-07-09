@@ -284,6 +284,7 @@ def _attach_indicators(
     directional_last_5 = _directional_count(str(direction), candles[-5:])
     price_action_setup = _price_action_setup(str(direction), candles)
     opposite_direction = "PUT" if direction == "CALL" else "CALL" if direction == "PUT" else "WAIT"
+    level_context = _support_resistance_context(candles)
 
     signal.update(
         {
@@ -303,6 +304,20 @@ def _attach_indicators(
             "current_candle_direction": _candle_direction(last),
             "price_action_setup": price_action_setup,
             "near_support_resistance": _near_support_resistance(str(direction), candles),
+            "near_support": bool(level_context.get("near_support")),
+            "near_resistance": bool(level_context.get("near_resistance")),
+            "support_level": (
+                round(float(level_context["support"]), 6)
+                if level_context.get("support") is not None
+                else None
+            ),
+            "resistance_level": (
+                round(float(level_context["resistance"]), 6)
+                if level_context.get("resistance") is not None
+                else None
+            ),
+            "level_conflict": _has_level_conflict(str(direction), level_context),
+            "level_rejection_confirmed": _level_rejection_confirmed(str(direction), candles, level_context),
             "zigzag_reversal": _is_reversal_setup(str(direction), candles),
             "reversal_against": _price_action_setup(opposite_direction, candles) == "REVERSAL",
         }
@@ -335,6 +350,8 @@ def _apply_quality_filters(
         "PRICE_ACTION_SETUP": 12,
         "REVERSAL_AGAINST": 15,
         "SUPPORT_RESISTANCE": 8,
+        "LEVEL_CONFLICT": 18,
+        "LEVEL_REJECTION": 12,
     }
 
     def check(name: str, passed: bool) -> None:
@@ -357,6 +374,14 @@ def _apply_quality_filters(
     rsi = float(signal.get("rsi") or 50)
     price_action_setup = str(signal.get("price_action_setup") or "WEAK")
     has_reversal_setup = price_action_setup == "REVERSAL"
+    level_context = _support_resistance_context(candles)
+    level_conflict = _has_level_conflict(direction, level_context)
+    needs_level_rejection = (
+        price_action_setup in {"REVERSAL", "SUPPORT_RESISTANCE"}
+        or bool(level_context.get("near_support"))
+        or bool(level_context.get("near_resistance"))
+    )
+    level_rejection_confirmed = _level_rejection_confirmed(direction, candles, level_context)
     check(
         "TREND_CLEAR",
         has_reversal_setup
@@ -380,6 +405,8 @@ def _apply_quality_filters(
     check("NO_ALTERNATING_LAST_3", not bool(signal.get("alternating_last_3")))
     check("PRICE_ACTION_SETUP", price_action_setup in {"CONTINUATION", "REVERSAL", "SUPPORT_RESISTANCE"})
     check("SUPPORT_RESISTANCE", bool(signal.get("near_support_resistance")) or price_action_setup == "CONTINUATION")
+    check("LEVEL_CONFLICT", not level_conflict)
+    check("LEVEL_REJECTION", not needs_level_rejection or level_rejection_confirmed)
     check("REVERSAL_AGAINST", not bool(signal.get("reversal_against")))
 
     confidence = int(signal.get("confidence") or 0)
@@ -403,6 +430,8 @@ def _apply_quality_filters(
             "DOJI_FILTER",
             "PRICE_ACTION_SETUP",
             "REVERSAL_AGAINST",
+            "LEVEL_CONFLICT",
+            "LEVEL_REJECTION",
         }
     ]
     quality_score = strategy_score
@@ -549,19 +578,85 @@ def _is_continuation_setup(direction: str, candles: list[dict[str, float]]) -> b
 
 
 def _near_support_resistance(direction: str, candles: list[dict[str, float]]) -> bool:
-    if direction not in {"CALL", "PUT"} or len(candles) < 12:
-        return False
-    recent = candles[-20:]
-    last = candles[-1]
-    recent_range = max(candle["max"] for candle in recent) - min(candle["min"] for candle in recent)
-    tolerance = max(recent_range * 0.18, _average_range(recent) * 0.8)
-    if tolerance <= 0:
-        return False
+    context = _support_resistance_context(candles)
     if direction == "CALL":
-        support = min(candle["min"] for candle in recent[:-1])
-        return abs(last["min"] - support) <= tolerance
-    resistance = max(candle["max"] for candle in recent[:-1])
-    return abs(last["max"] - resistance) <= tolerance
+        return bool(context.get("near_support"))
+    if direction == "PUT":
+        return bool(context.get("near_resistance"))
+    return False
+
+
+def _support_resistance_context(candles: list[dict[str, float]]) -> dict[str, Any]:
+    if len(candles) < 12:
+        return {
+            "support": None,
+            "resistance": None,
+            "tolerance": 0.0,
+            "near_support": False,
+            "near_resistance": False,
+        }
+    recent = candles[-24:]
+    previous = recent[:-1]
+    last = recent[-1]
+    recent_range = max(candle["max"] for candle in recent) - min(candle["min"] for candle in recent)
+    avg_range = _average_range(recent)
+    tolerance = max(recent_range * 0.12, avg_range * 0.65)
+    if tolerance <= 0:
+        return {
+            "support": None,
+            "resistance": None,
+            "tolerance": 0.0,
+            "near_support": False,
+            "near_resistance": False,
+        }
+    support = min(candle["min"] for candle in previous)
+    resistance = max(candle["max"] for candle in previous)
+    support_distance = min(abs(last["min"] - support), abs(last["close"] - support))
+    resistance_distance = min(abs(last["max"] - resistance), abs(last["close"] - resistance))
+    return {
+        "support": support,
+        "resistance": resistance,
+        "tolerance": tolerance,
+        "near_support": support_distance <= tolerance,
+        "near_resistance": resistance_distance <= tolerance,
+        "support_distance": support_distance,
+        "resistance_distance": resistance_distance,
+    }
+
+
+def _has_level_conflict(direction: str, context: dict[str, Any]) -> bool:
+    if direction == "CALL":
+        return bool(context.get("near_resistance")) and not bool(context.get("near_support"))
+    if direction == "PUT":
+        return bool(context.get("near_support")) and not bool(context.get("near_resistance"))
+    return False
+
+
+def _level_rejection_confirmed(
+    direction: str,
+    candles: list[dict[str, float]],
+    context: dict[str, Any] | None = None,
+) -> bool:
+    if direction not in {"CALL", "PUT"} or not candles:
+        return False
+    context = context or _support_resistance_context(candles)
+    last = candles[-1]
+    body_ratio, upper_wick_ratio, lower_wick_ratio = _candle_shape(last)
+    if direction == "CALL":
+        return (
+            bool(context.get("near_support"))
+            and last["close"] > last["open"]
+            and body_ratio >= 0.35
+            and lower_wick_ratio >= 0.2
+            and upper_wick_ratio <= 0.4
+        )
+    return (
+        bool(context.get("near_resistance"))
+        and last["close"] < last["open"]
+        and body_ratio >= 0.35
+        and upper_wick_ratio >= 0.2
+        and lower_wick_ratio <= 0.4
+    )
 
 
 def _alternating_last_3(candles: list[dict[str, float]]) -> bool:
@@ -712,6 +807,7 @@ def _attach_candle_analysis(
     direction = str(signal.get("signal") or "WAIT")
     price_action_setup = _price_action_setup(direction, candles)
     opposite_direction = "PUT" if direction == "CALL" else "CALL" if direction == "PUT" else "WAIT"
+    level_context = _support_resistance_context(candles)
     metrics = {
         "symbol": symbol,
         "timeframe": timeframe,
@@ -733,6 +829,22 @@ def _attach_candle_analysis(
         "last_5_colors": _candle_colors(last_5),
         "price_action_setup": price_action_setup,
         "near_support_resistance": _near_support_resistance(direction, candles),
+        "near_support": bool(level_context.get("near_support")),
+        "near_resistance": bool(level_context.get("near_resistance")),
+        "support_level": (
+            round(float(level_context["support"]), 6)
+            if level_context.get("support") is not None
+            else None
+        ),
+        "resistance_level": (
+            round(float(level_context["resistance"]), 6)
+            if level_context.get("resistance") is not None
+            else None
+        ),
+        "support_distance": round(float(level_context.get("support_distance") or 0), 6),
+        "resistance_distance": round(float(level_context.get("resistance_distance") or 0), 6),
+        "level_conflict": _has_level_conflict(direction, level_context),
+        "level_rejection_confirmed": _level_rejection_confirmed(direction, candles, level_context),
         "zigzag_reversal": _is_reversal_setup(direction, candles),
         "reversal_against": _price_action_setup(opposite_direction, candles) == "REVERSAL",
         "sideways": _is_sideways(candles, avg_range, signal.get("last_price")),

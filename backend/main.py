@@ -118,6 +118,8 @@ CRITICAL_TRADE_BLOCKS = {
     "DOJI_FILTER",
     "PRICE_ACTION_SETUP",
     "REVERSAL_AGAINST",
+    "LEVEL_CONFLICT",
+    "LEVEL_REJECTION",
 }
 ANALYSIS_DETAIL_FIELDS = (
     "ema9",
@@ -2746,6 +2748,16 @@ def apply_strategy_guard(
         set_filter("NO_ALTERNATING_LAST_3", False)
     if str(selected.get("price_action_setup") or "").upper() not in {"CONTINUATION", "REVERSAL", "SUPPORT_RESISTANCE"}:
         set_filter("PRICE_ACTION_SETUP", False)
+    if bool(selected.get("level_conflict")) or bool((selected.get("metrics") or {}).get("level_conflict")):
+        set_filter("LEVEL_CONFLICT", False)
+    if (
+        str(selected.get("price_action_setup") or "").upper() in {"REVERSAL", "SUPPORT_RESISTANCE"}
+        and not (
+            bool(selected.get("level_rejection_confirmed"))
+            or bool((selected.get("metrics") or {}).get("level_rejection_confirmed"))
+        )
+    ):
+        set_filter("LEVEL_REJECTION", False)
     if bool(selected.get("reversal_against")):
         set_filter("REVERSAL_AGAINST", False)
 
@@ -2770,6 +2782,8 @@ def apply_strategy_guard(
         "ASSET_COOLDOWN": 10,
         "PRICE_ACTION_SETUP": 12,
         "REVERSAL_AGAINST": 15,
+        "LEVEL_CONFLICT": 18,
+        "LEVEL_REJECTION": 12,
     }
     strategy_score = max(
         0,

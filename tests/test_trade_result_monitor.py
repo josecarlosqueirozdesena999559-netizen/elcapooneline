@@ -301,6 +301,14 @@ class TradeResultMonitorTests(unittest.IsolatedAsyncioTestCase):
             ("WIN", 1.5),
         )
         self.assertEqual(
+            normalize_trade_result({"ok": True, "data": {"result": "PROFIT", "profit": -2}}),
+            ("LOSS", -2.0),
+        )
+        self.assertEqual(
+            normalize_trade_result({"ok": True, "data": {"result": "win", "profit": -2}}),
+            ("LOSS", -2.0),
+        )
+        self.assertEqual(
             normalize_trade_result({"ok": True, "data": {"result": "LOSS_AMOUNT", "profit": -2}}),
             ("LOSS", -2.0),
         )

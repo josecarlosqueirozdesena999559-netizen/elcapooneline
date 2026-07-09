@@ -33,9 +33,19 @@ def normalize_trade_result(payload: dict[str, Any]) -> tuple[str, float] | None:
     except (TypeError, ValueError):
         profit = 0.0
 
+    has_profit = "profit" in data
+
     if raw_result in {"timeout", "timed_out", "expired"}:
         return "TIMEOUT", 0.0
-    if raw_result in {"win", "won", "profit"}:
+    if raw_result in {"profit"}:
+        if profit > 0:
+            return "WIN", profit
+        if profit < 0:
+            return "LOSS", profit
+        return None
+    if raw_result in {"win", "won"}:
+        if has_profit and profit < 0:
+            return "LOSS", profit
         return "WIN", profit
     if raw_result in {"loose", "lose", "loss", "lost", "loss_amount", "equal", "draw"}:
         return "LOSS", profit
