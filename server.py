@@ -738,7 +738,7 @@ class ConnectRequest(BaseModel):
     mode: str = "REAL"
 
 def bullex_balance_mode(m: str) -> str:
-    return "REAL"
+    return "PRACTICE" if (m or "").upper() in ["DEMO", "PRACTICE"] else "REAL"
 
 @app.post("/api/connect")
 async def api_connect(req: ConnectRequest):
@@ -913,7 +913,7 @@ async def api_status():
         "trader_name": state.trader_name,
         "mode": state.mode,
         "currency": state.currency,
-        "balance": state.balance_real,
+        "balance": state.balance_real if state.mode == "REAL" else state.balance_demo,
         "ai_enabled": state.ai_enabled,
         "is_paused": state.is_paused,
         "is_trading": state.is_trading,

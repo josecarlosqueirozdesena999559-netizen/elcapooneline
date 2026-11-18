@@ -170,13 +170,13 @@
     /* Topbar Header */
     .top-header-bar {
       width: 100%;
-      background: #111622;
-      border: 1px solid #1f2736;
-      border-radius: 4px;
-      padding: 12px 18px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-card);
+      border-radius: 16px;
+      padding: 14px 20px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
     }
 
     .header-top-row {
@@ -244,10 +244,10 @@
       display: flex;
       align-items: center;
       gap: 10px;
-      padding: 4px 12px 4px 6px;
+      padding: 4px 14px 4px 6px;
       background: rgba(255, 255, 255, 0.03);
       border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 4px;
+      border-radius: 9999px;
       cursor: pointer;
       transition: all 0.2s;
     }
@@ -255,12 +255,16 @@
       background: rgba(255, 255, 255, 0.06);
       border-color: rgba(0, 230, 118, 0.3);
     }
+    .header-user-profile-badge:hover {
+      background: rgba(255, 255, 255, 0.06);
+      border-color: rgba(0, 230, 118, 0.3);
+    }
 
     .header-user-avatar-circle {
-      width: 32px;
-      height: 32px;
-      border-radius: 4px;
-      border: 1px solid var(--green-primary);
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      border: 1.5px solid var(--green-primary);
       background: #141b24;
       display: flex;
       align-items: center;
@@ -289,10 +293,10 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      background: rgba(14, 20, 24, 0.75);
-      border: 1px solid var(--border-card-highlight);
-      border-radius: 4px;
-      padding: 6px 14px;
+      background: rgba(14, 20, 24, 0.85);
+      border: 1px solid var(--border-card);
+      border-radius: 9999px;
+      padding: 6px 16px;
     }
     .balance-mode-tag {
       font-size: 10px;
@@ -314,16 +318,20 @@
     }
 
     .btn-icon-circle.logout {
-      width: 32px;
-      height: 32px;
-      border-radius: 4px;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
       color: var(--red-negative);
-      background: #1f1418;
-      border: 1px solid rgba(255, 69, 58, 0.3);
+      background: rgba(255, 69, 58, 0.08);
+      border: 1px solid rgba(255, 69, 58, 0.25);
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-icon-circle.logout:hover {
+      background: rgba(255, 69, 58, 0.18);
     }
 
     .header-sub-row {
@@ -336,24 +344,35 @@
     }
 
     .account-mode-capsule {
-      background: rgba(12, 16, 20, 0.65);
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 4px;
+      background: #0d1117;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 9999px;
       padding: 3px;
       display: flex;
-      gap: 2px;
+      gap: 3px;
     }
 
     .capsule-btn {
-      padding: 5px 14px;
-      border-radius: 4px;
+      padding: 5px 16px;
+      border-radius: 9999px;
       font-size: 11px;
-      font-weight: 700;
-      color: var(--text-muted);
+      font-weight: 800;
+      color: #64748b;
       background: transparent;
       border: none;
       cursor: pointer;
       transition: all 0.2s;
+    }
+    .capsule-btn:hover {
+      color: #cbd5e1;
+    }
+    .capsule-btn.active.real {
+      background: var(--green-positive);
+      color: #03140a;
+    }
+    .capsule-btn.active.demo {
+      background: #253346;
+      color: #38bdf8;
     }
     .capsule-btn.active.real {
       background: var(--green-positive);
@@ -366,14 +385,13 @@
     }
 
     .manus-credits-capsule {
-      background: rgba(18, 25, 32, 0.85);
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 4px;
+      background: #0d1117;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 9999px;
       padding: 5px 14px;
       display: flex;
       align-items: center;
       gap: 6px;
-      cursor: pointer;
     }
     .manus-credits-val {
       font-size: 12px;
@@ -385,18 +403,18 @@
     .top-action-bar {
       display: flex;
       align-items: center;
-      gap: 4px;
+      gap: 6px;
       margin-top: 14px;
-      padding: 4px;
-      background: #0f131a;
+      padding: 5px;
+      background: #0e121a;
       border: 1px solid #1f2736;
-      border-radius: 4px;
+      border-radius: 9999px;
       width: 100%;
     }
 
     .action-tab-button {
-      padding: 8px 20px;
-      border-radius: 4px;
+      padding: 9px 22px;
+      border-radius: 9999px;
       font-size: 13px;
       font-weight: 700;
       color: #94a3b8;
@@ -406,12 +424,15 @@
       background: transparent;
       border: 1px solid transparent;
       cursor: pointer;
-      transition: all 0.15s;
+      transition: all 0.2s;
+    }
+    .action-tab-button:hover {
+      color: #ffffff;
     }
     .action-tab-button.active {
-      background: #1c2436;
+      background: #1e2636;
       color: var(--green-positive);
-      border-color: #2b3950;
+      border-color: #2e3c54;
       font-weight: 800;
     }
 
@@ -437,18 +458,18 @@
     .top-scoreboard-container {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
-      gap: 8px;
-      background: #111622;
-      border-radius: 4px;
-      border: 1px solid #1f2736;
-      padding: 12px 16px;
+      gap: 10px;
+      background: var(--bg-card);
+      border-radius: 14px;
+      border: 1px solid var(--border-card);
+      padding: 14px 18px;
     }
 
     .top-score-cell {
       background: #0d111a;
       border: 1px solid #1a2230;
-      border-radius: 4px;
-      padding: 8px 12px;
+      border-radius: 10px;
+      padding: 10px 14px;
       display: flex;
       flex-direction: column;
       gap: 3px;
@@ -493,10 +514,10 @@
     /* Control Card */
     .ai-master-control-card {
       width: 100%;
-      background: #111622;
-      border-radius: 4px;
-      border: 1px solid #1f2736;
-      padding: 16px 20px;
+      background: var(--bg-card);
+      border-radius: 16px;
+      border: 1px solid var(--border-card);
+      padding: 18px 22px;
     }
     .ai-control-top {
       display: flex;
@@ -510,8 +531,8 @@
     .ai-control-buttons-group { display: flex; align-items: center; gap: 10px; }
 
     .btn-pause-ai {
-      padding: 10px 18px;
-      border-radius: 4px;
+      padding: 10px 20px;
+      border-radius: 9999px;
       background: #161c28;
       border: 1px solid #283244;
       color: #e2e8f0;
@@ -521,17 +542,22 @@
       align-items: center;
       gap: 8px;
       cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-pause-ai:hover {
+      background: #1e2637;
     }
     .btn-power-ai {
-      padding: 10px 20px;
-      border-radius: 4px;
-      font-size: 13px;
+      padding: 10px 22px;
+      border-radius: 9999px;
+      font-size: 13.5px;
       font-weight: 800;
       display: flex;
       align-items: center;
       gap: 8px;
       cursor: pointer;
       border: none;
+      transition: all 0.2s;
     }
     .btn-power-ai.on {
       background: #00c853;
@@ -545,13 +571,13 @@
     /* Live Display Card */
     .ai-dynamic-display-card {
       width: 100%;
-      background: #111622;
-      border-radius: 4px;
-      border: 1px solid #1f2736;
-      padding: 18px 20px;
+      background: var(--bg-card);
+      border-radius: 16px;
+      border: 1px solid var(--border-card);
+      padding: 20px 22px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 14px;
     }
 
     .analyzing-header-row {
@@ -613,8 +639,8 @@
       background: #0c1017;
       border: 1px solid #1f2736;
       border-left: 3px solid var(--green-primary);
-      border-radius: 4px;
-      padding: 14px 16px;
+      border-radius: 10px;
+      padding: 14px 18px;
       display: flex;
       flex-direction: column;
       gap: 6px;
@@ -636,10 +662,10 @@
     /* Session History */
     .session-history-container {
       width: 100%;
-      background: #111622;
-      border-radius: 4px;
-      border: 1px solid #1f2736;
-      padding: 16px 20px;
+      background: var(--bg-card);
+      border-radius: 16px;
+      border: 1px solid var(--border-card);
+      padding: 18px 22px;
       display: flex;
       flex-direction: column;
       gap: 14px;
@@ -1083,19 +1109,19 @@
       </div>
 
       <div class="header-sub-row">
-        <!-- Conta Real Fixa -->
-        <div class="account-mode-capsule" style="background:#131822; border:1px solid rgba(0,230,118,0.3); border-radius:4px; padding:4px 10px; display:flex; align-items:center; gap:6px;">
-          <span style="width:6px; height:6px; border-radius:50%; background:var(--green-positive);"></span>
-          <span style="font-size:11px; font-weight:800; color:var(--green-positive); letter-spacing:0.04em;">CONTA REAL</span>
+        <!-- Alternador de Conta: DEMO / REAL -->
+        <div class="account-mode-capsule">
+          <button class="capsule-btn demo" id="btnCapsuleDemo" onclick="setAccountMode('DEMO')" title="Alternar para Conta DEMO (Treinamento)">DEMO</button>
+          <button class="capsule-btn real" id="btnCapsuleReal" onclick="setAccountMode('REAL')" title="Alternar para Conta REAL da BullEx">REAL</button>
         </div>
 
-        <!-- Ativo Ativo / Catálogo de Moedas (IA Autônoma) -->
-        <div class="manus-credits-capsule" style="cursor:default; border-radius:4px; background:#131822; border:1px solid rgba(255,255,255,0.08);" title="Ativo selecionado dinamicamente pela Inteligência Artificial de acordo com a maior confluência de 60 candles">
+        <!-- Ativo Selecionado Autonomamente pela IA -->
+        <div class="manus-credits-capsule" style="cursor:default;" title="Ativo selecionado dinamicamente pela Inteligência Artificial de acordo com a maior confluência de 60 candles">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color:var(--green-primary)">
             <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
           </svg>
           <span class="manus-credits-val" id="activeAssetHeader">EURUSD-OTC</span>
-          <span style="font-size:10px; color:var(--green-primary); font-weight:800; margin-left:4px; padding:2px 6px; background:rgba(0,230,118,0.12); border-radius:3px;">IA</span>
+          <span style="font-size:10px; color:var(--green-primary); font-weight:800; margin-left:4px; padding:2px 6px; background:rgba(0,230,118,0.12); border-radius:4px;">IA</span>
         </div>
       </div>
     </header>
@@ -1832,9 +1858,24 @@
     setInterval(updateRealTimeCountdown, 1000);
 
     // Operação 100% Autônoma: corre até a expiração M1 (sem venda manual)
+    // Alternar entre Conta DEMO e REAL (apenas quando o robô NÃO estiver executando ordem)
     function setAccountMode(m) {
-      appState.mode = 'REAL';
-      fetchStatus();
+      if (appState.isTrading) {
+        alert("Operação em andamento no robô! Não é permitido alterar entre DEMO e REAL durante a execução de uma vela.");
+        return;
+      }
+      appState.mode = m;
+      fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: m })
+      }).then(async res => {
+        const d = await res.json();
+        if (d && d.success === false) {
+          alert(d.message || 'Não foi possível alterar a conta.');
+        }
+        fetchStatus();
+      });
     }
 
     function toggleBalance() {
@@ -1980,13 +2021,45 @@
           document.getElementById('userInitials').textContent = '🔒';
         }
 
-        // Modo e Saldo (Operação 100% CONTA REAL - Flat & Autônomo)
-        appState.mode = 'REAL';
+                // Modo e Saldo (DEMO / REAL com trava de segurança em operações ativas)
+        appState.mode = data.mode || 'REAL';
         appState.isTrading = !!data.is_trading;
+        const bDemo = document.getElementById('btnCapsuleDemo');
+        const bReal = document.getElementById('btnCapsuleReal');
         const tag = document.getElementById('balanceTag');
-        if (tag) {
-          tag.textContent = 'REAL';
-          tag.style.color = 'var(--green-positive)';
+
+        if (bDemo && bReal) {
+          if (data.is_trading) {
+            bDemo.style.opacity = '0.35';
+            bDemo.style.cursor = 'not-allowed';
+            bDemo.title = 'Bloqueado: operação em andamento na BullEx';
+            bReal.style.opacity = '0.35';
+            bReal.style.cursor = 'not-allowed';
+            bReal.title = 'Bloqueado: operação em andamento na BullEx';
+          } else {
+            bDemo.style.opacity = '1';
+            bDemo.style.cursor = 'pointer';
+            bDemo.title = 'Alternar para Conta DEMO';
+            bReal.style.opacity = '1';
+            bReal.style.cursor = 'pointer';
+            bReal.title = 'Alternar para Conta REAL';
+          }
+
+          if (data.mode === 'REAL') {
+            bReal.classList.add('active', 'real');
+            bDemo.classList.remove('active', 'demo');
+            if (tag) {
+              tag.textContent = 'REAL';
+              tag.style.color = 'var(--green-positive)';
+            }
+          } else {
+            bDemo.classList.add('active', 'demo');
+            bReal.classList.remove('active', 'real');
+            if (tag) {
+              tag.textContent = 'DEMO';
+              tag.style.color = '#38bdf8';
+            }
+          }
         }
 
         const balEl = document.getElementById('balanceDisplay');
