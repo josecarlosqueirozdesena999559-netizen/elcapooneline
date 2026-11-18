@@ -1,0 +1,28 @@
+=============================================================
+   ROBÔ BULLEX ORIUN BINARY 15.COM — IA QUANTITATIVA AUTÔNOMA
+=============================================================
+
+COMO USAR NO PEN DRIVE OU EM OUTRO COMPUTADOR:
+
+1. REQUISITOS:
+   - Ter o Python instalado (3.10 ou superior) com a opção "Add Python to PATH" marcada.
+   - Caso precise instalar as dependências em um novo PC, abra o CMD nesta pasta e digite:
+       pip install fastapi uvicorn requests google-generativeai pydantic websocket-client
+
+2. COMO INICIAR O ROBÔ:
+   - Basta dar DOIS CLIQUES no arquivo:
+       INICIAR_ROBO.bat
+   - O navegador abrirá automaticamente em:
+       http://localhost:8085
+
+3. FUNCIONALIDADES DO SISTEMA:
+   - Inicia por padrão no modo DEMO ($ 10,000.00).
+   - Alternador instantâneo para conta REAL ($ 22,776.06 USD).
+   - Trava de segurança: impede alternar entre contas enquanto uma vela estiver rodando.
+   - Varredura de 31 ativos OTC com proteção anti-repetição.
+   - Motor SMC + RSI + Suporte/Resistência institucional em tempo real (0s delay).
+   - Painel oficial de operações abertas da BullEx exibido exclusivamente durante as entradas ativas:
+       * Relógio HORA DE COMPRA e Expiração sincronizados a cada 100ms.
+       * Preço atual com micro-ticks contínuos e cálculo dinâmico de Lucro Esperado e L/P pós-venda.
+       * Botão Vender funcional para encerramento antecipado.
+=============================================================
