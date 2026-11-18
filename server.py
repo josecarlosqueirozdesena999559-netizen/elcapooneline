@@ -727,13 +727,21 @@ async def varrer_60_candles_ativos():
             candles = []
             for i in range(60):
                 p = base_p + math.sin((i + agora_ts % 60) / 4.0) * 0.0012 + (math.cos(i / 7.0) * 0.0006)
+                d_open = round(math.sin(i * 3 + agora_ts % 59) * 0.00015, 5)
+                d_close = round(math.cos(i * 2 + agora_ts % 59) * 0.00018, 5)
+                c_o = round(p + d_open, 5)
+                c_c = round(p + d_close, 5)
+                p_sup = round(abs(math.sin(i * 4 + agora_ts % 47)) * 0.00025 + 0.00008, 5)
+                p_inf = round(abs(math.cos(i * 5 + agora_ts % 53)) * 0.00022 + 0.00008, 5)
+                c_h = round(max(c_o, c_c) + p_sup, 5)
+                c_l = round(min(c_o, c_c) - p_inf, 5)
                 candles.append({
                     "id": agora_ts - (60 - i) * 60,
-                    "open": p - 0.0001,
-                    "close": p + 0.00014,
-                    "min": p - 0.00028,
-                    "max": p + 0.00032,
-                    "volume": 320
+                    "open": c_o,
+                    "close": c_c,
+                    "min": c_l,
+                    "max": c_h,
+                    "volume": 250 + (i * 7) % 180
                 })
 
         dados_60 = calcular_indicadores_60(candles)
@@ -743,7 +751,7 @@ async def varrer_60_candles_ativos():
         state.active_asset = ativo
         state.last_candle_data = dados_60
         c_info = dados_60.get("candle_ultimo", {})
-        state.current_observation = f"[Gemini AI {agora_str} | M1 {segundo_vela}s/60s] Analisando 60 velas de {ativo}: RSI={dados_60.get('rsi14')} | Último: {c_info.get('direcao', 'Neutro')} (Pavio Sup: {c_info.get('pavio_superior')}, Inf: {c_info.get('pavio_inferior')}) | SMC={dados_60.get('smc_order_block')}..."
+        state.current_observation = f"[Gemini AI {agora_str} | M1 {segundo_vela}s/60s] Analisando 60 velas de {ativo}: Abertura={c_info.get('open')} | Fechamento={c_info.get('close')} | RSI={dados_60.get('rsi14')} | Último: {c_info.get('direcao', 'Neutro')} (Pavio Sup: {c_info.get('pavio_superior')}, Inf: {c_info.get('pavio_inferior')}) | SMC={dados_60.get('smc_order_block')}..."
 
         analise = await consultar_gemini(ativo, dados_60)
         if analise:
