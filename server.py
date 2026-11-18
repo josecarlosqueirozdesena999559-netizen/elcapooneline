@@ -383,9 +383,14 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                 if c_init and len(c_init) > 0:
                     taxa_entrada = float(c_init[0].get('open', 0.0))
             except Exception:
-                taxa_entrada = 1.08500
+                taxa_entrada = 0.0
             if taxa_entrada == 0.0:
-                taxa_entrada = 1.08500
+                if "CHF" in ativo: taxa_entrada = 0.83556
+                elif "HK" in ativo or "33" in ativo: taxa_entrada = 22812.40803
+                elif "GBP" in ativo: taxa_entrada = 1.33842
+                elif "US" in ativo or "30" in ativo: taxa_entrada = 43850.25
+                elif "JPY" in ativo: taxa_entrada = 152.320
+                else: taxa_entrada = 1.08500
 
             while time.time() - start_t < 75:
                 elapsed = int(time.time() - start_t)
@@ -557,14 +562,30 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
     else:
         # Modo simulação local caso não conectado à BullEx
         start_sim = time.time()
-        payout_estimado = round(valor * 0.91, 2)
-        taxa_entrada = 1.25410
+        payout_estimado = round(valor * 0.84, 2)
+        if "CHF" in ativo:
+            taxa_entrada = 0.83556
+        elif "HK" in ativo or "33" in ativo:
+            taxa_entrada = 22812.40803
+        elif "GBP" in ativo:
+            taxa_entrada = 1.33842
+        elif "EUR" in ativo:
+            taxa_entrada = 1.08540
+        elif "US" in ativo or "30" in ativo:
+            taxa_entrada = 43850.25
+        elif "JPY" in ativo:
+            taxa_entrada = 152.320
+        else:
+            taxa_entrada = 0.83556
+
         simb = "$" if state.currency in ["USD", "$"] else "R$"
         while time.time() - start_sim < 60:
             elapsed = int(time.time() - start_sim)
             remaining = max(0, 60 - elapsed)
-            delta = math.sin(elapsed / 2.5) * 0.00012
-            taxa_atual = taxa_entrada + delta
+            delta_factor = 0.00010 if ("CHF" in ativo or "EUR" in ativo or "GBP" in ativo) else (2.5 if "HK" in ativo else 0.00012)
+            delta = math.sin(elapsed / 2.5) * delta_factor
+            decimals = 5 if ("HK" in ativo or "CHF" in ativo or "EUR" in ativo or "GBP" in ativo) else 3
+            taxa_atual = round(taxa_entrada + delta, decimals)
             is_winning = (taxa_atual >= taxa_entrada) if direcao.upper() == "CALL" else (taxa_atual <= taxa_entrada)
 
             live_status = "WINNING" if is_winning else "LOSING"
