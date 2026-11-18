@@ -140,7 +140,7 @@ class BotMemoryState:
         self.password = os.getenv("BULLEX_PASSWORD", "")
         self.mode = "REAL"  # "REAL" ou "DEMO"
         self.trader_name = "Jose Carlos"
-        self.balance_real = 22404.41
+        self.balance_real = 22776.06
         self.balance_demo = 10000.0
         self.currency = "USD"
         
@@ -296,6 +296,7 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
         "smc_order_block": order_block_info,
         "distancia_suporte": round(abs(ultimo_preco - suporte_micro), 5),
         "distancia_resistencia": round(abs(resistencia_micro - ultimo_preco), 5),
+        "candles": candles[-35:],
         "qtd_velas": len(candles)
     }
 
@@ -443,7 +444,7 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     state.active_signal["clock_str"] = f"00:{remaining:02d}"
                     state.active_signal["stake_val"] = valor
                     state.active_signal["stake_str"] = f"{simb} {valor:.2f}"
-                    state.active_signal["lp_expected_str"] = f"+{simb} {payout_estimado:.2f}"
+                    state.active_signal["lp_expected_str"] = f"+{simb} {payout_estimado:.2f}" if is_winning else f"-{simb} {valor:.2f}"
                     state.active_signal["lp_pos_venda_str"] = lp_pos_venda_str
                     state.active_signal["lp_pos_venda_val"] = lp_pos_venda
                     state.active_signal["resale_percent"] = resale_percent
@@ -595,7 +596,7 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
                 state.active_signal["clock_str"] = f"00:{remaining:02d}"
                 state.active_signal["stake_val"] = valor
                 state.active_signal["stake_str"] = f"{simb} {valor:.2f}"
-                state.active_signal["lp_expected_str"] = f"+{simb} {payout_estimado:.2f}"
+                state.active_signal["lp_expected_str"] = f"+{simb} {payout_estimado:.2f}" if is_winning else f"-{simb} {valor:.2f}"
                 state.active_signal["lp_pos_venda_str"] = lp_pos_venda_str
                 state.active_signal["lp_pos_venda_val"] = lp_pos_venda
                 state.active_signal["resale_percent"] = resale_percent
@@ -939,7 +940,7 @@ async def auto_conectar_bullex():
                 state.is_connected = True
                 saldo = await asyncio.to_thread(api_instance.get_balance) or 0.0
                 if state.mode == "REAL":
-                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22404.41)
+                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22776.06)
                 else:
                     state.balance_demo = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_demo or 10000.0)
                 print(f"[AUTO-LOGIN SUCESSO] Conectado na BullEx! Saldo: R$ {saldo:.2f}", flush=True)
@@ -1008,7 +1009,7 @@ async def api_connect(req: ConnectRequest):
 
                 state.currency = moeda
                 if state.mode == "REAL":
-                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22404.41)
+                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22776.06)
                 else:
                     state.balance_demo = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_demo or 10000.0)
                 
@@ -1048,8 +1049,8 @@ async def api_demo_bypass():
     state.mode = "REAL"
     state.trader_name = "Jose Carlos"
     state.email = "josecarlosqueirozdesena999559@gmail.com"
-    state.balance_real = 22404.41
-    return {"success": True, "mode": "REAL", "balance": 22404.41}
+    state.balance_real = 22776.06
+    return {"success": True, "mode": "REAL", "balance": 22776.06}
 
 class TwoFactorRequest(BaseModel):
     code: str
@@ -1248,7 +1249,7 @@ async def api_config(cfg: ConfigUpdate):
                 await asyncio.to_thread(state.api.change_balance, mode_bx)
                 saldo = await asyncio.to_thread(state.api.get_balance) or 0.0
                 if state.mode == "REAL":
-                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22404.41)
+                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22776.06)
                 else:
                     state.balance_demo = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_demo or 10000.0)
             except Exception:
