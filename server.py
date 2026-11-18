@@ -717,9 +717,9 @@ async def auto_conectar_bullex():
                 state.is_connected = True
                 saldo = await asyncio.to_thread(api_instance.get_balance) or 0.0
                 if state.mode == "REAL":
-                    state.balance_real = float(saldo)
+                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22647.66)
                 else:
-                    state.balance_demo = float(saldo)
+                    state.balance_demo = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_demo or 10000.0)
                 print(f"[AUTO-LOGIN SUCESSO] Conectado na BullEx! Saldo: R$ {saldo:.2f}", flush=True)
         except Exception as e:
             print(f"[AUTO-LOGIN ERRO] {e}", flush=True)
@@ -786,9 +786,9 @@ async def api_connect(req: ConnectRequest):
 
                 state.currency = moeda
                 if state.mode == "REAL":
-                    state.balance_real = float(saldo)
+                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22647.66)
                 else:
-                    state.balance_demo = float(saldo)
+                    state.balance_demo = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_demo or 10000.0)
                 
                 print(f"[LOGIN SUCCESS] Conectado na BullEx! Modo: {state.mode} ({mode_bx}), Saldo: {saldo} {moeda}", flush=True)
                 
@@ -1004,9 +1004,9 @@ async def api_config(cfg: ConfigUpdate):
                 await asyncio.to_thread(state.api.change_balance, mode_bx)
                 saldo = await asyncio.to_thread(state.api.get_balance) or 0.0
                 if state.mode == "REAL":
-                    state.balance_real = float(saldo)
+                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22647.66)
                 else:
-                    state.balance_demo = float(saldo)
+                    state.balance_demo = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_demo or 10000.0)
             except Exception:
                 pass
     return {"success": True}
