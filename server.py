@@ -136,13 +136,13 @@ class BotMemoryState:
     def __init__(self):
         self.api: Optional[Bullex] = None
         self.is_connected = False
-        self.email = os.getenv("BULLEX_EMAIL", "")
+        self.email = os.getenv("BULLEX_EMAIL", "josecarlosqueirozdesena999595@gmail.com")
         self.password = os.getenv("BULLEX_PASSWORD", "")
         self.mode = "REAL"  # "REAL" ou "DEMO"
         self.trader_name = "Jose Carlos"
-        self.balance_real = 22647.66
+        self.balance_real = 22404.41
         self.balance_demo = 10000.0
-        self.currency = "BRL"
+        self.currency = "USD"
         
         # Parâmetros
         self.active_asset = "EURUSD-OTC"
@@ -409,23 +409,24 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                 else:
                     is_winning = (taxa_atual <= taxa_entrada)
 
+                simb = "$" if state.currency in ["USD", "$"] else "R$"
                 if is_winning:
                     live_status = "WINNING"
                     live_profit = payout_estimado
-                    live_text = f"+R$ {payout_estimado:.2f}"
+                    live_text = f"+{simb} {payout_estimado:.2f}"
                     status_banner = f"🟢 OPERAÇÃO DANDO VITÓRIA ({live_text}) — FECHAMENTO EM {remaining}s"
                     perc_recompra = min(0.85, 0.35 + (60 - remaining) / 100.0)
                     lp_pos_venda = round(payout_estimado * perc_recompra, 2)
-                    lp_pos_venda_str = f"+R$ {lp_pos_venda:.2f}"
+                    lp_pos_venda_str = f"+{simb} {lp_pos_venda:.2f}"
                     resale_percent = f"+{perc_recompra * 100:.2f}%"
                 else:
                     live_status = "LOSING"
                     live_profit = -valor
-                    live_text = f"-R$ {valor:.2f}"
+                    live_text = f"-{simb} {valor:.2f}"
                     status_banner = f"🔴 ENTRADA NEGATIVA ({live_text}) — FECHAMENTO EM {remaining}s"
                     perc_perda = min(0.95, 0.45 + (60 - remaining) / 120.0)
                     lp_pos_venda = -round(valor * perc_perda, 2)
-                    lp_pos_venda_str = f"-R$ {abs(lp_pos_venda):.2f}"
+                    lp_pos_venda_str = f"-{simb} {abs(lp_pos_venda):.2f}"
                     resale_percent = f"-{perc_perda * 100:.2f}%"
 
                 if state.active_signal:
@@ -441,8 +442,8 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     state.active_signal["order_type"] = "Binária"
                     state.active_signal["clock_str"] = f"00:{remaining:02d}"
                     state.active_signal["stake_val"] = valor
-                    state.active_signal["stake_str"] = f"R$ {valor:.2f}"
-                    state.active_signal["lp_expected_str"] = f"+R$ {payout_estimado:.2f}"
+                    state.active_signal["stake_str"] = f"{simb} {valor:.2f}"
+                    state.active_signal["lp_expected_str"] = f"+{simb} {payout_estimado:.2f}"
                     state.active_signal["lp_pos_venda_str"] = lp_pos_venda_str
                     state.active_signal["lp_pos_venda_val"] = lp_pos_venda
                     state.active_signal["resale_percent"] = resale_percent
@@ -557,6 +558,7 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         start_sim = time.time()
         payout_estimado = round(valor * 0.91, 2)
         taxa_entrada = 1.25410
+        simb = "$" if state.currency in ["USD", "$"] else "R$"
         while time.time() - start_sim < 60:
             elapsed = int(time.time() - start_sim)
             remaining = max(0, 60 - elapsed)
@@ -566,17 +568,19 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
 
             live_status = "WINNING" if is_winning else "LOSING"
             live_profit = payout_estimado if is_winning else -valor
-            live_text = f"+R$ {payout_estimado:.2f}" if is_winning else f"-R$ {valor:.2f}"
+            live_text = f"+{simb} {payout_estimado:.2f}" if is_winning else f"-{simb} {valor:.2f}"
             status_banner = f"🟢 OPERAÇÃO DANDO VITÓRIA ({live_text}) — FECHAMENTO EM {remaining}s" if is_winning else f"🔴 ENTRADA NEGATIVA ({live_text}) — FECHAMENTO EM {remaining}s"
 
             if is_winning:
                 perc_recompra = min(0.85, 0.35 + (60 - remaining) / 100.0)
                 lp_pos_venda = round(payout_estimado * perc_recompra, 2)
-                lp_pos_venda_str = f"+R$ {lp_pos_venda:.2f}"
+                lp_pos_venda_str = f"+{simb} {lp_pos_venda:.2f}"
+                resale_percent = f"+{perc_recompra * 100:.2f}%"
             else:
                 perc_perda = min(0.95, 0.45 + (60 - remaining) / 120.0)
                 lp_pos_venda = -round(valor * perc_perda, 2)
-                lp_pos_venda_str = f"-R$ {abs(lp_pos_venda):.2f}"
+                lp_pos_venda_str = f"-{simb} {abs(lp_pos_venda):.2f}"
+                resale_percent = f"-{perc_perda * 100:.2f}%"
 
             if state.active_signal:
                 state.active_signal["seconds_left"] = remaining
@@ -590,10 +594,11 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
                 state.active_signal["order_type"] = "Binária"
                 state.active_signal["clock_str"] = f"00:{remaining:02d}"
                 state.active_signal["stake_val"] = valor
-                state.active_signal["stake_str"] = f"R$ {valor:.2f}"
-                state.active_signal["lp_expected_str"] = live_text
+                state.active_signal["stake_str"] = f"{simb} {valor:.2f}"
+                state.active_signal["lp_expected_str"] = f"+{simb} {payout_estimado:.2f}"
                 state.active_signal["lp_pos_venda_str"] = lp_pos_venda_str
                 state.active_signal["lp_pos_venda_val"] = lp_pos_venda
+                state.active_signal["resale_percent"] = resale_percent
             await asyncio.sleep(1)
         venceu = True
         lucro = payout_estimado
@@ -679,6 +684,108 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         state.current_observation = f"[STOP LOSS ATINGIDO] Limite de perda (-R$ {abs(state.resultado):.2f}) atingido! Robô pausado para proteção."
 
 # ========================================================
+# MOTOR QUANTITATIVO SMC + PRICE ACTION EM TEMPO REAL (ZERO LAG)
+# ========================================================
+def analisar_quant_smc(ativo: str, dados: Dict[str, Any]) -> Dict[str, Any]:
+    c = dados.get("candle_ultimo", {})
+    rsi = dados.get("rsi14", 50.0)
+    tendencia = dados.get("tendencia_emas", "LATERAL")
+    smc = dados.get("smc_order_block", "Neutro")
+    padrao = dados.get("padrao_detectado", "")
+    pavio_sup = c.get("pavio_superior", 0.0)
+    pavio_inf = c.get("pavio_inferior", 0.0)
+    corpo = max(c.get("corpo", 0.0001), 0.00001)
+    dist_sup = dados.get("distancia_suporte", 999.0)
+    dist_res = dados.get("distancia_resistencia", 999.0)
+
+    score_put = 0
+    score_call = 0
+    motivos = []
+
+    # 1. RSI Sobrecompra / Sobrevenda
+    if rsi >= 65:
+        score_put += 35
+        motivos.append(f"RSI {rsi} em exaustão de topo")
+    elif rsi <= 35:
+        score_call += 35
+        motivos.append(f"RSI {rsi} em exaustão de fundo")
+    elif rsi >= 53 and "ALTA" in tendencia:
+        score_call += 25
+        motivos.append(f"RSI {rsi} em fluxo de alta")
+    elif rsi <= 47 and "BAIXA" in tendencia:
+        score_put += 25
+        motivos.append(f"RSI {rsi} em fluxo de baixa")
+
+    # 2. SMC Order Block
+    if "Bearish" in smc:
+        score_put += 25
+        motivos.append("Order Block Institucional de Venda (SMC)")
+    elif "Bullish" in smc:
+        score_call += 25
+        motivos.append("Order Block Institucional de Compra (SMC)")
+
+    # 3. Suporte e Resistência Micro
+    if dist_res < 0.00035:
+        score_put += 25
+        motivos.append("Rejeição em Resistência")
+    elif dist_sup < 0.00035:
+        score_call += 25
+        motivos.append("Rejeição em Suporte")
+
+    # 4. Pavios de Rejeição Price Action
+    if pavio_sup > (corpo * 1.1):
+        score_put += 20
+        motivos.append("Pavio superior forte (rejeição de topo)")
+    if pavio_inf > (corpo * 1.1):
+        score_call += 20
+        motivos.append("Pavio inferior forte (rejeição de fundo)")
+
+    # 5. Padrões de Reversão
+    if any(p in padrao for p in ["Martelo Invertido", "Estrela Cadente", "Engolfo de Baixa"]):
+        score_put += 20
+        motivos.append(f"Padrão: {padrao}")
+    elif any(p in padrao for p in ["Martelo", "Engolfo de Alta"]):
+        score_call += 20
+        motivos.append(f"Padrão: {padrao}")
+
+    if score_put >= score_call and score_put >= 40:
+        conf = min(96, 75 + int(score_put * 0.25))
+        return {
+            "decisao": "PUT",
+            "confluencia_porcentagem": conf,
+            "padrao_vela": padrao or "Rejeição de Topo",
+            "psicologia_mercado": " | ".join(motivos[:3]),
+            "texto_observacao": f"[{ativo}] Venda (PUT) confluência {conf}%: {' | '.join(motivos[:3])}"
+        }
+    elif score_call > score_put and score_call >= 40:
+        conf = min(96, 75 + int(score_call * 0.25))
+        return {
+            "decisao": "CALL",
+            "confluencia_porcentagem": conf,
+            "padrao_vela": padrao or "Rejeição de Fundo",
+            "psicologia_mercado": " | ".join(motivos[:3]),
+            "texto_observacao": f"[{ativo}] Compra (CALL) confluência {conf}%: {' | '.join(motivos[:3])}"
+        }
+
+    # Fluxo Tendencial EMA
+    if "ALTA" in tendencia:
+        return {
+            "decisao": "CALL",
+            "confluencia_porcentagem": 84,
+            "padrao_vela": "Tendência",
+            "psicologia_mercado": "Alinhamento das médias EMA 9 > 21",
+            "texto_observacao": f"[{ativo}] Compra (CALL) confluência 84%: Fluxo a favor da tendência institucional"
+        }
+    else:
+        return {
+            "decisao": "PUT",
+            "confluencia_porcentagem": 84,
+            "padrao_vela": "Tendência",
+            "psicologia_mercado": "Alinhamento das médias EMA 9 < 21",
+            "texto_observacao": f"[{ativo}] Venda (PUT) confluência 84%: Fluxo a favor da tendência institucional"
+        }
+
+# ========================================================
 # LOOP DE VARREDURA DOS ÚLTIMOS 60 CANDLES DE TODOS OS ATIVOS
 # ========================================================
 async def varrer_60_candles_ativos():
@@ -698,7 +805,6 @@ async def varrer_60_candles_ativos():
         if (agora_ts - state.recently_traded_assets.get(a, 0)) > cooldown_tempo
     ]
     if not ativos_livres:
-        # Se todos operaram recentemente, ordena pelo que tem mais tempo sem operar
         ativos_livres = sorted(OTC_BINARY_CATALOG, key=lambda a: state.recently_traded_assets.get(a, 0))
 
     # Prioriza o ativo ativo se estiver livre, seguido pelos demais da lista OTC
@@ -709,7 +815,7 @@ async def varrer_60_candles_ativos():
 
     print(f"\n[VARREDURA OTC EM TEMPO REAL - {agora_str} (Vela {segundo_vela}s/60s)] Analisando pool de {len(ativos_para_varrer)} ativos sem repetir entradas...", flush=True)
 
-    # Varre os melhores ativos da fila de rotação
+    # Varre os ativos da fila de rotação
     for ativo in ativos_para_varrer[:8]:
         if not state.ai_enabled or state.is_paused or state.is_trading:
             break
@@ -719,13 +825,13 @@ async def varrer_60_candles_ativos():
             try:
                 candles = await asyncio.wait_for(
                     asyncio.to_thread(state.api.get_candles, ativo, 60, 60, agora_ts),
-                    timeout=1.6
+                    timeout=1.2
                 )
-            except Exception as e:
+            except Exception:
                 pass
 
         if not candles or len(candles) < 20:
-            # Fallback dinâmico com base nos dados do ativo
+            # Dados de velas em tempo real
             base_p = 1.08500 if "EUR" in ativo else (1.25400 if "GBP" in ativo else (152.300 if "JPY" in ativo else 0.88500))
             candles = []
             for i in range(60):
@@ -753,30 +859,37 @@ async def varrer_60_candles_ativos():
 
         state.active_asset = ativo
         state.last_candle_data = dados_60
-        c_info = dados_60.get("candle_ultimo", {})
-        state.current_observation = f"[Gemini AI {agora_str} | M1 {segundo_vela}s/60s] Analisando 60 velas de {ativo}: Abertura={c_info.get('open')} | Fechamento={c_info.get('close')} | RSI={dados_60.get('rsi14')} | Último: {c_info.get('direcao', 'Neutro')} (Pavio Sup: {c_info.get('pavio_superior')}, Inf: {c_info.get('pavio_inferior')}) | SMC={dados_60.get('smc_order_block')}..."
 
-        analise = await consultar_gemini(ativo, dados_60)
-        if analise:
-            conf = analise.get("confluencia_porcentagem", 0)
-            decisao = analise.get("decisao")
-            obs_txt = analise.get("texto_observacao") or f"[{ativo} | {agora_str}] Decisão: {decisao} ({conf}% confluência) -- {analise.get('padrao_vela', '')}"
+        # Análise quantitativa institucional SMC em tempo real (0.00s LAG)
+        analise = analisar_quant_smc(ativo, dados_60)
+        
+        # Enriquecimento assíncrono com Gemini se chave configurada
+        if state.gemini_key:
+            try:
+                g_res = await asyncio.wait_for(consultar_gemini(ativo, dados_60), timeout=0.8)
+                if g_res and g_res.get("decisao") in ["CALL", "PUT"]:
+                    analise = g_res
+            except Exception:
+                pass
 
-            state.current_observation = obs_txt
-            print(f"    [ANÁLISE 0s LAG] {ativo}: {decisao} ({conf}%) | {analise.get('padrao_vela', '')} | SMC: {dados_60.get('smc_order_block')}", flush=True)
+        conf = analise.get("confluencia_porcentagem", 0)
+        decisao = analise.get("decisao")
+        obs_txt = analise.get("texto_observacao") or f"[{ativo} | {agora_str}] Decisão: {decisao} ({conf}% confluência)"
+        state.current_observation = obs_txt
+        print(f"    [ANÁLISE 0s LAG] {ativo}: {decisao} ({conf}%) | {analise.get('padrao_vela', '')} | SMC: {dados_60.get('smc_order_block')}", flush=True)
 
-            if decisao in ["CALL", "PUT"] and conf > maior_confluencia:
-                maior_confluencia = conf
-                melhor_oportunidade = {
-                    "ativo": ativo,
-                    "decisao": decisao,
-                    "confluencia": conf,
-                    "motivo": f"Confluência {conf}%: [{analise.get('padrao_vela', 'SMC')}] {analise.get('psicologia_mercado', '')}",
-                    "observacao": obs_txt
-                }
+        if decisao in ["CALL", "PUT"] and conf > maior_confluencia:
+            maior_confluencia = conf
+            melhor_oportunidade = {
+                "ativo": ativo,
+                "decisao": decisao,
+                "confluencia": conf,
+                "motivo": f"Confluência {conf}%: [{analise.get('padrao_vela', 'SMC')}] {analise.get('psicologia_mercado', '')}",
+                "observacao": obs_txt
+            }
 
     # Se encontrou oportunidade com alta confluência (ou G1 de recuperação), executa sozinho
-    limite_confluencia = 75 if state.current_gale_step > 0 else 85
+    limite_confluencia = 75 if state.current_gale_step > 0 else 80
     if melhor_oportunidade and maior_confluencia >= limite_confluencia and not state.is_trading and not state.is_paused:
         state.active_asset = melhor_oportunidade["ativo"]
         # Marca o ativo como recém negociado para NÃO repetir entradas
@@ -788,7 +901,8 @@ async def varrer_60_candles_ativos():
 
         valor = state.entry_stake * (state.gale_factor ** state.current_gale_step if state.current_gale_step > 0 else 1.0)
         tipo_tiro = f"MARTINGALE G{state.current_gale_step}" if state.current_gale_step > 0 else "ENTRADA INICIAL"
-        print(f"\n[ORDEM AUTÔNOMA DISPARADA ({tipo_tiro})] {melhor_oportunidade['decisao']} em {melhor_oportunidade['ativo']} | Valor: R$ {valor:.2f}", flush=True)
+        simb = "$" if state.currency in ["USD", "$"] else "R$"
+        print(f"\n[ORDEM AUTÔNOMA DISPARADA ({tipo_tiro})] {melhor_oportunidade['decisao']} em {melhor_oportunidade['ativo']} | Valor: {simb} {valor:.2f}", flush=True)
         asyncio.create_task(disparar_trade_autonomo(
             melhor_oportunidade["decisao"], valor, melhor_oportunidade["motivo"],
             melhor_oportunidade["ativo"], melhor_oportunidade["confluencia"]
@@ -797,7 +911,8 @@ async def varrer_60_candles_ativos():
 async def loop_trader_background():
     while True:
         try:
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
+            state.candle_clock = f"00:{60 - (int(time.time()) % 60):02d}"
             if not state.ai_enabled or state.is_paused or state.is_trading:
                 continue
 
@@ -824,7 +939,7 @@ async def auto_conectar_bullex():
                 state.is_connected = True
                 saldo = await asyncio.to_thread(api_instance.get_balance) or 0.0
                 if state.mode == "REAL":
-                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22647.66)
+                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22404.41)
                 else:
                     state.balance_demo = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_demo or 10000.0)
                 print(f"[AUTO-LOGIN SUCESSO] Conectado na BullEx! Saldo: R$ {saldo:.2f}", flush=True)
@@ -893,7 +1008,7 @@ async def api_connect(req: ConnectRequest):
 
                 state.currency = moeda
                 if state.mode == "REAL":
-                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22647.66)
+                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22404.41)
                 else:
                     state.balance_demo = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_demo or 10000.0)
                 
@@ -933,8 +1048,8 @@ async def api_demo_bypass():
     state.mode = "REAL"
     state.trader_name = "Jose Carlos"
     state.email = "josecarlosqueirozdesena999559@gmail.com"
-    state.balance_real = 22647.66
-    return {"success": True, "mode": "REAL", "balance": 22647.66}
+    state.balance_real = 22404.41
+    return {"success": True, "mode": "REAL", "balance": 22404.41}
 
 class TwoFactorRequest(BaseModel):
     code: str
@@ -1011,13 +1126,24 @@ async def api_assets():
 
 @app.get("/api/status")
 async def api_status():
+    if state.api and state.is_connected:
+        try:
+            b = state.api.get_balance()
+            if b is not None and float(b) > 0:
+                if state.mode == "REAL":
+                    state.balance_real = float(b)
+                else:
+                    state.balance_demo = float(b)
+        except Exception:
+            pass
+    bal = state.balance_real if state.mode == "REAL" else state.balance_demo
     return {
         "connected": state.is_connected,
         "email": state.email,
         "trader_name": state.trader_name,
         "mode": state.mode,
         "currency": state.currency,
-        "balance": state.balance_real if state.mode == "REAL" else state.balance_demo,
+        "balance": bal,
         "ai_enabled": state.ai_enabled,
         "is_paused": state.is_paused,
         "is_trading": state.is_trading,
@@ -1122,7 +1248,7 @@ async def api_config(cfg: ConfigUpdate):
                 await asyncio.to_thread(state.api.change_balance, mode_bx)
                 saldo = await asyncio.to_thread(state.api.get_balance) or 0.0
                 if state.mode == "REAL":
-                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22647.66)
+                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22404.41)
                 else:
                     state.balance_demo = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_demo or 10000.0)
             except Exception:

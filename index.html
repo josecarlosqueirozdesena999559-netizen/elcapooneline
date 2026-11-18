@@ -1881,25 +1881,34 @@
     // Variáveis de contagem regressiva em tempo real sem pulos
     let currentCountdown = null;
     let currentCountdownPrefix = 'ENTRADA EM: ';
+    let activeTradeTargetEpoch = null;
+
+    // Relógio da Vela M1 sem atrasos e sem saltos (baseado no segundo cravado do sistema)
+    function tickSmoothCandleClock() {
+      const now = new Date();
+      const sec = now.getSeconds();
+      const rem = 60 - sec;
+      const remSec = rem === 60 ? 60 : rem;
+      const ss = remSec < 10 ? '0' + remSec : remSec;
+      const elClock = document.getElementById('txtCandleClock');
+      if (elClock) elClock.textContent = `00:${ss}`;
+    }
+    setInterval(tickSmoothCandleClock, 200);
 
     function updateRealTimeCountdown() {
-      if (currentCountdown !== null && currentCountdown > 0) {
-        currentCountdown--;
-        const timerBadge = document.getElementById('signalTimerBadge');
-        if (timerBadge) {
-          const ss = currentCountdown < 10 ? '0' + currentCountdown : currentCountdown;
-          timerBadge.textContent = `${currentCountdownPrefix}00:${ss}s`;
-        }
+      if (activeTradeTargetEpoch !== null) {
+        const nowMs = Date.now();
+        const remSec = Math.max(0, Math.ceil((activeTradeTargetEpoch - nowMs) / 1000));
+        const ss = remSec < 10 ? '0' + remSec : remSec;
         const bxTop = document.getElementById('bxTopClock');
-        if (bxTop) {
-          const ss = currentCountdown < 10 ? '0' + currentCountdown : currentCountdown;
-          bxTop.textContent = `00:${ss}`;
-        }
+        if (bxTop) bxTop.textContent = `00:${ss}`;
         const bxRow = document.getElementById('bxRowClock');
-        if (bxRow) {
-          const ss = currentCountdown < 10 ? '0' + currentCountdown : currentCountdown;
-          bxRow.textContent = `00:${ss}`;
-        }
+        if (bxRow) bxRow.textContent = `00:${ss}`;
+      } else if (currentCountdown !== null && currentCountdown > 0) {
+        currentCountdown--;
+        const ss = currentCountdown < 10 ? '0' + currentCountdown : currentCountdown;
+        const timerBadge = document.getElementById('signalTimerBadge');
+        if (timerBadge) timerBadge.textContent = `${currentCountdownPrefix}00:${ss}s`;
       }
     }
     // Ticker a cada 1000ms cravados (segundos fluidos sem pulos)
@@ -2142,10 +2151,14 @@
         }
 
         const balEl = document.getElementById('balanceDisplay');
+        const isUSD = data.currency === 'USD' || data.currency === '$';
+        const currSym = isUSD ? '$' : 'R$';
+        const numLocale = isUSD ? 'en-US' : 'pt-BR';
+        const formattedVal = (data.balance || 0).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         if (appState.balanceHidden) {
           balEl.textContent = '••••••••';
         } else {
-          balEl.textContent = `R$ ${(data.balance || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`;
+          balEl.textContent = `${currSym} ${formattedVal}`;
         }
 
         // Ativo Ativo (Selecionado de forma 100% autônoma pela IA)
@@ -2155,11 +2168,7 @@
           document.getElementById('currentActiveAsset').textContent = data.active_asset;
         }
 
-        // Relógio da Vela M1 em Tempo Real (Direto da Plataforma)
-        if (data.candle_clock) {
-          const elClock = document.getElementById('txtCandleClock');
-          if (elClock) elClock.textContent = data.candle_clock;
-        }
+        // O relógio da vela M1 é atualizado sem saltos pelo ticker local de alta frequência tickSmoothCandleClock()
 
         // Controle da IA
         const btnPower = document.getElementById('btnToggleAI');
@@ -2211,6 +2220,11 @@
 
           const headerTitle = document.getElementById('signalHeaderTitle');
           const isTradeRunning = sig.status && (sig.status.includes('ANDAMENTO') || sig.status.includes('FECHAMENTO'));
+          if (isTradeRunning) {
+            activeTradeTargetEpoch = Date.now() + (secs * 1000);
+          } else {
+            activeTradeTargetEpoch = null;
+          }
 
           // Painel de Lucro em Tempo Real (Verde = Vitória, Vermelho = Entrada Negativa)
           const liveRow = document.getElementById('liveTradeStatusRow');
@@ -2345,6 +2359,7 @@
           }
         } else {
           currentCountdown = null;
+          activeTradeTargetEpoch = null;
           sigCard.style.display = 'none';
           const bxSection = document.getElementById('openPositionsSection');
           if (bxSection) bxSection.style.display = 'none';
