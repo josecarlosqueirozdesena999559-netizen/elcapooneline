@@ -135,8 +135,8 @@ SCAN_ASSETS_PRIORITY = OTC_BINARY_CATALOG
 class BotMemoryState:
     def __init__(self):
         self.api: Optional[Bullex] = None
-        self.is_connected = False
-        self.email = os.getenv("BULLEX_EMAIL", "josecarlosqueirozdesena999595@gmail.com")
+        self.is_connected = True
+        self.email = os.getenv("BULLEX_EMAIL", "josecarlosqueirozdesena999559@gmail.com")
         self.password = os.getenv("BULLEX_PASSWORD", "")
         self.mode = "REAL"  # "REAL" ou "DEMO"
         self.trader_name = "Jose Carlos"
