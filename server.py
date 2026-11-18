@@ -417,6 +417,7 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     perc_recompra = min(0.85, 0.35 + (60 - remaining) / 100.0)
                     lp_pos_venda = round(payout_estimado * perc_recompra, 2)
                     lp_pos_venda_str = f"+R$ {lp_pos_venda:.2f}"
+                    resale_percent = f"+{perc_recompra * 100:.2f}%"
                 else:
                     live_status = "LOSING"
                     live_profit = -valor
@@ -425,6 +426,7 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     perc_perda = min(0.95, 0.45 + (60 - remaining) / 120.0)
                     lp_pos_venda = -round(valor * perc_perda, 2)
                     lp_pos_venda_str = f"-R$ {abs(lp_pos_venda):.2f}"
+                    resale_percent = f"-{perc_perda * 100:.2f}%"
 
                 if state.active_signal:
                     state.active_signal["seconds_left"] = remaining
@@ -434,15 +436,16 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     state.active_signal["live_profit_text"] = live_text
                     state.active_signal["entry_rate"] = taxa_entrada
                     state.active_signal["current_rate"] = taxa_atual
-                    # Modelo BullEx de Operações Abertas
+                    # Modelo BullEx Oficial de Operações Abertas
                     state.active_signal["order_id"] = order_id
                     state.active_signal["order_type"] = "Binária"
                     state.active_signal["clock_str"] = f"00:{remaining:02d}"
                     state.active_signal["stake_val"] = valor
                     state.active_signal["stake_str"] = f"R$ {valor:.2f}"
-                    state.active_signal["lp_expected_str"] = live_text
+                    state.active_signal["lp_expected_str"] = f"+R$ {payout_estimado:.2f}"
                     state.active_signal["lp_pos_venda_str"] = lp_pos_venda_str
                     state.active_signal["lp_pos_venda_val"] = lp_pos_venda
+                    state.active_signal["resale_percent"] = resale_percent
 
                 try:
                     if order_id in api.api.socket_option_closed and api.api.socket_option_closed[order_id] is not None:
@@ -976,7 +979,9 @@ async def api_sell_option():
             if oid and oid != "SIM_1001":
                 try:
                     res = await asyncio.to_thread(state.api.sell_option, oid)
-                    state.current_observation = f"[VENDA ANTECIPADA] Ordem #{oid} vendida antecipadamente na BullEx."
+                    state.is_trading = False
+                    state.active_signal = None
+                    state.current_observation = f"[VENDA ANTECIPADA] Ordem #{oid} vendida com sucesso na BullEx."
                     return {"success": True, "message": "Ordem vendida com sucesso na corretora!"}
                 except Exception as e:
                     return {"success": False, "message": f"Erro ao vender na BullEx: {e}"}

@@ -990,6 +990,56 @@
       box-shadow: none;
     }
 
+    /* Estilos Oficiais BullEx - Operações Abertas */
+    .bx-btn-vender-top {
+      background: #1e2638;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+      color: #ffffff;
+      font-size: 13px;
+      font-weight: 700;
+      padding: 7px 20px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      font-family: var(--font-family) !important;
+    }
+    .bx-btn-vender-top:hover {
+      background: #28334b;
+      border-color: rgba(255, 255, 255, 0.3);
+    }
+    .bx-btn-vender-row {
+      background: #1e2638;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 4px;
+      color: #ffffff;
+      font-size: 11.5px;
+      font-weight: 700;
+      padding: 5px 16px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      font-family: var(--font-family) !important;
+    }
+    .bx-btn-vender-row:hover {
+      background: #28334b;
+      border-color: rgba(255, 255, 255, 0.3);
+    }
+    .bx-btn-vender-all {
+      background: #1e2638;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+      color: #ffffff;
+      font-size: 11.5px;
+      font-weight: 700;
+      padding: 5px 14px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      font-family: var(--font-family) !important;
+    }
+    .bx-btn-vender-all:hover {
+      background: #28334b;
+      border-color: rgba(255, 255, 255, 0.3);
+    }
+
     @keyframes pulse {
       0%, 100% { opacity: 1; transform: scale(1); }
       50% { opacity: 0.4; transform: scale(0.9); }
@@ -1316,10 +1366,10 @@
         </section>
 
         <!-- Painel de Operações Abertas (Modelo Oficial BullEx - 100% Flat) -->
-        <section class="open-positions-container" id="openPositionsSection" style="display:none; background: #121721; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 4px; padding: 14px 18px; flex-direction: column; gap: 12px; margin-bottom: 20px;">
+        <section class="open-positions-container" id="openPositionsSection" style="display:none; background: #0c1017; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 4px; padding: 14px 18px; flex-direction: column; gap: 12px; margin-bottom: 20px;">
           
-          <!-- Top Bar: Resumo da Ordem Ativa -->
-          <div style="display: flex; align-items: center; justify-content: space-between; background: #0f131a; border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 4px; padding: 12px 18px; flex-wrap: wrap; gap: 14px;">
+          <!-- Top Bar: Resumo da Ordem Ativa (Overlay BullEx) -->
+          <div style="display: flex; align-items: center; justify-content: space-between; background: #070a10; border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 4px; padding: 12px 18px; flex-wrap: wrap; gap: 14px;">
             <div style="display: flex; align-items: center; gap: 24px; flex-wrap: wrap;">
               <!-- Relógio / Expiração -->
               <div style="display: flex; flex-direction: column; gap: 2px;">
@@ -1345,30 +1395,37 @@
                 <span style="font-size: 10px; font-weight: 700; color: #64748b; letter-spacing: 0.05em; text-transform: uppercase;">LUCRO ESPERADO</span>
               </div>
 
-              <!-- L/P no Momento -->
+              <!-- Lucro Após a Venda (L/P) -->
               <div style="display: flex; flex-direction: column; gap: 2px;">
                 <span id="bxTopLpResale" style="font-size: 15px; font-weight: 900; color: var(--red-negative); font-family: var(--font-mono);">-R$ 2,50</span>
-                <span style="font-size: 10px; font-weight: 700; color: #64748b; letter-spacing: 0.05em; text-transform: uppercase;">L/P NO MOMENTO</span>
+                <span style="font-size: 10px; font-weight: 700; color: #64748b; letter-spacing: 0.05em; text-transform: uppercase;">LUCRO APÓS A VENDA (L/P)</span>
               </div>
             </div>
 
-            <div style="display:flex; align-items:center; gap:8px;">
-              <span style="width:8px; height:8px; border-radius:50%; background:var(--green-positive); animation:pulse 1s infinite;"></span>
-              <span style="font-size:12px; font-weight:800; color:var(--green-positive); font-family:var(--font-mono);">OPERAÇÃO EM EXECUÇÃO</span>
+            <!-- Botão Vender na barra superior -->
+            <div style="display: flex; align-items: center; gap: 12px;">
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span style="width:7px; height:7px; border-radius:50%; background:var(--green-positive); animation:pulse 1s infinite;"></span>
+                <span style="font-size:11.5px; font-weight:800; color:var(--green-positive); font-family:var(--font-mono);">OPERAÇÃO EM EXECUÇÃO</span>
+              </div>
+              <button class="bx-btn-vender-top" onclick="venderOpcao()" title="Encerrar e vender ordem antecipadamente na BullEx">Vender</button>
             </div>
           </div>
 
           <!-- Header da Tabela: Opções (1) -$XX.XX -->
-          <div style="display: flex; align-items: center; justify-content: space-between; padding: 2px 4px;">
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 4px 4px;">
             <div style="display: flex; align-items: center; gap: 10px;">
-              <span style="font-size: 13px; font-weight: 800; color: #ffffff;">Opções</span>
-              <span id="bxBadgeCountLp" style="font-size: 12px; font-weight: 800; color: var(--red-negative); font-family: var(--font-mono);">(1) -R$ 2,50</span>
+              <span style="font-size: 13.5px; font-weight: 800; color: #ffffff;">Opções</span>
+              <span id="bxBadgeCountLp" style="font-size: 13px; font-weight: 800; color: var(--red-negative); font-family: var(--font-mono);">(1) -R$ 2,50</span>
             </div>
-            <span style="font-size: 11px; color: #64748b; font-weight: 600;">BullEx Room Real-Time</span>
+            <button id="btnTogglePositions" onclick="togglePositionsTable()" style="background:transparent; border:none; color:#64748b; font-size:11.5px; cursor:pointer; display:flex; align-items:center; gap:5px; font-weight:600;">
+              Ocultar posições 
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
           </div>
 
-          <!-- Tabela Responsiva Flat -->
-          <div style="overflow-x: auto; width: 100%;">
+          <!-- Tabela Responsiva Flat BullEx -->
+          <div id="openPositionsTableWrap" style="overflow-x: auto; width: 100%;">
             <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; font-family: var(--font-sans);">
               <thead>
                 <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.08); color: #64748b; font-size: 11px; font-weight: 700; letter-spacing: 0.03em;">
@@ -1379,7 +1436,8 @@
                   <th style="padding: 8px 10px;">Abertura</th>
                   <th style="padding: 8px 10px;">Preço atual</th>
                   <th style="padding: 8px 10px;">L/P esperados</th>
-                  <th style="padding: 8px 10px;">L/P momento</th>
+                  <th style="padding: 8px 10px;">L/P pós-venda</th>
+                  <th style="padding: 8px 10px; text-align: right;">Ação</th>
                 </tr>
               </thead>
               <tbody id="openPositionsTableBody">
@@ -1387,8 +1445,8 @@
                   <!-- Nome -->
                   <td style="padding: 10px;">
                     <div style="display: flex; align-items: center; gap: 8px;">
-                      <span id="bxRowAssetIcon" style="width: 20px; height: 20px; border-radius: 4px; background: #1e293b; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 900; color: #38bdf8;">
-                        FX
+                      <span id="bxRowAssetIcon" style="width: 20px; height: 20px; border-radius: 50%; background: #b91c1c; display: flex; align-items: center; justify-content: center; font-size: 8.5px; font-weight: 900; color: #ffffff;">
+                        OTC
                       </span>
                       <strong id="bxRowAssetName" style="color: #ffffff; font-size: 12.5px;">EURUSD-OTC</strong>
                     </div>
@@ -1416,21 +1474,30 @@
                   <td id="bxRowCurrentPrice" style="padding: 10px; color: var(--green-positive); font-weight: 800;">1.08535</td>
                   <!-- L/P Esperados -->
                   <td id="bxRowLpExpected" style="padding: 10px; color: var(--green-positive); font-weight: 900;">+R$ 4,55</td>
-                  <!-- L/P Momento -->
+                  <!-- L/P Pós-Venda -->
                   <td id="bxRowLpResale" style="padding: 10px; color: var(--red-negative); font-weight: 900;">-R$ 2,50</td>
+                  <!-- Botão Vender -->
+                  <td style="padding: 10px; text-align: right;">
+                    <button class="bx-btn-vender-row" onclick="venderOpcao()" title="Vender ordem">Vender</button>
+                  </td>
                 </tr>
               </tbody>
             </table>
           </div>
 
           <!-- Bottom Footer Bar -->
-          <div style="display: flex; align-items: center; justify-content: space-between; border-top: 1px solid rgba(255, 255, 255, 0.08); padding-top: 8px; font-size: 11px; color: #94a3b8; font-family: var(--font-mono); flex-wrap: wrap; gap: 10px;">
-            <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
-              <div>Investimento: <strong id="bxFootInvest" style="color: #fff;">R$ 5,00</strong></div>
+          <div style="display: flex; align-items: center; justify-content: space-between; border-top: 1px solid rgba(255, 255, 255, 0.08); padding-top: 10px; font-size: 11.5px; color: #94a3b8; font-family: var(--font-mono); flex-wrap: wrap; gap: 10px;">
+            <div style="display: flex; align-items: center; gap: 18px; flex-wrap: wrap;">
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                <span>Investimento: <strong id="bxFootInvest" style="color: #fff;">R$ 5,00</strong></span>
+              </div>
               <div>L/P esperados: <strong id="bxFootLpExpected" style="color: var(--green-positive);">+R$ 4,55</strong></div>
-              <div>L/P momento: <strong id="bxFootLpResale" style="color: var(--red-negative);">-R$ 2,50</strong></div>
             </div>
-            <div style="font-size:10.5px; color:#64748b; font-weight:600;">Expiração automática M1</div>
+            <div style="display: flex; align-items: center; gap: 14px;">
+              <span id="bxFootLpResale" style="color: var(--red-negative); font-weight: 700;">L/P pós-venda -50.32% | -R$ 2,50</span>
+              <button class="bx-btn-vender-all" onclick="venderOpcao()" title="Vender todas as ordens ativas">Vender todas</button>
+            </div>
           </div>
         </section>
 
@@ -1872,6 +1939,37 @@
       fetch('/api/toggle_pause', { method: 'POST' }).then(() => fetchStatus());
     }
 
+    function venderOpcao() {
+      if (confirm('Deseja vender e encerrar esta operação agora na BullEx?')) {
+        fetch('/api/sell_option', { method: 'POST' })
+          .then(res => res.json())
+          .then(data => {
+            if (data.success) {
+              const bxSection = document.getElementById('openPositionsSection');
+              if (bxSection) bxSection.style.display = 'none';
+              fetchStatus();
+            } else {
+              alert(data.message || 'Erro ao vender opção.');
+            }
+          })
+          .catch(err => console.error('Erro na venda:', err));
+      }
+    }
+
+    function togglePositionsTable() {
+      const tableWrap = document.getElementById('openPositionsTableWrap');
+      const btn = document.getElementById('btnTogglePositions');
+      if (tableWrap) {
+        if (tableWrap.style.display === 'none') {
+          tableWrap.style.display = 'block';
+          if (btn) btn.innerHTML = 'Ocultar posições <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+        } else {
+          tableWrap.style.display = 'none';
+          if (btn) btn.innerHTML = 'Exibir posições <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 15 12 9 18 15"></polyline></svg>';
+        }
+      }
+    }
+
     function zerarScoreboard() {
       if (confirm('Deseja zerar as métricas da sessão atual?')) {
         fetch('/api/reset_score', { method: 'POST' }).then(() => fetchStatus());
@@ -2212,8 +2310,12 @@
             if (bxTopResale) { bxTopResale.textContent = lpResale; bxTopResale.style.color = resaleColor; }
             const bxRowResale = document.getElementById('bxRowLpResale');
             if (bxRowResale) { bxRowResale.textContent = lpResale; bxRowResale.style.color = resaleColor; }
+            const perc = sig.resale_percent || (isWinning ? '+36.00%' : '-50.32%');
             const bxFootResale = document.getElementById('bxFootLpResale');
-            if (bxFootResale) { bxFootResale.textContent = lpResale; bxFootResale.style.color = resaleColor; }
+            if (bxFootResale) {
+              bxFootResale.textContent = `L/P pós-venda ${perc} | ${lpResale}`;
+              bxFootResale.style.color = resaleColor;
+            }
 
             const bxBadge = document.getElementById('bxBadgeCountLp');
             if (bxBadge) {
