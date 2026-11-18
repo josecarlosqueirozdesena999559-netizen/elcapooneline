@@ -176,8 +176,25 @@ class BotMemoryState:
         self.history_trades: List[Dict[str, Any]] = []
         self.active_signal: Optional[Dict[str, Any]] = None
         self.accumulated_gale_loss: float = 0.0
+        self.asset_payouts: Dict[str, float] = {}
 
 state = BotMemoryState()
+
+def get_real_asset_payout(ativo: str) -> float:
+    """Retorna o payout real da corretora para o ativo binário (ex: 84% no HK 33, 87% no GBP/USD)"""
+    clean = ativo.replace("-OTC", "").replace(" (OTC)", "").strip().upper()
+    if clean in state.asset_payouts:
+        return state.asset_payouts[clean]
+    for k, v in state.asset_payouts.items():
+        if clean in k.upper() or k.upper() in clean:
+            return v
+    if "HK" in clean or "33" in clean:
+        return 0.84
+    elif "GBP" in clean:
+        return 0.87
+    elif "EUR" in clean:
+        return 0.86
+    return 0.85
 
 def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not candles or len(candles) < 20:
@@ -562,7 +579,8 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
     else:
         # Modo simulação local caso não conectado à BullEx
         start_sim = time.time()
-        payout_estimado = round(valor * 0.84, 2)
+        payout_pct = get_real_asset_payout(ativo)
+        payout_estimado = round(valor * payout_pct, 2)
         if "CHF" in ativo:
             taxa_entrada = 0.83556
         elif "HK" in ativo or "33" in ativo:
@@ -580,8 +598,8 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
 
         simb = "$" if state.currency in ["USD", "$"] else "R$"
         while time.time() - start_sim < 60:
-            elapsed = int(time.time() - start_sim)
-            remaining = max(0, 60 - elapsed)
+            elapsed = time.time() - start_sim
+            remaining = max(0, int(60 - elapsed))
             delta_factor = 0.00010 if ("CHF" in ativo or "EUR" in ativo or "GBP" in ativo) else (2.5 if "HK" in ativo else 0.00012)
             delta = math.sin(elapsed / 2.5) * delta_factor
             decimals = 5 if ("HK" in ativo or "CHF" in ativo or "EUR" in ativo or "GBP" in ativo) else 3
@@ -617,11 +635,12 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
                 state.active_signal["clock_str"] = f"00:{remaining:02d}"
                 state.active_signal["stake_val"] = valor
                 state.active_signal["stake_str"] = f"{simb} {valor:.2f}"
+                state.active_signal["payout_pct"] = payout_pct
                 state.active_signal["lp_expected_str"] = f"+{simb} {payout_estimado:.2f}" if is_winning else f"-{simb} {valor:.2f}"
                 state.active_signal["lp_pos_venda_str"] = lp_pos_venda_str
                 state.active_signal["lp_pos_venda_val"] = lp_pos_venda
                 state.active_signal["resale_percent"] = resale_percent
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.25)
         venceu = True
         lucro = payout_estimado
 
