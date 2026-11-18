@@ -138,10 +138,10 @@ class BotMemoryState:
         self.is_connected = True
         self.email = os.getenv("BULLEX_EMAIL", "josecarlosqueirozdesena999559@gmail.com")
         self.password = os.getenv("BULLEX_PASSWORD", "")
-        self.mode = "REAL"  # "REAL" ou "DEMO"
+        self.mode = "DEMO"  # Inicia sempre em DEMO conforme solicitado pelo usuário
         self.trader_name = "Jose Carlos"
         self.balance_real = 22776.06
-        self.balance_demo = 10000.0
+        self.balance_demo = 10000.00
         self.currency = "USD"
         
         # Parâmetros
@@ -1086,11 +1086,13 @@ async def api_connect(req: ConnectRequest):
 @app.post("/api/demo_bypass")
 async def api_demo_bypass():
     state.is_connected = True
-    state.mode = "REAL"
+    state.mode = "DEMO"
     state.trader_name = "Jose Carlos"
     state.email = "josecarlosqueirozdesena999559@gmail.com"
     state.balance_real = 22776.06
-    return {"success": True, "mode": "REAL", "balance": 22776.06}
+    state.balance_demo = 10000.00
+    state.currency = "USD"
+    return {"success": True, "mode": "DEMO", "balance": 10000.00}
 
 class TwoFactorRequest(BaseModel):
     code: str
@@ -1177,7 +1179,7 @@ async def api_status():
                     state.balance_demo = float(b)
         except Exception:
             pass
-    bal = state.balance_real if state.mode == "REAL" else state.balance_demo
+    bal = state.balance_demo if state.mode == "DEMO" else state.balance_real
     return {
         "connected": state.is_connected,
         "email": state.email,
@@ -1185,6 +1187,8 @@ async def api_status():
         "mode": state.mode,
         "currency": state.currency,
         "balance": bal,
+        "balance_demo": state.balance_demo,
+        "balance_real": state.balance_real,
         "ai_enabled": state.ai_enabled,
         "is_paused": state.is_paused,
         "is_trading": state.is_trading,

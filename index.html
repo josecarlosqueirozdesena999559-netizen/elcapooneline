@@ -1135,10 +1135,10 @@
             </div>
           </div>
 
-          <!-- Saldo Real da Conta -->
+          <!-- Saldo da Conta (Inicia em DEMO $ 10,000.00 / REAL $ 22,776.06) -->
           <div class="balance-pill-box">
-            <span class="balance-mode-tag" id="balanceTag">CONTA</span>
-            <span class="balance-val-text" id="balanceDisplay">R$ 0,00</span>
+            <span class="balance-mode-tag" id="balanceTag" style="color:#38bdf8;">DEMO</span>
+            <span class="balance-val-text" id="balanceDisplay">$ 10,000.00</span>
             <button class="btn-icon-eye" onclick="toggleBalance()" title="Ocultar/Exibir Saldo">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
@@ -1159,10 +1159,10 @@
       </div>
 
       <div class="header-sub-row">
-        <!-- Alternador de Conta: DEMO / REAL -->
+        <!-- Alternador de Conta: DEMO / REAL (Inicia sempre em DEMO) -->
         <div class="account-mode-capsule">
-          <button class="capsule-btn demo" id="btnCapsuleDemo" onclick="setAccountMode('DEMO')" title="Alternar para Conta DEMO (Treinamento)">DEMO</button>
-          <button class="capsule-btn real" id="btnCapsuleReal" onclick="setAccountMode('REAL')" title="Alternar para Conta REAL da BullEx">REAL</button>
+          <button class="capsule-btn active demo" id="btnCapsuleDemo" onclick="setAccountMode('DEMO')" title="Conta DEMO (Treinamento)">DEMO</button>
+          <button class="capsule-btn" id="btnCapsuleReal" onclick="setAccountMode('REAL')" title="Alternar para Conta REAL da BullEx">REAL</button>
         </div>
 
         <!-- Ativo Selecionado Autonomamente pela IA -->
@@ -1237,7 +1237,7 @@
 
           <div class="top-score-cell">
             <span class="top-score-label">RESULTADO</span>
-            <span class="top-score-number" id="scoreResult">R$ 0,00</span>
+            <span class="top-score-number" id="scoreResult">$ 0.00</span>
           </div>
 
           <div class="top-score-cell">
@@ -1532,7 +1532,7 @@
           <div class="analytics-kpis-grid">
             <div class="an-kpi-card highlight">
               <span class="an-kpi-title">LUCRO LÍQUIDO DA IA</span>
-              <span class="an-kpi-number green" id="anNetProfit">R$ 0,00</span>
+              <span class="an-kpi-number green" id="anNetProfit">$ 0.00</span>
             </div>
             <div class="an-kpi-card">
               <span class="an-kpi-title">ASSERTIVIDADE</span>
@@ -1677,9 +1677,12 @@
   <script>
     let appState = {
       connected: false,
-      aiOn: true,
+      aiOn: false,
       paused: false,
-      mode: 'REAL',
+      mode: 'DEMO', // Inicia sempre no modo DEMO conforme solicitado pelo usuário
+      balanceReal: 22776.06,
+      balanceDemo: 10000.00,
+      currency: 'USD',
       balanceHidden: false,
       activeAsset: 'EURUSD-OTC',
       activeCategory: 'otc',
@@ -2005,6 +2008,32 @@
         return;
       }
       appState.mode = m;
+
+      // Resposta visual instantânea
+      const bDemo = document.getElementById('btnCapsuleDemo');
+      const bReal = document.getElementById('btnCapsuleReal');
+      const tag = document.getElementById('balanceTag');
+      const balEl = document.getElementById('balanceDisplay');
+      const currSym = '$';
+
+      if (m === 'REAL') {
+        if (bReal) bReal.classList.add('active', 'real');
+        if (bDemo) bDemo.classList.remove('active', 'demo');
+        if (tag) { tag.textContent = 'REAL'; tag.style.color = 'var(--green-positive)'; }
+        if (balEl && !appState.balanceHidden) {
+          const val = (appState.balanceReal || 22776.06).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          balEl.textContent = `${currSym} ${val}`;
+        }
+      } else {
+        if (bDemo) bDemo.classList.add('active', 'demo');
+        if (bReal) bReal.classList.remove('active', 'real');
+        if (tag) { tag.textContent = 'DEMO'; tag.style.color = '#38bdf8'; }
+        if (balEl && !appState.balanceHidden) {
+          const val = (appState.balanceDemo || 10000.00).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          balEl.textContent = `${currSym} ${val}`;
+        }
+      }
+
       fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2192,8 +2221,10 @@
           document.getElementById('userInitials').textContent = '🔒';
         }
 
-                // Modo e Saldo (DEMO / REAL com trava de segurança em operações ativas)
-        appState.mode = data.mode || 'REAL';
+                // Modo e Saldo (Começa sempre em DEMO / REAL)
+        appState.mode = data.mode || 'DEMO';
+        appState.balanceReal = data.balance_real !== undefined ? data.balance_real : 22776.06;
+        appState.balanceDemo = data.balance_demo !== undefined ? data.balance_demo : 10000.00;
         appState.isTrading = !!data.is_trading;
         const bDemo = document.getElementById('btnCapsuleDemo');
         const bReal = document.getElementById('btnCapsuleReal');
@@ -2216,7 +2247,7 @@
             bReal.title = 'Alternar para Conta REAL';
           }
 
-          if (data.mode === 'REAL') {
+          if (appState.mode === 'REAL') {
             bReal.classList.add('active', 'real');
             bDemo.classList.remove('active', 'demo');
             if (tag) {
@@ -2237,7 +2268,8 @@
         const isUSD = data.currency === 'USD' || data.currency === '$';
         const currSym = isUSD ? '$' : 'R$';
         const numLocale = isUSD ? 'en-US' : 'pt-BR';
-        const formattedVal = (data.balance || 0).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const activeBal = (appState.mode === 'REAL') ? appState.balanceReal : appState.balanceDemo;
+        const formattedVal = activeBal.toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         if (appState.balanceHidden) {
           balEl.textContent = '••••••••';
         } else {
@@ -2455,13 +2487,13 @@
           document.getElementById('scoreAssert').textContent = sc.assertividade + '%';
           
           const resEl = document.getElementById('scoreResult');
-          const prefix = sc.resultado >= 0 ? '+R$ ' : '-R$ ';
-          resEl.textContent = prefix + Math.abs(sc.resultado).toFixed(2).replace('.', ',');
+          const prefix = sc.resultado >= 0 ? `+${currSym} ` : `-${currSym} `;
+          resEl.textContent = prefix + Math.abs(sc.resultado).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
           resEl.className = sc.resultado >= 0 ? 'top-score-number profit' : 'top-score-number loss';
           document.getElementById('scoreOps').textContent = sc.operacoes;
 
           // Analytics
-          document.getElementById('anNetProfit').textContent = (sc.resultado >= 0 ? '+R$ ' : '-R$ ') + Math.abs(sc.resultado).toFixed(2).replace('.', ',');
+          document.getElementById('anNetProfit').textContent = prefix + Math.abs(sc.resultado).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
           document.getElementById('anWinRate').textContent = sc.assertividade + '%';
           document.getElementById('anTotalWins').textContent = sc.wins;
           document.getElementById('anTotalLosses').textContent = sc.losses;
@@ -2476,7 +2508,7 @@
             const dirClass = item.direction.toLowerCase().includes('call') ? 'call' : 'put';
             const resClass = item.result.toLowerCase() === 'win' ? 'win' : 'loss';
             const sign = item.profit >= 0 ? '+' : '-';
-            const profitFmt = `${sign}R$ ${Math.abs(item.profit).toFixed(2).replace('.', ',')}`;
+            const profitFmt = `${sign}${currSym} ${Math.abs(item.profit).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
             html += `
               <div class="hist-trade-item-wrap">
@@ -2487,7 +2519,7 @@
                     <span class="hist-direction-badge ${dirClass}">${item.direction}</span>
                   </div>
                   <div class="hist-right">
-                    <span class="hist-value">R$ ${item.stake.toFixed(2).replace('.', ',')}</span>
+                    <span class="hist-value">${currSym} ${item.stake.toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     <span class="hist-result-pill ${resClass}">${item.result} (${profitFmt})</span>
                   </div>
                 </div>
