@@ -1227,12 +1227,20 @@
         <!-- AI Dynamic Analysis Card (Centerpiece) -->
         <section class="ai-dynamic-display-card">
           <div class="analyzing-header-row">
-            <div class="analyzing-live-pill">
-              <div class="live-dot"></div>
-              <span>ANALISANDO MERCADO EM TEMPO REAL</span>
+            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+              <div class="analyzing-live-pill">
+                <div class="live-dot"></div>
+                <span>ANALISANDO MERCADO EM TEMPO REAL</span>
+              </div>
+              <span id="candleClockBadge" style="font-size:11px; font-weight:800; color:#38bdf8; background:#0d1117; border:1px solid rgba(56,189,248,0.3); border-radius:9999px; padding:3px 12px; font-family:var(--font-mono); display:flex; align-items:center; gap:5px;">
+                ⏱ VELA M1: <strong id="txtCandleClock" style="color:#ffffff;">00:00</strong>
+              </span>
+              <span style="font-size:10px; font-weight:800; color:var(--green-positive); background:rgba(0,230,118,0.08); border:1px solid rgba(0,230,118,0.22); border-radius:9999px; padding:3px 10px; letter-spacing:0.04em; text-transform:uppercase;">
+                ROTAÇÃO OTC ATIVA (SEM REPETIÇÃO)
+              </span>
             </div>
 
-            <div class="asset-selector-pill" style="cursor:default;" title="Par monitorado e selecionado 100% de forma autônoma pela IA">
+            <div class="asset-selector-pill" style="cursor:default;" title="Par selecionado dinamicamente pela IA a partir de todos os ativos OTC">
               <span class="analyzing-asset-tag" id="currentActiveAsset">EURUSD-OTC</span>
               <span class="asset-change-hint" style="color:var(--green-primary); font-weight:800; font-size:11px; background:rgba(0,230,118,0.12); padding:3px 8px; border-radius:6px; border:1px solid rgba(0,230,118,0.3);">IA AUTÔNOMA</span>
             </div>
@@ -2074,6 +2082,12 @@
           appState.activeAsset = data.active_asset;
           document.getElementById('activeAssetHeader').textContent = data.active_asset;
           document.getElementById('currentActiveAsset').textContent = data.active_asset;
+        }
+
+        // Relógio da Vela M1 em Tempo Real (Direto da Plataforma)
+        if (data.candle_clock) {
+          const elClock = document.getElementById('txtCandleClock');
+          if (elClock) elClock.textContent = data.candle_clock;
         }
 
         // Controle da IA

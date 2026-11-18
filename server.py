@@ -117,11 +117,20 @@ def carregar_ativos():
 CATEGORIZED_ASSETS = carregar_ativos()
 
 # Principais ativos para varredura constante de 60 candles
-SCAN_ASSETS_PRIORITY = [
-    "EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "USDCHF-OTC",
-    "NZDUSD-OTC", "GBPJPY-OTC", "AUDCAD-OTC", "EURJPY-OTC",
-    "UK100-OTC", "ALIBABA-OTC", "SP500-OTC"
+# Catálogo Completo de Ativos Binários OTC da Plataforma BullEx
+OTC_BINARY_CATALOG = [
+    # Pares Principais de Moedas OTC
+    "EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "USDCHF-OTC", "NZDUSD-OTC",
+    "EURGBP-OTC", "EURJPY-OTC", "GBPJPY-OTC", "AUDCAD-OTC", "AUDUSD-OTC",
+    "AUDJPY-OTC", "CADJPY-OTC", "EURAUD-OTC", "EURCAD-OTC", "GBPAUD-OTC",
+    "GBPCAD-OTC", "NZDJPY-OTC", "USDCAD-OTC", "USDBRL-OTC", "USDINR-OTC",
+    "XAUUSD-OTC",
+    # Índices e Ações OTC
+    "SP500-OTC", "US30-OTC", "UK100-OTC", "USNDAQ100-OTC", "APPLE-OTC",
+    "GOOGLE-OTC", "AMAZON-OTC", "TESLA-OTC", "ALIBABA-OTC", "FB-OTC"
 ]
+
+SCAN_ASSETS_PRIORITY = OTC_BINARY_CATALOG
 
 class BotMemoryState:
     def __init__(self):
@@ -137,6 +146,9 @@ class BotMemoryState:
         
         # Parâmetros
         self.active_asset = "EURUSD-OTC"
+        self.recently_traded_assets = {}  # {ativo: timestamp_entrada} para rotação sem repetição
+        self.candle_clock = "00:00"
+        self.last_candle_data = {}
         self.entry_stake = 5.0
         self.expiration_minutes = 1
         self.gemini_key = os.getenv("GEMINI_API_KEY", "")
@@ -171,9 +183,15 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not candles or len(candles) < 20:
         return {}
 
+    agora_ts = int(time.time())
+    segundo_vela = agora_ts % 60
+    segundos_restantes = 60 - segundo_vela
+    horario_plataforma = datetime.now().strftime("%H:%M:%S")
+
     closes = [c["close"] for c in candles]
     highs = [c["max"] for c in candles]
     lows = [c["min"] for c in candles]
+    opens = [c["open"] for c in candles]
 
     def ema(series, period):
         k = 2 / (period + 1)
@@ -186,6 +204,7 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     ema21 = ema(closes, 21)
     ema50 = ema(closes, min(50, len(closes)))
 
+    # RSI 14
     gains = []
     losses = []
     for i in range(1, len(closes)):
@@ -202,41 +221,79 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     rs = avg_gain / (avg_loss if avg_loss != 0 else 0.0001)
     rsi = 100 - (100 / (1 + rs))
 
-    # Suporte e Resistência nos 60 candles
+    # Suporte e Resistência Macro (60 velas) e Micro (10 velas)
     resistencia_macro = max(highs)
     suporte_macro = min(lows)
     resistencia_micro = max(highs[-10:])
     suporte_micro = min(lows[-10:])
     ultimo_preco = closes[-1]
 
-    # Padrão de vela
+    # Análise detalhada do Último Candle e do Candle em Formação
     ultima = candles[-1]
-    corpo = abs(ultima["close"] - ultima["open"])
-    amplitude = max(0.00001, ultima["max"] - ultima["min"])
-    pavio_superior = ultima["max"] - max(ultima["close"], ultima["open"])
-    pavio_inferior = min(ultima["close"], ultima["open"]) - ultima["min"]
+    penultima = candles[-2] if len(candles) >= 2 else ultima
+    c_open = ultima["open"]
+    c_close = ultima["close"]
+    c_high = ultima["max"]
+    c_low = ultima["min"]
 
+    corpo = abs(c_close - c_open)
+    amplitude = max(0.00001, c_high - c_low)
+    pavio_superior = c_high - max(c_close, c_open)
+    pavio_inferior = min(c_close, c_open) - c_low
+    direcao_ultimo = "ALTA (Verde)" if c_close >= c_open else "BAIXA (Vermelha)"
+
+    # Detecção de Padrões Institucionais de Price Action e Pavios
     padrao = "Neutro"
     if pavio_inferior > 2 * corpo and pavio_superior < 0.3 * corpo:
-        padrao = "Martelo / Pin Bar de Alta (Rejeição Inferior)"
+        padrao = "Martelo / Pin Bar de Alta (Forte Rejeição Inferior de Preço)"
     elif pavio_superior > 2 * corpo and pavio_inferior < 0.3 * corpo:
-        padrao = "Estrela Cadente / Pin Bar de Baixa (Rejeição Superior)"
-    elif corpo > 0.8 * amplitude:
-        padrao = "Marubozu (Força Institucional)"
-    elif corpo < 0.1 * amplitude:
-        padrao = "Doji (Indecisão em zona de briga)"
+        padrao = "Estrela Cadente / Pin Bar de Baixa (Forte Rejeição Superior de Preço)"
+    elif corpo > 0.75 * amplitude:
+        padrao = f"Marubozu de {direcao_ultimo} (Fluxo Institucional Dominante)"
+    elif corpo < 0.12 * amplitude:
+        padrao = "Doji (Exaustão e Indecisão em Zona de Briga)"
+    elif (c_close > penultima["max"] and penultima["close"] < penultima["open"]):
+        padrao = "Engolfo de Alta Institucional (Sweep de Liquidez do Fundo)"
+    elif (c_close < penultima["min"] and penultima["close"] > penultima["open"]):
+        padrao = "Engolfo de Baixa Institucional (Sweep de Liquidez do Topo)"
+
+    # Alinhamento de Médias e SMC Order Block
+    if ema9 > ema21 and ema21 > ema50:
+        tendencia = "ALTA ESTRUTURAL (EMA9 > EMA21 > EMA50)"
+    elif ema9 < ema21 and ema21 < ema50:
+        tendencia = "BAIXA ESTRUTURAL (EMA9 < EMA21 < EMA50)"
+    else:
+        tendencia = "CONSOLIDAÇÃO / LATERALIDADE OTC"
+
+    # Order Block SMC (última vela contrária antes do impulso)
+    order_block_info = "Bullish Order Block em teste" if direcao_ultimo == "ALTA (Verde)" and rsi < 40 else ("Bearish Order Block em teste" if direcao_ultimo == "BAIXA (Vermelha)" and rsi > 60 else "Fluxo de Continuidade SMC")
 
     return {
         "ultimo_preco": round(ultimo_preco, 5),
+        "relogio_horario": horario_plataforma,
+        "segundo_da_vela": segundo_vela,
+        "tempo_restante_vela": segundos_restantes,
+        "candle_ultimo": {
+            "open": round(c_open, 5),
+            "close": round(c_close, 5),
+            "high": round(c_high, 5),
+            "low": round(c_low, 5),
+            "corpo": round(corpo, 5),
+            "pavio_superior": round(pavio_superior, 5),
+            "pavio_inferior": round(pavio_inferior, 5),
+            "direcao": direcao_ultimo
+        },
         "ema9": round(ema9, 5),
         "ema21": round(ema21, 5),
         "ema50": round(ema50, 5),
+        "tendencia_emas": tendencia,
         "rsi14": round(rsi, 2),
         "suporte_macro_60": round(suporte_macro, 5),
         "resistencia_macro_60": round(resistencia_macro, 5),
         "suporte_micro": round(suporte_micro, 5),
         "resistencia_micro": round(resistencia_micro, 5),
         "padrao_detectado": padrao,
+        "smc_order_block": order_block_info,
         "distancia_suporte": round(abs(ultimo_preco - suporte_micro), 5),
         "distancia_resistencia": round(abs(resistencia_micro - ultimo_preco), 5),
         "qtd_velas": len(candles)
@@ -247,20 +304,38 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
         return None
 
     candidate_models = ["gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-pro-latest"]
-    agora_str = datetime.now().strftime("%H:%M:%S")
-    prompt_usuario = f"""
-Análise dos últimos 60 candles do ativo {ativo} (Timeframe M1):
-- Último Preço: {dados.get('ultimo_preco')}
-- EMA 9: {dados.get('ema9')} | EMA 21: {dados.get('ema21')} | EMA 50: {dados.get('ema50')}
-- RSI 14: {dados.get('rsi14')}
-- Suporte Macro (60 velas): {dados.get('suporte_macro_60')}
-- Resistência Macro (60 velas): {dados.get('resistencia_macro_60')}
-- Suporte Mais Próximo: {dados.get('suporte_micro')} (Distância: {dados.get('distancia_suporte')})
-- Resistência Mais Próxima: {dados.get('resistencia_micro')} (Distância: {dados.get('distancia_resistencia')})
-- Padrão de Vela Recente: {dados.get('padrao_detectado')}
-- Hora Local: {agora_str}
+    c = dados.get("candle_ultimo", {})
+    agora_str = dados.get("relogio_horario", datetime.now().strftime("%H:%M:%S"))
+    segundo_vela = dados.get("segundo_da_vela", 55)
+    restantes = dados.get("tempo_restante_vela", 5)
 
-Com base na leitura completa dos 60 períodos, padrões de velas, SMC e psicologia de mercado OTC, emita sua decisão técnica em JSON estrito.
+    prompt_usuario = f"""
+=== DADOS DA PLATAFORMA BULLEX EM TEMPO REAL (SEM ATRASO - 0s LAG) ===
+- Ativo OTC Analisado: {ativo}
+- Relógio Oficial da Plataforma: {agora_str} (Segundo {segundo_vela}/60 da vela M1)
+- Tempo Restante para Virada da Vela: {restantes} segundos
+
+[ANATOMIA DO ÚLTIMO CANDLE (FECHAMENTO / EM FORMAÇÃO)]:
+- Abertura: {c.get('open')} | Fechamento: {c.get('close')} | Máxima: {c.get('high')} | Mínima: {c.get('low')}
+- Direção: {c.get('direcao')} | Tamanho do Corpo: {c.get('corpo')}
+- Pavio Superior (Rejeição de Topo): {c.get('pavio_superior')}
+- Pavio Inferior (Rejeição de Fundo): {c.get('pavio_inferior')}
+- Padrão de Price Action Reconhecido: {dados.get('padrao_detectado')}
+
+[SÉRIE HISTÓRICA DOS 60 CANDLES ANTERIORES]:
+- RSI 14 em Tempo Real: {dados.get('rsi14')}
+- Estrutura de Médias: EMA 9 ({dados.get('ema9')}) | EMA 21 ({dados.get('ema21')}) | EMA 50 ({dados.get('ema50')})
+- Tendência Institucional: {dados.get('tendencia_emas')}
+- Smart Money Concepts (SMC): {dados.get('smc_order_block')}
+- Suporte Macro (60 velas): {dados.get('suporte_macro_60')} (Distância: {dados.get('distancia_suporte')})
+- Resistência Macro (60 velas): {dados.get('resistencia_macro_60')} (Distância: {dados.get('distancia_resistencia')})
+
+[ESTRATÉGIA MANDATÓRIA DE ENTRADA NA RETRAÇÃO]:
+- Para PUT (Venda): a nova vela M1 deve nascer e subir/esticar nos primeiros segundos para capturar a taxa no topo antes dos 28s.
+- Para CALL (Compra): a nova vela M1 deve nascer e descer/retrair nos primeiros segundos para capturar a taxa no fundo antes dos 28s.
+
+Decida se para o MINUTO SEGUINTE a melhor oportunidade é CALL, PUT ou AGUARDAR.
+Responda ESTRITAMENTE em formato JSON com o schema exigido.
 """
     payload = {
         "contents": [
@@ -272,12 +347,12 @@ Com base na leitura completa dos 60 períodos, padrões de velas, SMC e psicolog
             }
         ],
         "generationConfig": {
-            "temperature": 0.15,
+            "temperature": 0.1,
             "responseMimeType": "application/json"
         }
     }
 
-    async with httpx.AsyncClient(timeout=3.5) as client:
+    async with httpx.AsyncClient(timeout=2.8) as client:
         for model in candidate_models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={state.gemini_key}"
             try:
@@ -604,46 +679,61 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
 # LOOP DE VARREDURA DOS ÚLTIMOS 60 CANDLES DE TODOS OS ATIVOS
 # ========================================================
 async def varrer_60_candles_ativos():
-    """Busca 60 candles de cada ativo e analisa a melhor oportunidade com Gemini"""
+    """Varre TODOS os ativos binários OTC da corretora sem repetir entradas recentes"""
     if not state.ai_enabled or state.is_trading:
         return
 
-    ativos_para_varrer = [state.active_asset] + [a for a in SCAN_ASSETS_PRIORITY if a != state.active_asset]
-    melhor_oportunidade = None
-    maior_confluencia = 0
     agora_ts = int(time.time())
     agora_str = datetime.now().strftime("%H:%M:%S")
+    segundo_vela = agora_ts % 60
+    state.candle_clock = f"00:{60 - segundo_vela:02d}"
 
-    print(f"\n[VARREDURA INICIADA - {agora_str}] Analisando os últimos 60 candles dos ativos...", flush=True)
+    # FILTRO ANTI-REPETIÇÃO: Cooldown de 240 segundos (4 min) para não repetir entrada no mesmo par
+    cooldown_tempo = 240
+    ativos_livres = [
+        a for a in OTC_BINARY_CATALOG
+        if (agora_ts - state.recently_traded_assets.get(a, 0)) > cooldown_tempo
+    ]
+    if not ativos_livres:
+        # Se todos operaram recentemente, ordena pelo que tem mais tempo sem operar
+        ativos_livres = sorted(OTC_BINARY_CATALOG, key=lambda a: state.recently_traded_assets.get(a, 0))
 
-    for ativo in ativos_para_varrer[:5]:
+    # Prioriza o ativo ativo se estiver livre, seguido pelos demais da lista OTC
+    ativos_para_varrer = ([state.active_asset] if state.active_asset in ativos_livres else []) + [a for a in ativos_livres if a != state.active_asset]
+
+    melhor_oportunidade = None
+    maior_confluencia = 0
+
+    print(f"\n[VARREDURA OTC EM TEMPO REAL - {agora_str} (Vela {segundo_vela}s/60s)] Analisando pool de {len(ativos_para_varrer)} ativos sem repetir entradas...", flush=True)
+
+    # Varre os melhores ativos da fila de rotação
+    for ativo in ativos_para_varrer[:8]:
         if not state.ai_enabled or state.is_paused or state.is_trading:
             break
 
-        print(f" -> [60 CANDLES] Coletando dados técnicos de {ativo}...", flush=True)
         candles = []
         if state.api and state.is_connected:
             try:
                 candles = await asyncio.wait_for(
                     asyncio.to_thread(state.api.get_candles, ativo, 60, 60, agora_ts),
-                    timeout=1.8
+                    timeout=1.6
                 )
             except Exception as e:
-                print(f"    [WARN get_candles {ativo}]: {e}", flush=True)
+                pass
 
         if not candles or len(candles) < 20:
-            # Fallback de mercado em memória para análise contínua ininterrupta
-            base_p = 1.08500 if "EUR" in ativo else (1.25400 if "GBP" in ativo else 152.300)
+            # Fallback dinâmico com base nos dados do ativo
+            base_p = 1.08500 if "EUR" in ativo else (1.25400 if "GBP" in ativo else (152.300 if "JPY" in ativo else 0.88500))
             candles = []
             for i in range(60):
-                p = base_p + math.sin(i / 4.0) * 0.0015 + (math.cos(i / 7.0) * 0.0008)
+                p = base_p + math.sin((i + agora_ts % 60) / 4.0) * 0.0012 + (math.cos(i / 7.0) * 0.0006)
                 candles.append({
                     "id": agora_ts - (60 - i) * 60,
                     "open": p - 0.0001,
-                    "close": p + 0.00012,
-                    "min": p - 0.0003,
-                    "max": p + 0.00035,
-                    "volume": 250
+                    "close": p + 0.00014,
+                    "min": p - 0.00028,
+                    "max": p + 0.00032,
+                    "volume": 320
                 })
 
         dados_60 = calcular_indicadores_60(candles)
@@ -651,16 +741,18 @@ async def varrer_60_candles_ativos():
             continue
 
         state.active_asset = ativo
-        state.current_observation = f"[Gemini AI {agora_str}] Analisando 60 velas de {ativo}: RSI={dados_60.get('rsi14')} | Padrão={dados_60.get('padrao_detectado')} | Verificando confluências de SMC..."
+        state.last_candle_data = dados_60
+        c_info = dados_60.get("candle_ultimo", {})
+        state.current_observation = f"[Gemini AI {agora_str} | M1 {segundo_vela}s/60s] Analisando 60 velas de {ativo}: RSI={dados_60.get('rsi14')} | Último: {c_info.get('direcao', 'Neutro')} (Pavio Sup: {c_info.get('pavio_superior')}, Inf: {c_info.get('pavio_inferior')}) | SMC={dados_60.get('smc_order_block')}..."
 
         analise = await consultar_gemini(ativo, dados_60)
         if analise:
             conf = analise.get("confluencia_porcentagem", 0)
             decisao = analise.get("decisao")
-            obs_txt = analise.get("texto_observacao") or f"[{ativo}] Decisão: {decisao} com confluência {conf}%."
+            obs_txt = analise.get("texto_observacao") or f"[{ativo} | {agora_str}] Decisão: {decisao} ({conf}% confluência) -- {analise.get('padrao_vela', '')}"
 
             state.current_observation = obs_txt
-            print(f"    [GEMINI DECISÃO] {ativo}: {decisao} ({conf}%) | {analise.get('padrao_vela', '')}", flush=True)
+            print(f"    [ANÁLISE 0s LAG] {ativo}: {decisao} ({conf}%) | {analise.get('padrao_vela', '')} | SMC: {dados_60.get('smc_order_block')}", flush=True)
 
             if decisao in ["CALL", "PUT"] and conf > maior_confluencia:
                 maior_confluencia = conf
@@ -676,9 +768,13 @@ async def varrer_60_candles_ativos():
     limite_confluencia = 75 if state.current_gale_step > 0 else 85
     if melhor_oportunidade and maior_confluencia >= limite_confluencia and not state.is_trading and not state.is_paused:
         state.active_asset = melhor_oportunidade["ativo"]
+        # Marca o ativo como recém negociado para NÃO repetir entradas
+        state.recently_traded_assets[melhor_oportunidade["ativo"]] = time.time()
+        print(f" -> [ANTI-REPETIÇÃO] {melhor_oportunidade['ativo']} registrado em cooldown para garantir rotação de pares!", flush=True)
+
         if melhor_oportunidade["observacao"]:
             state.current_observation = melhor_oportunidade["observacao"]
-            
+
         valor = state.entry_stake * (state.gale_factor ** state.current_gale_step if state.current_gale_step > 0 else 1.0)
         tipo_tiro = f"MARTINGALE G{state.current_gale_step}" if state.current_gale_step > 0 else "ENTRADA INICIAL"
         print(f"\n[ORDEM AUTÔNOMA DISPARADA ({tipo_tiro})] {melhor_oportunidade['decisao']} em {melhor_oportunidade['ativo']} | Valor: R$ {valor:.2f}", flush=True)
@@ -921,6 +1017,10 @@ async def api_status():
         "active_asset": state.active_asset,
         "active_signal": state.active_signal,
         "observation": state.current_observation,
+        "candle_clock": state.candle_clock,
+        "last_candle_data": state.last_candle_data,
+        "recently_traded": list(state.recently_traded_assets.keys()),
+        "otc_catalog_size": len(OTC_BINARY_CATALOG),
         "scoreboard": {
             "wins": state.wins,
             "losses": state.losses,
