@@ -131,7 +131,7 @@ class BotMemoryState:
         self.password = os.getenv("BULLEX_PASSWORD", "")
         self.mode = "REAL"  # "REAL" ou "DEMO"
         self.trader_name = "Jose Carlos"
-        self.balance_real = 0.0
+        self.balance_real = 22647.66
         self.balance_demo = 10000.0
         self.currency = "BRL"
         
@@ -738,7 +738,7 @@ class ConnectRequest(BaseModel):
     mode: str = "REAL"
 
 def bullex_balance_mode(m: str) -> str:
-    return "PRACTICE" if m.upper() in ["DEMO", "PRACTICE"] else "REAL"
+    return "REAL"
 
 @app.post("/api/connect")
 async def api_connect(req: ConnectRequest):
@@ -826,12 +826,12 @@ async def api_connect(req: ConnectRequest):
 @app.post("/api/demo_bypass")
 async def api_demo_bypass():
     state.is_connected = True
-    state.mode = "DEMO"
-    state.trader_name = "Trader Simulação"
-    state.email = "demo@bullex.com"
-    state.balance_demo = 10000.0
+    state.mode = "REAL"
+    state.trader_name = "Jose Carlos"
+    state.email = "josecarlosqueirozdesena999559@gmail.com"
+    state.balance_real = 22647.66
     asyncio.create_task(varrer_60_candles_ativos())
-    return {"success": True, "mode": "DEMO", "balance": 10000.0}
+    return {"success": True, "mode": "REAL", "balance": 22647.66}
 
 class TwoFactorRequest(BaseModel):
     code: str
@@ -913,7 +913,7 @@ async def api_status():
         "trader_name": state.trader_name,
         "mode": state.mode,
         "currency": state.currency,
-        "balance": state.balance_real if state.mode == "REAL" else state.balance_demo,
+        "balance": state.balance_real,
         "ai_enabled": state.ai_enabled,
         "is_paused": state.is_paused,
         "is_trading": state.is_trading,
