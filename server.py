@@ -160,7 +160,7 @@ class BotMemoryState:
         self.stop_loss = 200.0
         
         # Flags Operacionais
-        self.ai_enabled = True
+        self.ai_enabled = False
         self.is_paused = False
         self.is_trading = False
         self.is_scanning = False
@@ -172,7 +172,7 @@ class BotMemoryState:
         self.operacoes = 0
         self.assertividade = 0.0
         
-        self.current_observation = "Robô pronto. Ao ligar a IA, iniciará a busca dos últimos 60 candles de todos os ativos..."
+        self.current_observation = "Inteligência Artificial desligada. Clique no botão 'Ligar IA' para aquecer os ativos com os últimos 60 candles e iniciar as operações."
         self.history_trades: List[Dict[str, Any]] = []
         self.active_signal: Optional[Dict[str, Any]] = None
         self.accumulated_gale_loss: float = 0.0
@@ -896,9 +896,6 @@ async def api_connect(req: ConnectRequest):
                 
                 print(f"[LOGIN SUCCESS] Conectado na BullEx! Modo: {state.mode} ({mode_bx}), Saldo: {saldo} {moeda}", flush=True)
                 
-                # Ao conectar, já inicia a varredura dos 60 candles
-                asyncio.create_task(varrer_60_candles_ativos())
-                
                 return {
                     "success": True,
                     "message": "Autenticado com sucesso na conta BullEx!",
@@ -934,7 +931,6 @@ async def api_demo_bypass():
     state.trader_name = "Jose Carlos"
     state.email = "josecarlosqueirozdesena999559@gmail.com"
     state.balance_real = 22647.66
-    asyncio.create_task(varrer_60_candles_ativos())
     return {"success": True, "mode": "REAL", "balance": 22647.66}
 
 class TwoFactorRequest(BaseModel):
@@ -953,7 +949,6 @@ async def api_connect_2fa(req: TwoFactorRequest):
                     pass
                 state.is_connected = True
                 saldo = await asyncio.to_thread(state.api.get_balance) or 0.0
-                asyncio.create_task(varrer_60_candles_ativos())
                 return {"success": True, "balance": saldo, "mode": state.mode}
             return {"success": False, "message": f"Falha no 2FA: {reason}"}
         except Exception as e:
@@ -1051,14 +1046,23 @@ async def api_status():
 async def api_toggle_ai():
     state.ai_enabled = not state.ai_enabled
     if state.ai_enabled:
-        # Ao ligar a IA, busca imediatamente os últimos 60 candles
+        # Ao ligar a IA: limpa sinais antigos e aquece imediatamente os ativos com os 60 últimos candles
+        state.active_signal = None
+        state.last_candle_data = {}
+        state.current_observation = "Aquecendo ativos com os últimos 60 candles em tempo real da BullEx..."
+        print("\n[IA LIGADA PELO USUÁRIO] Aquecendo ativos com os últimos 60 candles em tempo real...", flush=True)
         asyncio.create_task(varrer_60_candles_ativos())
+    else:
+        # Ao desligar a IA: limpa sinal ativo e congela análise
+        state.active_signal = None
+        state.current_observation = "Inteligência Artificial desligada. Clique no botão 'Ligar IA' para aquecer os ativos com os últimos 60 candles e iniciar."
+        print("\n[IA DESLIGADA PELO USUÁRIO] Operações e varredura pausadas.", flush=True)
     return {"ai_enabled": state.ai_enabled}
 
 @app.post("/api/toggle_pause")
 async def api_toggle_pause():
     state.is_paused = not state.is_paused
-    if not state.is_paused:
+    if not state.is_paused and state.ai_enabled:
         state.current_observation = f"Robô em execução. Analisando 60 candles de {state.active_asset} com Gemini..."
         asyncio.create_task(varrer_60_candles_ativos())
     return {"is_paused": state.is_paused}
@@ -1072,8 +1076,9 @@ async def api_reset_score():
     state.assertividade = 0.0
     state.is_paused = False
     state.current_gale_step = 0
-    state.current_observation = "Métricas reiniciadas. Iniciando varredura contínua dos 60 candles com Gemini..."
-    asyncio.create_task(varrer_60_candles_ativos())
+    state.current_observation = "Métricas reiniciadas."
+    if state.ai_enabled:
+        asyncio.create_task(varrer_60_candles_ativos())
     return {"success": True}
 
 class ConfigUpdate(BaseModel):

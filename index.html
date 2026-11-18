@@ -1213,12 +1213,12 @@
                 <span id="txtPause">Pausar</span>
               </button>
 
-              <button class="btn-power-ai on" id="btnToggleAI" onclick="toggleAI()">
+              <button class="btn-power-ai off" id="btnToggleAI" onclick="toggleAI()">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
                   <line x1="12" y1="2" x2="12" y2="12"></line>
                 </svg>
-                <span id="txtPower">Desligar IA</span>
+                <span id="txtPower">Ligar IA</span>
               </button>
             </div>
           </div>
@@ -1226,23 +1226,15 @@
 
         <!-- AI Dynamic Analysis Card (Centerpiece) -->
         <section class="ai-dynamic-display-card">
-          <div class="analyzing-header-row">
-            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-              <div class="analyzing-live-pill">
-                <div class="live-dot"></div>
-                <span>ANALISANDO MERCADO EM TEMPO REAL</span>
-              </div>
-              <span id="candleClockBadge" style="font-size:11px; font-weight:800; color:#38bdf8; background:#0d1117; border:1px solid rgba(56,189,248,0.3); border-radius:9999px; padding:3px 12px; font-family:var(--font-mono); display:flex; align-items:center; gap:5px;">
+          <div class="analyzing-header-row" style="display:flex; align-items:center; justify-content:space-between; width:100%;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span id="candleClockBadge" style="font-size:11px; font-weight:800; color:#38bdf8; background:#0d1117; border:1px solid rgba(56,189,248,0.3); border-radius:9999px; padding:4px 12px; font-family:var(--font-mono); display:flex; align-items:center; gap:6px;">
                 ⏱ VELA M1: <strong id="txtCandleClock" style="color:#ffffff;">00:00</strong>
-              </span>
-              <span style="font-size:10px; font-weight:800; color:var(--green-positive); background:rgba(0,230,118,0.08); border:1px solid rgba(0,230,118,0.22); border-radius:9999px; padding:3px 10px; letter-spacing:0.04em; text-transform:uppercase;">
-                ROTAÇÃO OTC ATIVA (SEM REPETIÇÃO)
               </span>
             </div>
 
-            <div class="asset-selector-pill" style="cursor:default;" title="Par selecionado dinamicamente pela IA a partir de todos os ativos OTC">
+            <div class="asset-selector-pill" style="cursor:default;" title="Par selecionado dinamicamente">
               <span class="analyzing-asset-tag" id="currentActiveAsset">EURUSD-OTC</span>
-              <span class="asset-change-hint" style="color:var(--green-primary); font-weight:800; font-size:11px; background:rgba(0,230,118,0.12); padding:3px 8px; border-radius:6px; border:1px solid rgba(0,230,118,0.3);">IA AUTÔNOMA</span>
             </div>
           </div>
 
@@ -1320,26 +1312,7 @@
             </p>
           </div>
 
-          <!-- Status Autônomo da IA (Opera sozinho respeitando configurações) -->
-          <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; background:rgba(0,0,0,0.35); border:1px solid rgba(0,230,118,0.2); border-radius:4px; padding:12px 18px; flex-wrap:wrap;">
-            <div style="display:flex; align-items:center; gap:8px;">
-              <span style="width:8px; height:8px; border-radius:50%; background:var(--green-positive);  animation: pulse 1.8s infinite;"></span>
-              <span style="font-size:12px; font-weight:800; color:#ffffff; letter-spacing:0.02em;">
-                MODO 100% AUTÔNOMO ATIVO
-              </span>
-              <span style="font-size:11px; color:var(--text-muted); margin-left:4px;">
-                (Analisando candles e disparando ordens automaticamente conforme as Configurações)
-              </span>
-            </div>
-            <div style="display:flex; align-items:center; gap:12px;">
-              <span id="autonomousStakeTag" style="font-size:12px; font-weight:800; color:var(--green-positive); font-family:var(--font-mono); background:rgba(0,230,118,0.1); border:1px solid rgba(0,230,118,0.25); border-radius:4px; padding:4px 10px;">
-                ENTRADA: R$ 5,00
-              </span>
-              <span id="autonomousGaleTag" style="font-size:12px; font-weight:700; color:#e2e8f0; background:rgba(255,255,255,0.06); border-radius:4px; padding:4px 10px;">
-                MARTINGALE G1 ATIVO
-              </span>
-            </div>
-          </div>
+
         </section>
 
         <!-- Painel de Operações Abertas (Modelo Oficial BullEx - 100% Flat) -->
