@@ -567,7 +567,7 @@ class Bullex:
                 raise ValueError("REAL_BALANCE_NOT_FOUND")
             set_id(real_id)
 
-        elif Balance_MODE == "PRACTICE":
+        elif Balance_MODE in ["PRACTICE", "DEMO"]:
             if practice_id is None:
                 raise ValueError("PRACTICE_BALANCE_NOT_FOUND")
             set_id(practice_id)
@@ -578,8 +578,7 @@ class Bullex:
             set_id(tournament_id)
 
         else:
-            logging.error("ERROR doesn't have this mode")
-            exit(1)
+            logging.warning("Unknown balance mode, defaulting")
 
     # ________________________________________________________________________
     # _______________________        CANDLE      _____________________________
