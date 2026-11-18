@@ -1281,8 +1281,12 @@ async def api_config(cfg: ConfigUpdate):
 @app.get("/index.html", response_class=HTMLResponse)
 async def serve_index():
     index_path = os.path.join(os.path.dirname(__file__), "index.html")
-    with open(index_path, "r", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read())
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    except UnicodeDecodeError:
+        with open(index_path, "r", encoding="utf-16") as f:
+            return HTMLResponse(content=f.read())
 
 if __name__ == "__main__":
     import uvicorn
