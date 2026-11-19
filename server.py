@@ -1595,7 +1595,8 @@ async def auto_conectar_bullex():
 
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(auto_conectar_bullex())
+    # Inicia desconectado para exibir sempre a Tela de Login inicial
+    state.is_connected = False
     asyncio.create_task(loop_trader_background())
 
 # ==========================================
