@@ -1297,38 +1297,6 @@
     }
 
     /* Modern Desktop Header Badges */
-    .desktop-system-chips {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .sys-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 5px 12px;
-      border-radius: 9999px;
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      font-size: 11px;
-      font-weight: 800;
-      color: #cbd5e1;
-      font-family: var(--font-mono);
-    }
-
-    .sys-chip-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--neon-green);
-      box-shadow: 0 0 8px var(--neon-green);
-    }
-
-    .sys-chip-dot.blue {
-      background: #38bdf8;
-      box-shadow: 0 0 8px #38bdf8;
-    }
 
     /* Desktop Floating Pill Menu */
     .top-action-bar {
@@ -1468,10 +1436,6 @@
         display: flex;
       }
 
-      .desktop-system-chips {
-        display: none !important;
-      }
-
     @media (max-width: 768px) {
       .header-top-row {
         gap: 6px !important;
@@ -1530,6 +1494,126 @@
         display: grid;
         grid-template-columns: 1fr 1.6fr;
       }
+    }
+
+
+    /* Menu de Navegação Oficial Estilo BullEx Traderoom */
+    .top-action-bar {
+      display: flex !important;
+      align-items: center !important;
+      gap: 6px !important;
+      margin-top: 12px !important;
+      padding: 0 !important;
+      background: transparent !important;
+      border: none !important;
+      box-shadow: none !important;
+      border-radius: 0 !important;
+      width: 100% !important;
+      overflow-x: auto !important;
+    }
+
+    .action-tab-button {
+      padding: 8px 20px !important;
+      border-radius: 4px !important;
+      font-size: 12.5px !important;
+      font-weight: 700 !important;
+      letter-spacing: 0.02em !important;
+      color: #94a3b8 !important;
+      display: flex !important;
+      align-items: center !important;
+      gap: 8px !important;
+      background: #141923 !important;
+      border: 1px solid #1f2738 !important;
+      cursor: pointer !important;
+      transition: all 0.18s ease !important;
+      box-shadow: none !important;
+      white-space: nowrap !important;
+    }
+
+    .action-tab-button:hover {
+      background: #1a2230 !important;
+      border-color: #2b364c !important;
+      color: #ffffff !important;
+    }
+
+    .action-tab-button.active {
+      background: #1c2536 !important;
+      color: #ffffff !important;
+      border-color: #00e676 !important;
+      box-shadow: inset 0 2px 0 0 #00e676 !important;
+      font-weight: 800 !important;
+    }
+
+    .action-tab-button.active svg {
+      color: #00e676 !important;
+    }
+
+    /* Cards e Containers no Padrão Profissional BullEx */
+    .top-header-bar,
+    .top-scoreboard-container,
+    .ai-master-control-card,
+    .ai-dynamic-display-card,
+    .session-history-container,
+    .config-card-box,
+    .an-kpi-card,
+    .an-chart-card {
+      background: #111622 !important;
+      border: 1px solid #1e2638 !important;
+      border-radius: 4px !important;
+      box-shadow: none !important;
+    }
+
+    /* Placar Estilo BullEx */
+    .top-score-cell {
+      background: #151b29 !important;
+      border: 1px solid #1f2738 !important;
+      border-radius: 4px !important;
+      padding: 12px 16px !important;
+    }
+
+    .top-score-label {
+      font-size: 10px !important;
+      font-weight: 800 !important;
+      color: #717b8f !important;
+      letter-spacing: 0.08em !important;
+      text-transform: uppercase !important;
+    }
+
+    .top-score-number {
+      font-size: 20px !important;
+      font-weight: 800 !important;
+      color: #ffffff !important;
+      font-family: var(--font-mono) !important;
+    }
+
+    /* Botões de Ação no Padrão BullEx */
+    .btn-power-ai {
+      border-radius: 4px !important;
+      font-family: var(--font-family) !important;
+      font-weight: 700 !important;
+      box-shadow: none !important;
+    }
+    .btn-pause-ai {
+      border-radius: 4px !important;
+      background: #1c2436 !important;
+      border: 1px solid #28344c !important;
+      color: #cbd5e1 !important;
+      font-family: var(--font-family) !important;
+      font-weight: 700 !important;
+    }
+    .btn-pause-ai:hover {
+      background: #253148 !important;
+      color: #ffffff !important;
+    }
+
+    /* Relógio de Vela M1 / Hora de Compra */
+    #candleClockBadge {
+      border-radius: 4px !important;
+      background: #151b29 !important;
+      border: 1px solid #232d40 !important;
+      color: #38bdf8 !important;
+      font-size: 11.5px !important;
+      font-weight: 800 !important;
     }
 
   </style>
@@ -1677,20 +1761,6 @@
         </div>
 
         <div class="header-top-right">
-        <div class="desktop-system-chips">
-          <div class="sys-chip" title="Total de 137 ativos OTC binários monitorados sem repetição">
-            <span class="sys-chip-dot"></span>
-            <span>137 ATIVOS OTC</span>
-          </div>
-          <div class="sys-chip" title="Inteligência Artificial Google Gemini 2.0 com análise de 60 candles">
-            <span class="sys-chip-dot blue"></span>
-            <span>GEMINI 2.0 FLASH</span>
-          </div>
-          <div class="sys-chip" title="Ticker contínuo de alta frequência a cada 100ms sem delay">
-            <span class="sys-chip-dot"></span>
-            <span>ZERO DELAY 100MS</span>
-          </div>
-        </div>
 
           <!-- Perfil do Usuário / Botão de Conectar -->
           <div class="header-user-profile-badge" id="btnOpenLoginModal" onclick="openLoginModal()" title="Clique para conectar ou alterar sua conta BullEx">
@@ -1845,7 +1915,7 @@
           <div class="analyzing-header-row" style="display:flex; align-items:center; justify-content:space-between; width:100%;">
             <div style="display:flex; align-items:center; gap:8px;">
               <span id="candleClockBadge" style="font-size:11px; font-weight:800; color:#38bdf8; background:#0d1117; border:1px solid rgba(56,189,248,0.3); border-radius:9999px; padding:4px 12px; font-family:var(--font-mono); display:flex; align-items:center; gap:6px;">
-                ⏱ VELA M1: <strong id="txtCandleClock" style="color:#ffffff;">00:00</strong>
+                ⏱ HORA DE COMPRA: <strong id="txtCandleClock" style="color:#ffffff;">00:00</strong>
               </span>
             </div>
 

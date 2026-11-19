@@ -1033,6 +1033,13 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             preco_abertura = None
 
     melhor_taxa_atingida = False
+    # Conforme solicitado: pegar operação PERTO DO MOMENTO DOS 30 SEGUNDOS FINAIS
+    # Não pega antes (segundos 0-20) onde a taxa é instável e o risco é alto.
+    # Aguarda o desenvolvimento do pavio da vela até os segundos 24s a 29s (limite de compra 30s da BullEx).
+    max_pb_segundos = 28.5
+    pb_target_epoch = start_pb + max_pb_segundos
+    melhor_taxa_registrada = preco_abertura
+
     while time.time() - start_pb < max_pb_segundos:
         if not state.ai_enabled and "Manual" not in motivo_str:
             state.is_trading = False
@@ -1040,8 +1047,7 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             return
 
         elapsed_pb = time.time() - start_pb
-        rem_pb = max(0, int(round(pb_target_epoch - time.time())))
-        seg_restantes_compra = max(1, 28 - int(elapsed_pb))
+        seg_restantes_compra = max(1, int(30.0 - elapsed_pb))
 
         preco_atual = None
         if state.api and state.is_connected:
@@ -1054,25 +1060,39 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             except Exception:
                 pass
 
-        if preco_abertura and preco_atual and elapsed_pb >= 2.0:
-            if direcao == "PUT" and preco_atual > preco_abertura:
-                melhor_taxa_atingida = True
-                print(f" -> [RETRAÇÃO PUT CAPTURADA] Subiu de {preco_abertura} para {preco_atual} em {elapsed_pb:.1f}s! Executando VENDA.", flush=True)
-                break
-            elif direcao == "CALL" and preco_atual < preco_abertura:
-                melhor_taxa_atingida = True
-                print(f" -> [RETRAÇÃO CALL CAPTURADA] Desceu de {preco_abertura} para {preco_atual} em {elapsed_pb:.1f}s! Executando COMPRA.", flush=True)
-                break
+        if preco_atual:
+            if direcao == "PUT":
+                if melhor_taxa_registrada is None or preco_atual > melhor_taxa_registrada:
+                    melhor_taxa_registrada = preco_atual
+            else:
+                if melhor_taxa_registrada is None or preco_atual < melhor_taxa_registrada:
+                    melhor_taxa_registrada = preco_atual
+
+        # Só permite disparar quando estiver perto dos 30 segundos finais (entre 23s e 28.5s do nascimento da vela)
+        if elapsed_pb >= 23.0:
+            if preco_abertura and preco_atual:
+                if direcao == "PUT" and preco_atual >= preco_abertura:
+                    melhor_taxa_atingida = True
+                    print(f" -> [ENTRADA 30s FINAIS - PUT] Capturada no topo: abertura={preco_abertura} -> atual={preco_atual} aos {elapsed_pb:.1f}s da vela (restam {seg_restantes_compra}s de compra)!", flush=True)
+                    break
+                elif direcao == "CALL" and preco_atual <= preco_abertura:
+                    melhor_taxa_atingida = True
+                    print(f" -> [ENTRADA 30s FINAIS - CALL] Capturada no fundo: abertura={preco_abertura} -> atual={preco_atual} aos {elapsed_pb:.1f}s da vela (restam {seg_restantes_compra}s de compra)!", flush=True)
+                    break
 
         if state.active_signal:
-            state.active_signal["status"] = f"AGUARDANDO RETRAÇÃO DA TAXA ({seg_restantes_compra}s de compra)"
-            state.active_signal["action_hint"] = pullback_hint
-            state.active_signal["seconds_left"] = rem_pb
+            if elapsed_pb < 23.0:
+                state.active_signal["status"] = f"AGUARDANDO FORMAÇÃO DOS 30s FINAIS ({seg_restantes_compra}s)"
+                state.active_signal["action_hint"] = f"Aguardando a vela esticar para pegar no extremo dos 30 segundos finais (HORA DE COMPRA)..."
+            else:
+                state.active_signal["status"] = f"PONTO IDEAL DOS 30s FINAIS ({seg_restantes_compra}s de compra)"
+                state.active_signal["action_hint"] = f"Disparando entrada com a melhor taxa no momento dos 30 segundos!"
+            state.active_signal["seconds_left"] = seg_restantes_compra
             state.active_signal["target_epoch"] = pb_target_epoch
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.4)
 
     if not melhor_taxa_atingida:
-        print(f" -> [RETRAÇÃO LIMITE] {max_pb_segundos:.0f}s atingidos antes do limite de compra (28s). Executando entrada agora.", flush=True)
+        print(f" -> [LIMITE 30s FINAIS ATINGIDO] {elapsed_pb:.1f}s de vela (HORA DE COMPRA 00:30). Executando disparo definitivo agora!", flush=True)
 
     # 3. Disparo da ordem no ponto ideal da retração com expiração M1
     agora_exec_str = datetime.now().strftime("%H:%M:%S")
