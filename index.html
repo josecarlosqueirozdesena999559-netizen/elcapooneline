@@ -1831,15 +1831,6 @@
           <button class="capsule-btn active demo" id="btnCapsuleDemo" onclick="setAccountMode('DEMO')" title="Conta DEMO (Treinamento)">DEMO</button>
           <button class="capsule-btn" id="btnCapsuleReal" onclick="setAccountMode('REAL')" title="Alternar para Conta REAL da BullEx">REAL</button>
         </div>
-
-        <!-- Ativo Selecionado Autonomamente pela IA -->
-        <div class="manus-credits-capsule" style="cursor:default;" title="Ativo selecionado dinamicamente pela Inteligência Artificial de acordo com a maior confluência de 60 candles">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color:var(--green-primary)">
-            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-          </svg>
-          <span class="manus-credits-val" id="activeAssetHeader">EURUSD-OTC</span>
-          <span style="font-size:10px; color:var(--green-primary); font-weight:800; margin-left:4px; padding:2px 6px; background:rgba(0,230,118,0.12); border-radius:4px;">IA</span>
-        </div>
       </div>
     </header>
 
@@ -2951,8 +2942,10 @@
 
     async function selectAsset(asset) {
       appState.activeAsset = asset;
-      document.getElementById('activeAssetHeader').textContent = asset;
-      document.getElementById('currentActiveAsset').textContent = asset;
+      const aah = document.getElementById('activeAssetHeader');
+      if (aah) aah.textContent = asset;
+      const caa = document.getElementById('currentActiveAsset');
+      if (caa) caa.textContent = asset;
       await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3050,8 +3043,10 @@
         // Ativo Ativo (Selecionado de forma 100% autônoma pela IA)
         if (data.active_asset) {
           appState.activeAsset = data.active_asset;
-          document.getElementById('activeAssetHeader').textContent = data.active_asset;
-          document.getElementById('currentActiveAsset').textContent = data.active_asset;
+          const aah = document.getElementById('activeAssetHeader');
+          if (aah) aah.textContent = data.active_asset;
+          const caa = document.getElementById('currentActiveAsset');
+          if (caa) caa.textContent = data.active_asset;
         }
 
         // O relógio da vela M1 é atualizado sem saltos pelo ticker local de alta frequência tickSmoothCandleClock()
