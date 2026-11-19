@@ -1188,7 +1188,7 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
     except Exception as e:
         return False, False, 0.0, str(e)
 
-async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, ativo: str, conf: int):
+async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, ativo: str, conf: int, is_immediate_gale: bool = False):
     if state.is_trading:
         return
     pode_operar, msg_saldo = verificar_saldo_para_operar(valor)
@@ -1201,141 +1201,53 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
 
     tipo_operacao = f"MARTINGALE G{state.current_gale_step}" if state.current_gale_step > 0 else "ENTRADA INICIAL"
 
-    # 1. Sinal identificado (M1 com entrada nos 30s finais)
     agora_ts = time.time()
     agora = datetime.now()
     seg_atual = agora.second
 
-    if seg_atual <= 22:
-        # A vela acabou de nascer ou está nos primeiros segundos: executa na retração dos 30s desta mesma vela!
+    # Se for Martingale G1 imediato (virada de vela) ou entrada nos primeiros 3s da vela:
+    # Executa IMEDIATAMENTE sem atrasos para pegar a abertura exata da vela!
+    if is_immediate_gale or seg_atual <= 3:
         seg_ate_virada = 0
         target_virada_epoch = agora_ts
     else:
-        # A vela já passou dos 22 segundos: programa para o nascimento da próxima vela M1
+        # Se a vela já passou dos 3s, aguarda a virada no segundo 00s da PRÓXIMA VELA!
         seg_ate_virada = (60 - seg_atual) % 60
         if seg_ate_virada == 0:
             seg_ate_virada = 60
         target_virada_epoch = agora_ts + seg_ate_virada
-
-    if direcao == "PUT":
-        hint = f"[{tipo_operacao}] Aguardando vela M1 nascer e subir um pouco para pegar taxa de VENDA (PUT) no topo antes dos 28s de compra."
-    else:
-        hint = f"[{tipo_operacao}] Aguardando vela M1 nascer e descer um pouco para pegar taxa de COMPRA (CALL) no fundo antes dos 28s de compra."
 
     state.active_signal = {
         "asset": ativo,
         "direction": direcao,
         "confluence": conf,
         "expiration": "M1 (1 Minuto)",
-        "target": "Minuto Seguinte",
+        "target": "Abertura da Vela M1" if seg_ate_virada == 0 else "Minuto Seguinte (00s)",
         "seconds_left": seg_ate_virada,
         "target_epoch": target_virada_epoch,
-        "action_hint": hint,
-        "status": f"SINAL DETECTADO ({tipo_operacao}) — AGUARDANDO NASCIMENTO DA VELA M1",
+        "action_hint": f"[{tipo_operacao}] Entrada na abertura da vela (00s) para tempo de expiração real perfeito na BullEx sem atraso.",
+        "status": f"SINAL IDENTIFICADO ({tipo_operacao}) — DISPARO NA ABERTURA (00s)",
         "time": agora.strftime("%H:%M:%S"),
         "gale_step": state.current_gale_step,
         "stake": valor
     }
 
-    print(f"\n[SINAL IDENTIFICADO - {tipo_operacao}] {direcao} em {ativo} (M1) | {seg_ate_virada}s para virada | {hint}", flush=True)
+    print(f"\n[SINAL IDENTIFICADO - {tipo_operacao}] {direcao} em {ativo} (M1) | {seg_ate_virada}s para virada (abertura da vela)", flush=True)
 
-    # Contagem regressiva precisa segundo a segundo até a virada da vela M1
-    while time.time() < target_virada_epoch - 0.5:
+    # Contagem regressiva precisa até a virada da vela (segundo 00s)
+    while time.time() < target_virada_epoch - 0.15:
         if not state.ai_enabled and "Manual" not in motivo_str:
             state.is_trading = False
             state.active_signal = None
             return
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.15)
         rest_virada = max(0, int(round(target_virada_epoch - time.time())))
         if state.active_signal:
             state.active_signal["seconds_left"] = rest_virada
-            state.active_signal["status"] = f"AGUARDANDO NASCIMENTO DA VELA M1 ({rest_virada}s)"
+            state.active_signal["status"] = f"AGUARDANDO ABERTURA DA VELA M1 ({rest_virada}s)"
 
-    # 2. A vela M1 acabou de nascer!
-    # Aguarda a micro-retração (pullback) nos primeiros segundos (antes do limite de 28s de compra)
-    # Exatamente como solicitado: esperar subir para vender (PUT), descer para comprar (CALL) - inclusive no G1!
-    if direcao == "PUT":
-        pullback_hint = f"[{tipo_operacao}] Vela M1 nasceu! Aguardando micro-subida (topo) para pegar taxa de VENDA (PUT) antes do limite de compra..."
-    else:
-        pullback_hint = f"[{tipo_operacao}] Vela M1 nasceu! Aguardando micro-queda (fundo) para pegar taxa de COMPRA (CALL) antes do limite de compra..."
-
-    print(f" -> [MICRO-RETRAÇÃO] {pullback_hint}", flush=True)
-    start_pb = time.time() - (datetime.now().second if seg_ate_virada == 0 else 0)
-    max_pb_segundos = 28.5
-    pb_target_epoch = start_pb + max_pb_segundos
-
-    preco_abertura = None
-    if state.api and state.is_connected:
-        try:
-            c_open = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(time.time()))
-            if c_open and len(c_open) > 0:
-                preco_abertura = float(c_open[-1].get("open") or c_open[-1].get("close") or 0.0)
-        except Exception:
-            preco_abertura = None
-
-    melhor_taxa_atingida = False
-    # Conforme solicitado: pegar operação PERTO DO MOMENTO DOS 30 SEGUNDOS FINAIS
-    # Não pega antes (segundos 0-20) onde a taxa é instável e o risco é alto.
-    # Aguarda o desenvolvimento do pavio da vela até os segundos 24s a 29s (limite de compra 30s da BullEx).
-    max_pb_segundos = 28.5
-    pb_target_epoch = start_pb + max_pb_segundos
-    melhor_taxa_registrada = preco_abertura
-
-    while time.time() - start_pb < max_pb_segundos:
-        if not state.ai_enabled and "Manual" not in motivo_str:
-            state.is_trading = False
-            state.active_signal = None
-            return
-
-        elapsed_pb = time.time() - start_pb
-        seg_restantes_compra = max(1, int(30.0 - elapsed_pb))
-
-        preco_atual = None
-        if state.api and state.is_connected:
-            try:
-                c_live = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(time.time()))
-                if c_live and len(c_live) > 0:
-                    if preco_abertura is None or preco_abertura == 0.0:
-                        preco_abertura = float(c_live[-1].get("open") or c_live[-1].get("close") or 0.0)
-                    preco_atual = float(c_live[-1].get("close") or 0.0)
-            except Exception:
-                pass
-
-        if preco_atual:
-            if direcao == "PUT":
-                if melhor_taxa_registrada is None or preco_atual > melhor_taxa_registrada:
-                    melhor_taxa_registrada = preco_atual
-            else:
-                if melhor_taxa_registrada is None or preco_atual < melhor_taxa_registrada:
-                    melhor_taxa_registrada = preco_atual
-
-        # Só permite disparar quando estiver perto dos 30 segundos finais (entre 23s e 28.5s do nascimento da vela)
-        if elapsed_pb >= 23.0:
-            if preco_abertura and preco_atual:
-                if direcao == "PUT" and preco_atual >= preco_abertura:
-                    melhor_taxa_atingida = True
-                    print(f" -> [ENTRADA 30s FINAIS - PUT] Capturada no topo: abertura={preco_abertura} -> atual={preco_atual} aos {elapsed_pb:.1f}s da vela (restam {seg_restantes_compra}s de compra)!", flush=True)
-                    break
-                elif direcao == "CALL" and preco_atual <= preco_abertura:
-                    melhor_taxa_atingida = True
-                    print(f" -> [ENTRADA 30s FINAIS - CALL] Capturada no fundo: abertura={preco_abertura} -> atual={preco_atual} aos {elapsed_pb:.1f}s da vela (restam {seg_restantes_compra}s de compra)!", flush=True)
-                    break
-
-        if state.active_signal:
-            if elapsed_pb < 23.0:
-                state.active_signal["status"] = f"AGUARDANDO FORMAÇÃO DOS 30s FINAIS ({seg_restantes_compra}s)"
-                state.active_signal["action_hint"] = f"Aguardando a vela esticar para pegar no extremo dos 30 segundos finais (HORA DE COMPRA)..."
-            else:
-                state.active_signal["status"] = f"PONTO IDEAL DOS 30s FINAIS ({seg_restantes_compra}s de compra)"
-                state.active_signal["action_hint"] = f"Disparando entrada com a melhor taxa no momento dos 30 segundos!"
-            state.active_signal["seconds_left"] = seg_restantes_compra
-            state.active_signal["target_epoch"] = pb_target_epoch
-        await asyncio.sleep(0.4)
-
-    if not melhor_taxa_atingida:
-        print(f" -> [LIMITE 30s FINAIS ATINGIDO] {elapsed_pb:.1f}s de vela (HORA DE COMPRA 00:30). Executando disparo definitivo agora!", flush=True)
-
-    # 3. Disparo da ordem no ponto ideal da retração com expiração M1
+    # Disparo IMEDIATO na abertura da vela (segundo 00s-01s)
+    # ZERO ATRASO: sem esperar 28s, sem risco de timeout de compra e sem pular de vela!
     agora_exec_str = datetime.now().strftime("%H:%M:%S")
     if state.active_signal:
         exp_epoch = calcular_expiracao_m1_epoch(time.time(), 1)
@@ -1343,14 +1255,14 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         state.active_signal["status"] = f"OPERAÇÃO EM ANDAMENTO (M1) — FECHAMENTO EM {rem_exp}s"
         state.active_signal["seconds_left"] = rem_exp
         state.active_signal["target_epoch"] = exp_epoch
-        state.active_signal["action_hint"] = f"[{tipo_operacao}] Ordem executada no ápice da retração! Monitorando fechamento da vela M1."
+        state.active_signal["action_hint"] = f"[{tipo_operacao}] Ordem executada na abertura da vela M1! Monitorando fechamento."
 
     executou = False
     venceu = False
     lucro = 0.0
     err = None
 
-    print(f" -> [EXECUÇÃO AUTÔNOMA ({tipo_operacao})] Enviando ordem {direcao} {valor:.2f} na conta BullEx ({state.mode}) M1...", flush=True)
+    print(f" -> [EXECUÇÃO IMEDIATA ({tipo_operacao})] Enviando ordem {direcao} {valor:.2f} na conta BullEx ({state.mode}) M1 sem atrasos...", flush=True)
 
     if state.api and state.is_connected:
         executou, venceu, lucro, err = await asyncio.to_thread(
@@ -1371,6 +1283,10 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
     if not executou:
         print(f" -> [AVISO] Ordem não aceita pela corretora: {err}. Descartando sem marcar loss.", flush=True)
         state.current_observation = f"[AVISO BULLEX] Ordem não aceita ({err}). Analisando nova oportunidade..."
+        if state.current_gale_step > 0:
+            state.current_gale_step = 0
+            state.accumulated_gale_loss = 0.0
+        asyncio.create_task(varrer_60_candles_ativos())
         return
 
     # Se executou com sucesso na corretora e o resultado saiu:
@@ -1384,11 +1300,15 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             "stake": valor,
             "result": "EMPATE",
             "profit": 0.0,
+            "profit_gross": 0.0,
+            "profit_net": 0.0,
+            "win_amount": valor,
             "breakdown": "Empate (valor devolvido)",
             "reason": motivo_str
         })
-        salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, "EMPATE", 0.0, state.current_gale_step, "Empate (valor devolvido)", motivo_str, agora_exec_str)
+        salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, "EMPATE", 0.0, state.current_gale_step, "Empate (valor devolvido)", motivo_str, agora_exec_str, profit_gross=0.0)
         state.current_observation = f"[EMPATE] Operação em {ativo} empatou (valor devolvido)."
+        asyncio.create_task(varrer_60_candles_ativos())
         return
 
     if venceu:
@@ -1400,6 +1320,7 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         gale_usado = state.current_gale_step
         state.current_gale_step = 0
         state.accumulated_gale_loss = 0.0
+        state.recently_traded_assets[ativo] = time.time()
 
         res_str = "WIN"
         state.operacoes += 1
@@ -1430,27 +1351,40 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             state.current_observation = f"[VITÓRIA BULLEX] {ativo} WIN no G{gale_usado}! Ganho Real BullEx: +{simb} {lucro_bruto:.2f} | Lucro Líquido na Banca: +{simb} {lucro_liquido:.2f}"
         else:
             state.current_observation = f"[VITÓRIA INSTITUCIONAL] {ativo} WIN! Ganho Real: +{simb} {lucro_bruto:.2f}"
+        asyncio.create_task(varrer_60_candles_ativos())
     else:
         # LOSS na entrada atual
         if state.use_martingale and state.current_gale_step < state.max_gales:
-            # 1º LOSS: NÃO MARCA NO PLACAR AINDA! O robô pega a operação seguinte com G1
-            # "g1 deu loss pega operação ai se der loss ai marca la nao pode mostrar antes do resultado"
+            # 1º LOSS: O robô entra com G1 IMEDIATAMENTE NO MESMO ATIVO!
             state.current_gale_step += 1
             state.accumulated_gale_loss += valor
             proximo_valor = state.entry_stake * (state.gale_factor ** state.current_gale_step)
             simb = "$" if state.currency in ["USD", "$"] else "R$"
-            state.current_observation = f"[MARTINGALE G1 PRONTO] Entrada inicial sem taxa ideal. Próxima operação com G1 ({simb} {proximo_valor:.2f}) para recuperação imediata!"
-            print(f" -> [G1 ATIVADO] Aguardando próximo sinal para disparo do G{state.current_gale_step} ({simb} {proximo_valor:.2f})...", flush=True)
-            asyncio.create_task(varrer_60_candles_ativos())
+            
+            print(f"\n -> [G1 IMEDIATO NO MESMO ATIVO] Entrada inicial em {ativo} deu loss. Disparando G1 IMEDIATO em {ativo} ({direcao}) com {simb} {proximo_valor:.2f}!", flush=True)
+            state.current_observation = f"[MARTINGALE G1 - {ativo}] Entrada inicial não pagou. Executando G1 IMEDIATO no MESMO ATIVO ({direcao} {simb} {proximo_valor:.2f})!"
+            
+            # Dispara G1 imediatamente no MESMO ATIVO e na MESMA DIREÇÃO sem delay!
+            asyncio.create_task(
+                disparar_trade_autonomo(
+                    direcao=direcao,
+                    valor=proximo_valor,
+                    motivo_str=f"Martingale G1 em {ativo} (Recuperação no mesmo ativo)",
+                    ativo=ativo,
+                    conf=95,
+                    is_immediate_gale=True
+                )
+            )
+            return
         else:
             # LOSS NO G1 (OU SEM MARTINGALE) -> AGORA SIM MARCA NO PLACAR!
-            # "ai se der loss ai marca la"
             total_perdido = round(state.accumulated_gale_loss + valor, 2)
             state.losses += 1
             state.resultado = round(state.resultado - total_perdido, 2)
             gale_usado = state.current_gale_step
             state.current_gale_step = 0
             state.accumulated_gale_loss = 0.0
+            state.recently_traded_assets[ativo] = time.time()
             res_str = "LOSS"
 
             state.operacoes += 1
@@ -1466,11 +1400,15 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
                 "stake": valor,
                 "result": res_str,
                 "profit": -total_perdido,
+                "profit_gross": -total_perdido,
+                "profit_net": -total_perdido,
+                "win_amount": 0.0,
                 "breakdown": breakdown_str,
                 "reason": motivo_str
             })
-            salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, res_str, -total_perdido, gale_usado, breakdown_str, motivo_str, agora_exec_str)
-            state.current_observation = f"[FIM DE CICLO G1] Loss confirmado (-{simb} {total_perdido:.2f}). Analisando novas confluências para recuperação..."
+            salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, res_str, -total_perdido, gale_usado, breakdown_str, motivo_str, agora_exec_str, profit_gross=-total_perdido)
+            state.current_observation = f"[FIM DE CICLO G1] Loss confirmado em {ativo} (-{simb} {total_perdido:.2f}). Analisando novos pares para recuperação..."
+            asyncio.create_task(varrer_60_candles_ativos())
 
     # Proteção de Stop Win / Stop Loss
     simb = "$" if state.currency in ["USD", "$"] else "R$"
@@ -1630,6 +1568,9 @@ async def varrer_60_candles_ativos():
     """Varre TODOS os ativos binários OTC da corretora sem repetir até operar em todos"""
     if not state.ai_enabled or state.is_trading or state.is_scanning:
         return
+    if state.current_gale_step > 0:
+        # Se estiver em Martingale (G1), não varre outros ativos! O G1 é exclusivo no mesmo ativo.
+        return
 
     pode_operar, msg_saldo = verificar_saldo_para_operar(state.entry_stake)
     if not pode_operar:
@@ -1747,13 +1688,12 @@ async def varrer_60_candles_ativos():
         if decisao in ["CALL", "PUT"] and conf >= limite_confluencia and not state.is_trading and not state.is_paused:
             seg_agora = int(time.time()) % 60
             # Se virou a vela durante a análise, mas ainda está no início (<= 25s), entra com perfeição nesta nova vela!
-            if seg_agora > 29 and (int(time.time()) // 60) != minuto_inicio_analise:
-                print(f" -> [ATRASO EXCESSIVO] {ativo}: a vela virou e já passou da janela de 30s ({seg_agora}s). Reavaliando próximo candle...", flush=True)
+            if seg_agora > 25 and (int(time.time()) // 60) != minuto_inicio_analise:
+                print(f" -> [ATRASO EXCESSIVO] {ativo}: a vela virou e já passou de 25s ({seg_agora}s). Reavaliando próximo candle...", flush=True)
                 return
 
             state.active_asset = ativo
-            state.recently_traded_assets[ativo] = time.time()
-            print(f" -> [SINAL CONFIRMADO] {ativo}: {decisao} ({conf}%). Operado ({len(state.recently_traded_assets)}/{len(pool_otc)} no ciclo).", flush=True)
+            print(f" -> [SINAL CONFIRMADO] {ativo}: {decisao} ({conf}%). Preparando disparo para {ativo}.", flush=True)
 
             motivo = f"Confluência {conf}%: [{analise.get('padrao_vela', 'Olho de Deus A+')}] {analise.get('psicologia_mercado', '')} | {olho_badge}"
             valor = state.entry_stake * (state.gale_factor ** state.current_gale_step if state.current_gale_step > 0 else 1.0)
