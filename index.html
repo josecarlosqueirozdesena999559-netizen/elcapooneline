@@ -2012,7 +2012,7 @@
             </div>
           </div>
 
-          <div class="observation-box">
+          <div class="observation-box" id="aiObservationBox">
             <span class="obs-tag-label">O QUE ESTÁ SENDO OBSERVADO PELA IA:</span>
             <p class="obs-content-text" id="obsText">
               Carregando leitura técnica institucional dos candles com Google Gemini...
@@ -2167,7 +2167,7 @@
         </section>
 
         <!-- Session History -->
-        <section class="session-history-container">
+        <section class="session-history-container" id="sessionHistorySection">
           <div class="history-card-header">
             <div class="history-title-row">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--green-primary)">
@@ -3090,6 +3090,19 @@
           document.getElementById('warmupProgressBar').style.width = `${wp.percent || 0}%`;
         } else if (wpBox) {
           wpBox.style.display = 'none';
+        }
+
+        // Controle de Foco Operacional: Quando pegar a operação, oculta histórico e observação. Deixa somente a operação até o resultado!
+        const obsBox = document.getElementById('aiObservationBox');
+        const histSection = document.getElementById('sessionHistorySection');
+        const isTradeActive = Boolean(data.active_signal || data.is_trading);
+
+        if (isTradeActive) {
+          if (obsBox) obsBox.style.display = 'none';
+          if (histSection) histSection.style.display = 'none';
+        } else {
+          if (obsBox) obsBox.style.display = 'block';
+          if (histSection) histSection.style.display = 'flex';
         }
 
         // Exibição do Card de Sinal e Expiração M1 com Melhor Taxa, Lucro em Tempo Real e Contagem Fluida
