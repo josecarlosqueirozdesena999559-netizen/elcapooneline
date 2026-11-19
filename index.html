@@ -1363,44 +1363,6 @@
     }
 
     /* Modern Graphics Container */
-    .modern-charts-grid {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 14px;
-      margin-top: 14px;
-      width: 100%;
-    }
-
-    .chart-glass-card {
-      background: var(--glass-bg);
-      backdrop-filter: blur(28px) saturate(190%);
-      -webkit-backdrop-filter: blur(28px) saturate(190%);
-      border: 1px solid var(--glass-border);
-      border-radius: 20px;
-      padding: 18px 22px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      box-shadow: var(--glass-shadow);
-      position: relative;
-      overflow: hidden;
-    }
-
-    .chart-card-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-
-    .chart-card-title {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 13px;
-      font-weight: 800;
-      color: #ffffff;
-      letter-spacing: 0.02em;
-    }
 
     .chart-card-title svg {
       color: var(--neon-green);
@@ -1553,10 +1515,6 @@
 
       .header-user-email {
         display: none;
-      }
-
-      .modern-charts-grid {
-        grid-template-columns: 1fr;
       }
 
       .top-scoreboard-container {
@@ -1982,49 +1940,6 @@
 
         </section>
 
-        
-        <!-- Gráficos Modernos em Tempo Real (Desktop Glass & Mobile) -->
-        <div class="modern-charts-grid">
-          <!-- Gráfico 1: Candlesticks M1 & Linha de Preço ao Vivo -->
-          <div class="chart-glass-card">
-            <div class="chart-card-header">
-              <div class="chart-card-title">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-                </svg>
-                <span>CANDLES M1 & TICKER EM TEMPO REAL</span>
-              </div>
-              <div style="display:flex; align-items:center; gap:8px;">
-                <span id="chartAssetBadge" style="font-size:11px; font-weight:800; color:#38bdf8; background:rgba(56,189,248,0.12); padding:3px 10px; border-radius:9999px; font-family:var(--font-mono);">EURUSD-OTC</span>
-                <span style="font-size:10px; font-weight:800; color:var(--neon-green); background:rgba(0,230,118,0.12); padding:3px 8px; border-radius:9999px;">AO VIVO</span>
-              </div>
-            </div>
-
-            <!-- Canvas/SVG de Candlestick Dinâmico -->
-            <div style="position:relative; width:100%; height:150px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.06); border-radius:12px; overflow:hidden;">
-              <svg id="liveCandleSvg" width="100%" height="100%" viewBox="0 0 600 150" preserveAspectRatio="none" style="display:block;">
-                <!-- Linhas de Grade de Fundo -->
-                <line x1="0" y1="37" x2="600" y2="37" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4" />
-                <line x1="0" y1="75" x2="600" y2="75" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4" />
-                <line x1="0" y1="112" x2="600" y2="112" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4" />
-                <!-- Candlesticks Dinâmicos Injetados via JS -->
-                <g id="svgCandlesGroup"></g>
-                <!-- Linha Horizontal de Taxa de Entrada (quando houver trade) -->
-                <line id="svgEntryLine" x1="0" y1="75" x2="600" y2="75" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="4 3" style="display:none;" />
-                <!-- Linha de Cotação Atual ao Vivo -->
-                <line id="svgPriceLine" x1="0" y1="75" x2="600" y2="75" stroke="var(--neon-green)" stroke-width="1.8" />
-              </svg>
-              <!-- Badge Flutuante da Cotação Atual no Estilo BullEx -->
-              <div id="svgPriceBadge" style="position:absolute; right:12px; top:62px; background:#7c3aed; color:#ffffff; font-family:var(--font-mono); font-size:11.5px; font-weight:800; padding:3px 10px; border-radius:4px; box-shadow:0 0 12px rgba(124,58,237,0.5); pointer-events:none; transition:top 0.1s ease;">
-                1.338442
-              </div>
-            </div>
-          </div>
-
-
-        </div>
-
-
         <!-- Painel de Operações Abertas (Modelo Oficial BullEx - 100% Idêntico) -->
         <section class="open-positions-container" id="openPositionsSection" style="display:none; background: #111622; border: 1px solid #1e2638; border-radius: 6px; padding: 14px 18px; flex-direction: column; gap: 12px; margin-bottom: 20px;">
           
@@ -2200,38 +2115,6 @@
           </div>
 
           
-          <!-- GRÁFICO MODERNO GLASS: EVOLUÇÃO DE BANCA & ASSERTIVIDADE -->
-          <div class="chart-glass-card" style="margin-top:4px;">
-            <div class="chart-card-header">
-              <div class="chart-card-title">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                  <line x1="18" y1="20" x2="18" y2="10"></line>
-                  <line x1="12" y1="20" x2="12" y2="4"></line>
-                  <line x1="6" y1="20" x2="6" y2="14"></line>
-                </svg>
-                <span>CURVA DE EVOLUÇÃO DE BANCA & LUCRO</span>
-              </div>
-              <span id="curveTotalTrades" style="font-size:11px; font-weight:800; color:#cbd5e1; font-family:var(--font-mono);">0 OPERAÇÕES</span>
-            </div>
-
-            <!-- Gráfico de Área SVG Interativo -->
-            <div style="position:relative; width:100%; height:180px; background:rgba(0,0,0,0.35); border:1px solid rgba(255,255,255,0.06); border-radius:14px; overflow:hidden;">
-              <svg id="profitCurveSvg" width="100%" height="100%" viewBox="0 0 800 180" preserveAspectRatio="none">
-                <defs>
-                  <linearGradient id="profitGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stop-color="#00e676" stop-opacity="0.38"/>
-                    <stop offset="100%" stop-color="#00e676" stop-opacity="0.0"/>
-                  </linearGradient>
-                </defs>
-                <line x1="0" y1="90" x2="800" y2="90" stroke="rgba(255,255,255,0.1)" stroke-dasharray="4 4" />
-                <path id="profitCurveArea" d="M 0 90 L 800 90" fill="url(#profitGrad)" />
-                <path id="profitCurveLine" d="M 0 90 L 800 90" fill="none" stroke="#00e676" stroke-width="2.4" stroke-linecap="round" />
-                <g id="profitCurveDots"></g>
-              </svg>
-            </div>
-          </div>
-
-
           <div class="analytics-kpis-grid">
             <div class="an-kpi-card highlight" id="kpiCardDay">
               <span class="an-kpi-title">LUCRO DO DIA (<span id="anTodayDate">--/--</span>)</span>
@@ -2701,9 +2584,7 @@
       const livePrice = Number((st.entryRate + (st.baseDelta || 0) + microWave).toFixed(st.decimals));
       const currPriceEl = document.getElementById('bxRowCurrentPrice');
       if (currPriceEl) currPriceEl.textContent = livePrice.toFixed(st.decimals);
-      if (typeof updateLiveCandleSvg === 'function') {
-        updateLiveCandleSvg(livePrice, st.entryRate, st.decimals);
-      }
+      
 
       // Avaliação de Vitória / Entrada Negativa em tempo real
       const isWinning = st.isCall ? (livePrice >= st.entryRate) : (livePrice <= st.entryRate);
@@ -3365,15 +3246,8 @@
           listEl.innerHTML = emptyHtml;
         }
         const fullItems = (data.history_full && data.history_full.length > 0) ? data.history_full : data.history;
-        if (typeof updateProfitCurveChart === 'function') {
-          updateProfitCurveChart(fullItems, currSym);
-        }
-        if (!window.activeTradeState && typeof updateLiveCandleSvg === 'function') {
-          const chartAssetEl = document.getElementById('chartAssetBadge');
-          if (chartAssetEl && data.active_asset) chartAssetEl.textContent = data.active_asset;
-          const fallbackPrice = (data.last_candle_data && data.last_candle_data.close) ? data.last_candle_data.close : 1.33842;
-          updateLiveCandleSvg(fallbackPrice, null, 5);
-        }
+        
+        
         if (fullItems && fullItems.length > 0) {
           fullListEl.innerHTML = renderHistRows(fullItems);
         } else {
@@ -3657,142 +3531,6 @@
         }
       });
     };
-
-    // Renderizador do Gráfico de Candlestick M1 em Tempo Real
-    let candleHistorySample = [
-      { o: 1.33810, c: 1.33825, h: 1.33835, l: 1.33800 },
-      { o: 1.33825, c: 1.33815, h: 1.33830, l: 1.33810 },
-      { o: 1.33815, c: 1.33840, h: 1.33845, l: 1.33812 },
-      { o: 1.33840, c: 1.33832, h: 1.33848, l: 1.33828 },
-      { o: 1.33832, c: 1.33850, h: 1.33855, l: 1.33830 },
-      { o: 1.33850, c: 1.33838, h: 1.33855, l: 1.33832 },
-      { o: 1.33838, c: 1.33842, h: 1.33850, l: 1.33835 }
-    ];
-
-    function updateLiveCandleSvg(livePrice, entryPrice, decimals) {
-      const group = document.getElementById('svgCandlesGroup');
-      const priceLine = document.getElementById('svgPriceLine');
-      const priceBadge = document.getElementById('svgPriceBadge');
-      const entryLine = document.getElementById('svgEntryLine');
-      if (!group || !priceLine) return;
-
-      const candles = [...candleHistorySample];
-      // Atualiza a última vela com o preço atual
-      const last = candles[candles.length - 1];
-      last.c = livePrice;
-      if (livePrice > last.h) last.h = livePrice;
-      if (livePrice < last.l) last.l = livePrice;
-
-      // Encontra min e max
-      let minP = Infinity, maxP = -Infinity;
-      candles.forEach(c => {
-        if (c.l < minP) minP = c.l;
-        if (c.h > maxP) maxP = c.h;
-      });
-      if (entryPrice) {
-        if (entryPrice < minP) minP = entryPrice;
-        if (entryPrice > maxP) maxP = entryPrice;
-      }
-      const range = (maxP - minP) || 0.0001;
-      const margin = range * 0.15;
-      const plotMin = minP - margin;
-      const plotMax = maxP + margin;
-      const plotRange = plotMax - plotMin;
-
-      const toY = (p) => 150 - (((p - plotMin) / plotRange) * 140) - 5;
-
-      const svgWidth = 600;
-      const candleWidth = 28;
-      const gap = (svgWidth - 60) / candles.length;
-
-      let candleHtml = '';
-      candles.forEach((c, i) => {
-        const x = 30 + i * gap;
-        const yOpen = toY(c.o);
-        const yClose = toY(c.c);
-        const yHigh = toY(c.h);
-        const yLow = toY(c.l);
-        const isBull = c.c >= c.o;
-        const color = isBull ? '#00e676' : '#ff453a';
-        const bodyTop = Math.min(yOpen, yClose);
-        const bodyH = Math.max(2, Math.abs(yClose - yOpen));
-
-        // Wick
-        candleHtml += `<line x1="${x + candleWidth/2}" y1="${yHigh}" x2="${x + candleWidth/2}" y2="${yLow}" stroke="${color}" stroke-width="1.8"/>`;
-        // Body
-        candleHtml += `<rect x="${x}" y="${bodyTop}" width="${candleWidth}" height="${bodyH}" rx="3" fill="${color}" opacity="0.88"/>`;
-      });
-      group.innerHTML = candleHtml;
-
-      // Atualiza Linha de Preço Atual
-      const currentY = toY(livePrice);
-      priceLine.setAttribute('y1', currentY);
-      priceLine.setAttribute('y2', currentY);
-      priceLine.setAttribute('stroke', (livePrice >= last.o) ? '#00e676' : '#ff453a');
-
-      // Atualiza Badge Flutuante no Estilo BullEx
-      if (priceBadge) {
-        priceBadge.style.top = Math.max(10, Math.min(125, currentY - 14)) + 'px';
-        priceBadge.textContent = livePrice.toFixed(decimals || 5);
-        priceBadge.style.background = (livePrice >= last.o) ? '#00e676' : '#7c3aed';
-        priceBadge.style.color = (livePrice >= last.o) ? '#03140a' : '#ffffff';
-      }
-
-      // Linha de Entrada da BullEx
-      if (entryLine) {
-        if (entryPrice) {
-          const entryY = toY(entryPrice);
-          entryLine.setAttribute('y1', entryY);
-          entryLine.setAttribute('y2', entryY);
-          entryLine.style.display = 'block';
-        } else {
-          entryLine.style.display = 'none';
-        }
-      }
-    }
-
-    // Renderizador da Curva de Evolução de Lucro & Assertividade
-    function updateProfitCurveChart(history, currSym) {
-      const areaEl = document.getElementById('profitCurveArea');
-      const lineEl = document.getElementById('profitCurveLine');
-      const dotsEl = document.getElementById('profitCurveDots');
-      const countEl = document.getElementById('curveTotalTrades');
-      if (!areaEl || !lineEl) return;
-
-      const trades = history || [];
-      if (countEl) countEl.textContent = `${trades.length} OPERAÇÕES`;
-
-      let curvePoints = [0];
-      let acc = 0;
-      trades.slice().reverse().forEach(t => {
-        acc += (t.profit || 0);
-        curvePoints.push(acc);
-      });
-      if (curvePoints.length < 2) {
-        curvePoints = [0, 5.0, 3.5, 9.2, 14.5];
-      }
-
-      const minV = Math.min(...curvePoints);
-      const maxV = Math.max(...curvePoints);
-      const range = (maxV - minV) || 10;
-      const w = 800;
-      const h = 180;
-      const stepX = w / (curvePoints.length - 1);
-      const toY = (v) => h - (((v - minV) / range) * (h - 40)) - 20;
-
-      let pathD = `M 0 ${toY(curvePoints[0])}`;
-      let dotsHtml = '';
-      curvePoints.forEach((v, i) => {
-        const x = i * stepX;
-        const y = toY(v);
-        if (i > 0) pathD += ` L ${x} ${y}`;
-        dotsHtml += `<circle cx="${x}" cy="${y}" r="4" fill="#00e676" stroke="#06080d" stroke-width="2"/>`;
-      });
-
-      lineEl.setAttribute('d', pathD);
-      areaEl.setAttribute('d', `${pathD} L ${w} ${h} L 0 ${h} Z`);
-      if (dotsEl) dotsEl.innerHTML = dotsHtml;
-    }
 
   </script>
 
