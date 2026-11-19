@@ -70,54 +70,55 @@ app.add_middleware(
 )
 
 SYSTEM_PROMPT_TRADER = """Você é um Trader Quantitativo Sênior e Especialista em Price Action Institucional (Smart Money Concepts), Opções Binárias e Mercado OTC.
-Sua missão é analisar uma série temporal de 60 velas (candlesticks), indicadores matemáticos avançados e a estratégia institucional exclusiva:
-ESTRATÉGIA MESTRE: 'OLHO DE DEUS - ENGULFING + TENDÊNCIA (A+ MAIS FREQUENTE)' com FILTRO MANDATÓRIO MACD (12, 26, 9) PARA MÁXIMA ASSERTIVIDADE.
+Sua missão é analisar uma série temporal de 60 velas (candlesticks), indicadores matemáticos avançados e TODAS as estratégias institucionais de alta assertividade.
 
-SUA MISSÃO: Decidir se a próxima vela será CALL (Compra / Verde), PUT (Venda / Vermelha) ou AGUARDAR (Sem confluência suficiente).
+ATENÇÃO: VOCÊ DEVE USAR TODOS OS GATILHOS E PROMPTS DE ANÁLISE DISPONÍVEIS, NÃO OPERANDO EXCLUSIVAMENTE COM O OLHO DE DEUS!
+Analise todo o contexto de mercado e recomende CALL (Compra), PUT (Venda) ou AGUARDAR quando houver confluência em qualquer um dos seguintes cenários institucionais:
 
-REGRAS MATEMÁTICAS INSTITUCIONAIS DO "OLHO DE DEUS (A+)" & MACD:
-1. PADRÃO ENGOLFO PURO (ENGULFING INSTITUCIONAL):
-   - COMPRA (engulfBuy): Vela atual fecha verde (close > open) após uma vela vermelha (close[1] < open[1]), engolfando completamente o corpo anterior (close >= open[1] e open <= close[1]) com corpo atual maior ou igual ao anterior (bodyNow >= bodyPrev).
-   - VENDA (engulfSell): Vela atual fecha vermelha (close < open) após uma vela verde (close[1] > open[1]), engolfando completamente o corpo anterior (close <= open[1] e open >= close[1]) com corpo atual maior ou igual ao anterior (bodyNow >= bodyPrev).
+GATILHOS VÁLIDOS DE ENTRADA (USAR TODOS OS GATILHOS):
+1. PRICE ACTION INSTITUCIONAL & REJEIÇÃO DE PAVIOS:
+   - Martelo / Pin Bar de Alta: Longo pavio inferior (mínimo 2x o corpo) rejeitando suporte ou fundo -> CALL.
+   - Estrela Cadente / Pin Bar de Baixa: Longo pavio superior (mínimo 2x o corpo) rejeitando resistência ou topo -> PUT.
+   - Padrão de Reversão em Topo Duplo (M) -> PUT.
+   - Padrão de Reversão em Fundo Duplo (W) -> CALL.
+   - Marubozu Institucional de Rompimento: Vela de corpo dominante (> 75% da amplitude) com volume acima da média de 5 períodos rompendo consolidação no sentido da tendência -> Seguir o fluxo (CALL se verde / PUT se vermelha).
 
-2. DESTAQUE E FORÇA A+ INSTITUCIONAL (Altíssima assertividade):
-   - bodyNow >= 1.20 * avgBody10 (corpo 20% maior que a média dos últimos 10 corpos) OU bodyNow >= 0.45 * atr14 (corpo correspondente a pelo menos 45% do ATR 14).
-   - Esse critério confirma presença e injeção de liquidez do Smart Money, eliminando falsos engolfos de micro-velas sem volume.
+2. SMART MONEY CONCEPTS (SMC) & ZONAS DE LIQUIDEZ:
+   - Bullish Order Block (OB): Rejeição e absorção compradora na última vela de baixa antes do impulso -> CALL.
+   - Bearish Order Block (OB): Rejeição e absorção vendedora na última vela de alta antes do impulso -> PUT.
+   - Caça de Liquidez (Sweep): Falso rompimento de topo/fundo seguido de forte rejeição de pavio em OTC.
 
-3. FILTRO MANDATÓRIO MACD (12, 26, 9) - OBRIGATÓRIO PARA ACERTAR MAIS:
-   - Para CALL: Linha MACD > Linha de Sinal E Histograma do MACD em expansão crescente (macdHist > macdHist[1]). O momentum de alta deve estar em aceleração!
-   - Para PUT: Linha MACD < Linha de Sinal E Histograma do MACD em expansão decrescente (macdHist < macdHist[1]). O momentum de baixa deve estar em aceleração!
-   - REGRA DE PROTEÇÃO ABSOLUTA: Se o MACD divergir do sinal (exemplo: engolfo de alta mas histograma do MACD diminuindo ou abaixo da linha de sinal), NUNCA dê CALL! Se divergir, a decisão DEVE ser AGUARDAR!
+3. CONFLUÊNCIA COM BANDAS DE BOLLINGER, RSI E MACD:
+   - Compra (CALL): Preço tocando ou furando a Banda de Bollinger inferior com pavio de retração + RSI sobrevendido (< 35) ou cruzando 50 para cima + Histograma MACD virando para positivo.
+   - Venda (PUT): Preço tocando ou furando a Banda de Bollinger superior com pavio de retração + RSI sobrecomprado (> 65) ou cruzando 50 para baixo + Histograma MACD virando para negativo.
 
-4. FILTROS DE TENDÊNCIA E CONFLUÊNCIA:
-   - Tendência Macro (MA 200) e Média Ponderada (WMA 50):
-     * Para CALL: Preço acima da MA Trend (200), WMA 50 e EMA 9 > EMA 21.
-     * Para PUT: Preço abaixo da MA Trend (200), WMA 50 e EMA 9 < EMA 21.
-   - RSI 7 e RSI 14:
-     * Para CALL: RSI > 50 (zona de dominância compradora).
-     * Para PUT: RSI < 50 (zona de dominância vendedora).
-   - ADX 14: ADX >= 22 confirma tendência real em andamento (mercado direcional seguro).
-   - Estocástico (14, 3, 3): %K > %D para CALL; %K < %D para PUT.
-   - Volume: Volume atual acima da média dos últimos 5 candles (SMA 5 de volume) confirma o rompimento.
+4. ESTRATÉGIA OLHO DE DEUS A+ (ENGULFING INSTITUCIONAL):
+   - Engolfo de Alta (`engulfBuy` com corpo expressivo >= 1.2x média de 10) + Preço acima da MA Trend ou EMA21 + MACD expansivo -> CALL A+ (90% a 98% confluência).
+   - Engolfo de Baixa (`engulfSell` com corpo expressivo >= 1.2x média de 10) + Preço abaixo da MA Trend ou EMA21 + MACD expansivo -> PUT A+ (90% a 98% confluência).
 
-5. ESTRATÉGIA DE ENTRADA M1 NOS 30 SEGUNDOS FINAIS:
-   - A entrada ocorre no ponto ideal de retração da vela, próximo ao momento dos 30 segundos finais (entre 23s e 28.5s) antes do bloqueio da BullEx (00:30):
-     * Para PUT: Aguarda a vela M1 esticar para cima para vender no topo (pavio superior).
-     * Para CALL: Aguarda a vela M1 esticar para baixo para comprar no fundo (pavio inferior).
+5. FILTRO MACD (12, 26, 9) - OBRIGATÓRIO PARA CONFIRMAR O MOMENTUM:
+   - Para CALL: Linha MACD > Linha de Sinal E/OU Histograma crescendo.
+   - Para PUT: Linha MACD < Linha de Sinal E/OU Histograma decrescendo.
+   - Se o MACD estiver completamente divergente contra a operação pretendida, decida por AGUARDAR.
 
-6. CLASSIFICAÇÃO DE CONFLUÊNCIA:
-   - 90% a 98%: SINAL OLHO DE DEUS A+ (Engolfo + Força A+ + MACD Expansivo + Tendência alinhada).
-   - 80% a 89%: Reversão de Price Action / Order Block em Suporte/Resistência extremo confirmada pelo MACD e RSI.
-   - Abaixo de 80% ou com divergência de MACD/Tendência: AGUARDAR.
+6. ESTRATÉGIA DE ENTRADA M1 NOS 30 SEGUNDOS FINAIS:
+   - A entrada ocorre no ponto ideal da retração da vela, próximo ao momento dos 30 segundos finais (entre 23s e 28.5s) antes do travamento da BullEx (00:30):
+     * Para PUT: Aguarda a vela M1 esticar para cima para vender no topo.
+     * Para CALL: Aguarda a vela M1 retrair para baixo para comprar no fundo.
+
+7. CLASSIFICAÇÃO DE CONFLUÊNCIA:
+   - 90% a 98%: Sinal Olho de Deus A+ OU Rejeição Extrema em Suporte/Resistência com Pin Bar/Order Block e MACD forte.
+   - 80% a 89%: Rompimento institucional com volume, reversão em Bollinger ou Order Block com confluência de médias.
+   - Abaixo de 80% ou com divergência grave: AGUARDAR.
 
 Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
 {
   "decisao": "CALL" | "PUT" | "AGUARDAR",
   "confluencia_porcentagem": number (0 a 100),
-  "padrao_vela": "string com nome do padrão e leitura técnica (ex: 'Olho de Deus A+ Engulfing')",
+  "padrao_vela": "string com nome do padrão e leitura técnica (ex: 'Pin Bar de Rejeição', 'Order Block SMC', 'Olho de Deus A+')",
   "suporte_resistencia": "string com a zona de preço e confluência SMC",
   "psicologia_mercado": "string detalhada explicando a exaustão e o fluxo",
-  "texto_observacao": "string no formato [Gemini AI HH:MM:SS] X% -- Explicação técnica completa destacando Olho de Deus A+ e MACD..."
+  "texto_observacao": "string no formato [Gemini AI HH:MM:SS] X% -- Explicação técnica completa destacando o padrão identificado..."
 }"""
 
 def carregar_ativos():
@@ -845,7 +846,7 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
         state.gemini_status = "Desativado (GEMINI_API_KEY não configurada)"
         return None
 
-    candidate_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-lite-latest"]
+    candidate_models = ["gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-flash-lite-latest"]
     c = dados.get("candle_ultimo", {})
     agora_str = dados.get("relogio_horario", datetime.now().strftime("%H:%M:%S"))
     segundo_vela = dados.get("segundo_da_vela", 55)
@@ -908,7 +909,7 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
 - Para PUT: A vela deve esticar para cima para vender no topo.
 - Para CALL: A vela deve retrair para baixo para comprar no fundo.
 
-Decida se a melhor oportunidade é CALL, PUT ou AGUARDAR com base no Olho de Deus A+ e no filtro MACD.
+Decida se a melhor oportunidade é CALL, PUT ou AGUARDAR avaliando TODOS OS GATILHOS INSTITUCIONAIS (Smart Money Concepts / Order Blocks, Price Action / Pin Bar / Reversões / Rompimento Marubozu, Bandas de Bollinger com RSI, Olho de Deus A+ e o filtro mandatório de aceleração do MACD). Responda com confluência >= 80% sempre que houver confirmação institucional.
 Responda ESTRITAMENTE em formato JSON com o schema exigido.
 """
     if state.gemini_key.startswith("sk-"):
@@ -1675,7 +1676,7 @@ async def varrer_60_candles_ativos():
         else:
             # Permanece no mesmo ativo e aguarda atualização da vela antes de reavaliar
             print(f" -> [PERMANECENDO EM {ativo}] {decisao} ({conf}% < {limite_confluencia}%). Aguardando melhor formação sem pular de ativo.", flush=True)
-            await asyncio.sleep(3)
+            await asyncio.sleep(6)
     finally:
         state.is_scanning = False
 
@@ -2047,7 +2048,17 @@ async def api_reset_score():
     state.assertividade = 0.0
     state.is_paused = False
     state.current_gale_step = 0
-    state.current_observation = "Métricas reiniciadas."
+    state.history_trades = []
+    state.current_observation = "Métricas e histórico limpos. Robô pronto para novas oportunidades institucionais."
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM trade_results")
+        conn.commit()
+        cursor.execute("VACUUM")
+        conn.close()
+    except Exception as e:
+        print(f"[DB RESET ERR] {e}", flush=True)
     if state.ai_enabled:
         asyncio.create_task(varrer_60_candles_ativos())
     return {"success": True}

@@ -3093,11 +3093,17 @@
         const isTradeActive = Boolean(data.active_signal || data.is_trading);
 
         if (isTradeActive) {
-          if (obsBox) obsBox.style.display = 'none';
-          if (histSection) histSection.style.display = 'none';
+          if (obsBox) obsBox.style.setProperty('display', 'none', 'important');
+          if (histSection) histSection.style.setProperty('display', 'none', 'important');
         } else {
-          if (obsBox) obsBox.style.display = 'block';
-          if (histSection) histSection.style.display = 'flex';
+          if (obsBox) {
+            obsBox.style.removeProperty('display');
+            obsBox.style.display = 'block';
+          }
+          if (histSection) {
+            histSection.style.removeProperty('display');
+            histSection.style.display = 'flex';
+          }
         }
 
         // Exibição do Card de Sinal e Expiração M1 com Melhor Taxa, Lucro em Tempo Real e Contagem Fluida
