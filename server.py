@@ -881,7 +881,7 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
         state.gemini_status = "Desativado (GEMINI_API_KEY não configurada)"
         return None
 
-    candidate_models = ["gemini-2.5-flash", "gemini-3-flash-preview", "gemini-flash-lite-latest"]
+    candidate_models = ["gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-3-flash-preview", "gemini-3.1-flash-lite"]
     c = dados.get("candle_ultimo", {})
     agora_str = dados.get("relogio_horario", datetime.now().strftime("%H:%M:%S"))
     segundo_vela = dados.get("segundo_da_vela", 55)
@@ -1050,6 +1050,9 @@ Responda ESTRITAMENTE em formato JSON com o schema exigido.
                 elif resp.status_code == 429:
                     state.gemini_status = f"Cota temporária ({model})"
                     continue
+                elif resp.status_code == 503:
+                    state.gemini_status = f"Alta demanda ({model}), alternando modelo..."
+                    continue
                 else:
                     state.gemini_status = f"Erro HTTP {resp.status_code} ({model})"
                     print(f"[GEMINI ERR] {model} HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
@@ -1109,19 +1112,28 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     is_winning = (taxa_atual <= taxa_entrada)
 
                 simb = "$" if state.currency in ["USD", "$"] else "R$"
+                gale_loss_ant = state.accumulated_gale_loss
+                lucro_liquido_estimado = round(payout_estimado - gale_loss_ant, 2)
+                total_perda_estimada = round(valor + gale_loss_ant, 2)
+
                 if is_winning:
                     live_status = "WINNING"
-                    live_profit = payout_estimado
-                    live_text = f"+{simb} {payout_estimado:.2f}"
-                    status_banner = f"🟢 OPERAÇÃO DANDO VITÓRIA ({live_text}) — FECHAMENTO EM {remaining}s"
+                    if gale_loss_ant > 0:
+                        live_profit = lucro_liquido_estimado
+                        live_text = f"+{simb} {lucro_liquido_estimado:.2f} (Líq G1)"
+                        status_banner = f"🟢 OPERAÇÃO DANDO VITÓRIA (+{simb} {lucro_liquido_estimado:.2f} líq / +{simb} {payout_estimado:.2f} BullEx) — FECHAMENTO EM {remaining}s"
+                    else:
+                        live_profit = payout_estimado
+                        live_text = f"+{simb} {payout_estimado:.2f}"
+                        status_banner = f"🟢 OPERAÇÃO DANDO VITÓRIA ({live_text}) — FECHAMENTO EM {remaining}s"
                     perc_recompra = min(0.85, 0.35 + (60 - remaining) / 100.0)
                     lp_pos_venda = round(payout_estimado * perc_recompra, 2)
                     lp_pos_venda_str = f"+{simb} {lp_pos_venda:.2f}"
                     resale_percent = f"+{perc_recompra * 100:.2f}%"
                 else:
                     live_status = "LOSING"
-                    live_profit = -valor
-                    live_text = f"-{simb} {valor:.2f}"
+                    live_profit = -total_perda_estimada if gale_loss_ant > 0 else -valor
+                    live_text = f"-{simb} {total_perda_estimada:.2f}" if gale_loss_ant > 0 else f"-{simb} {valor:.2f}"
                     status_banner = f"🔴 ENTRADA NEGATIVA ({live_text}) — FECHAMENTO EM {remaining}s"
                     perc_perda = min(0.95, 0.45 + (60 - remaining) / 120.0)
                     lp_pos_venda = -round(valor * perc_perda, 2)
@@ -1136,6 +1148,8 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     state.active_signal["live_status"] = live_status
                     state.active_signal["live_profit"] = live_profit
                     state.active_signal["live_profit_text"] = live_text
+                    state.active_signal["live_profit_gross"] = payout_estimado
+                    state.active_signal["live_profit_net"] = lucro_liquido_estimado
                     state.active_signal["entry_rate"] = taxa_entrada
                     state.active_signal["current_rate"] = taxa_atual
                     # Modelo BullEx Oficial de Operações Abertas
@@ -1144,7 +1158,7 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     state.active_signal["clock_str"] = f"00:{remaining:02d}"
                     state.active_signal["stake_val"] = valor
                     state.active_signal["stake_str"] = f"{simb} {valor:.2f}"
-                    state.active_signal["lp_expected_str"] = f"+{simb} {payout_estimado:.2f}" if is_winning else f"-{simb} {valor:.2f}"
+                    state.active_signal["lp_expected_str"] = (f"+{simb} {lucro_liquido_estimado:.2f}" if gale_loss_ant > 0 else f"+{simb} {payout_estimado:.2f}") if is_winning else (f"-{simb} {total_perda_estimada:.2f}" if gale_loss_ant > 0 else f"-{simb} {valor:.2f}")
                     state.active_signal["lp_pos_venda_str"] = lp_pos_venda_str
                     state.active_signal["lp_pos_venda_val"] = lp_pos_venda
                     state.active_signal["resale_percent"] = resale_percent
@@ -1371,8 +1385,8 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
 
     if venceu:
         state.wins += 1
-        lucro_liquido = lucro - state.accumulated_gale_loss
-        state.resultado += lucro_liquido
+        lucro_liquido = round(lucro - state.accumulated_gale_loss, 2)
+        state.resultado = round(state.resultado + lucro_liquido, 2)
         gale_usado = state.current_gale_step
         state.current_gale_step = 0
         state.accumulated_gale_loss = 0.0
@@ -1382,7 +1396,12 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         tot = state.wins + state.losses
         state.assertividade = round((state.wins / tot) * 100, 1) if tot > 0 else 0.0
 
-        breakdown_str = f"Recuperado com G{gale_usado}" if gale_usado > 0 else ""
+        simb = "$" if state.currency in ["USD", "$"] else "R$"
+        if gale_usado > 0:
+            breakdown_str = f"Recuperado no G{gale_usado} (+{simb} {lucro_liquido:.2f} líquido na banca | BullEx: +{simb} {lucro:.2f})"
+        else:
+            breakdown_str = f"Win 1ª mão (+{simb} {lucro_liquido:.2f})"
+
         state.history_trades.insert(0, {
             "time": agora_exec_str,
             "asset": ativo,
@@ -1390,11 +1409,15 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             "stake": valor,
             "result": res_str,
             "profit": lucro_liquido,
+            "profit_gross": lucro,
             "breakdown": breakdown_str,
             "reason": motivo_str
         })
         salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, res_str, lucro_liquido, gale_usado, breakdown_str, motivo_str, agora_exec_str)
-        state.current_observation = f"[VITÓRIA INSTITUCIONAL] Operação WIN em {ativo}! Lucro: +R$ {lucro_liquido:.2f}"
+        if gale_usado > 0:
+            state.current_observation = f"[VITÓRIA BULLEX] {ativo} WIN no G{gale_usado}! Lucro Real na Banca: +{simb} {lucro_liquido:.2f} (Retorno Bruto BullEx: +{simb} {lucro:.2f})"
+        else:
+            state.current_observation = f"[VITÓRIA INSTITUCIONAL] {ativo} WIN! Lucro: +{simb} {lucro_liquido:.2f}"
     else:
         # LOSS na entrada atual
         if state.use_martingale and state.current_gale_step < state.max_gales:
@@ -1403,15 +1426,16 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             state.current_gale_step += 1
             state.accumulated_gale_loss += valor
             proximo_valor = state.entry_stake * (state.gale_factor ** state.current_gale_step)
-            state.current_observation = f"[MARTINGALE G1 PRONTO] Entrada inicial sem taxa ideal. Próxima operação com G1 (R$ {proximo_valor:.2f}) para recuperação imediata!"
-            print(f" -> [G1 ATIVADO] Aguardando próximo sinal para disparo do G{state.current_gale_step} (R$ {proximo_valor:.2f})...", flush=True)
+            simb = "$" if state.currency in ["USD", "$"] else "R$"
+            state.current_observation = f"[MARTINGALE G1 PRONTO] Entrada inicial sem taxa ideal. Próxima operação com G1 ({simb} {proximo_valor:.2f}) para recuperação imediata!"
+            print(f" -> [G1 ATIVADO] Aguardando próximo sinal para disparo do G{state.current_gale_step} ({simb} {proximo_valor:.2f})...", flush=True)
             asyncio.create_task(varrer_60_candles_ativos())
         else:
             # LOSS NO G1 (OU SEM MARTINGALE) -> AGORA SIM MARCA NO PLACAR!
             # "ai se der loss ai marca la"
-            total_perdido = state.accumulated_gale_loss + valor
+            total_perdido = round(state.accumulated_gale_loss + valor, 2)
             state.losses += 1
-            state.resultado -= total_perdido
+            state.resultado = round(state.resultado - total_perdido, 2)
             gale_usado = state.current_gale_step
             state.current_gale_step = 0
             state.accumulated_gale_loss = 0.0
@@ -1421,7 +1445,8 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             tot = state.wins + state.losses
             state.assertividade = round((state.wins / tot) * 100, 1) if tot > 0 else 0.0
 
-            breakdown_str = f"Loss confirmado após G{gale_usado}" if gale_usado > 0 else "Loss primeira entrada"
+            simb = "$" if state.currency in ["USD", "$"] else "R$"
+            breakdown_str = f"Loss confirmado após G{gale_usado} (-{simb} {total_perdido:.2f})" if gale_usado > 0 else f"Loss (-{simb} {valor:.2f})"
             state.history_trades.insert(0, {
                 "time": agora_exec_str,
                 "asset": ativo,
@@ -1433,15 +1458,16 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
                 "reason": motivo_str
             })
             salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, res_str, -total_perdido, gale_usado, breakdown_str, motivo_str, agora_exec_str)
-            state.current_observation = f"[FIM DE CICLO G1] Loss confirmado (-R$ {total_perdido:.2f}). Analisando novas confluências para recuperação..."
+            state.current_observation = f"[FIM DE CICLO G1] Loss confirmado (-{simb} {total_perdido:.2f}). Analisando novas confluências para recuperação..."
 
     # Proteção de Stop Win / Stop Loss
+    simb = "$" if state.currency in ["USD", "$"] else "R$"
     if state.resultado >= state.stop_win:
         state.is_paused = True
-        state.current_observation = f"[STOP WIN ATINGIDO] Meta de lucro (+R$ {state.resultado:.2f}) alcançada! Robô pausado."
+        state.current_observation = f"[STOP WIN ATINGIDO] Meta de lucro (+{simb} {state.resultado:.2f}) alcançada! Robô pausado."
     elif state.resultado <= -state.stop_loss:
         state.is_paused = True
-        state.current_observation = f"[STOP LOSS ATINGIDO] Limite de perda (-R$ {abs(state.resultado):.2f}) atingido! Robô pausado para proteção."
+        state.current_observation = f"[STOP LOSS ATINGIDO] Limite de perda (-{simb} {abs(state.resultado):.2f}) atingido! Robô pausado para proteção."
 
 # ========================================================
 # MOTOR QUANTITATIVO SMC + PRICE ACTION EM TEMPO REAL (ZERO LAG)

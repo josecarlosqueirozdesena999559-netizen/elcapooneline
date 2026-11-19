@@ -3338,6 +3338,7 @@
                     <span class="hist-result-pill ${resClass}">${item.result} (${profitFmt})</span>
                   </div>
                 </div>
+                ${item.breakdown ? `<div class="hist-breakdown-badge" style="font-size:11px; color:#38bdf8; font-weight:700; margin-top:2px;">${item.breakdown}</div>` : ''}
                 ${item.reason ? `<div class="hist-reason-badge">${item.reason}</div>` : ''}
               </div>
             `;
