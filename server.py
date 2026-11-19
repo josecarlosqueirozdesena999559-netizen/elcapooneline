@@ -211,6 +211,7 @@ class BotMemoryState:
         self.wins = 0
         self.losses = 0
         self.resultado = 0.0
+        self.resultado_bruto = 0.0
         self.operacoes = 0
         self.assertividade = 0.0
         
@@ -245,12 +246,17 @@ def init_results_db() -> None:
                 stake REAL NOT NULL,
                 result TEXT NOT NULL,
                 profit REAL NOT NULL,
+                profit_gross REAL,
                 gale_step INTEGER NOT NULL,
                 breakdown TEXT,
                 reason TEXT,
                 created_at REAL NOT NULL
             )
         """)
+        try:
+            conn.execute("ALTER TABLE trade_results ADD COLUMN profit_gross REAL")
+        except Exception:
+            pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_email_date ON trade_results(email, trade_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_email_month ON trade_results(email, trade_month)")
 
@@ -263,6 +269,7 @@ def limpar_resultados_memoria() -> None:
     state.wins = 0
     state.losses = 0
     state.resultado = 0.0
+    state.resultado_bruto = 0.0
     state.operacoes = 0
     state.assertividade = 0.0
     state.history_trades = []
@@ -330,24 +337,25 @@ def verificar_virada_dia() -> None:
 def salvar_resultado_db(
     email: Optional[str], mode: str, asset: str, direction: str,
     stake: float, result: str, profit: float, gale_step: int,
-    breakdown: str, reason: str, trade_time: str
+    breakdown: str, reason: str, trade_time: str, profit_gross: Optional[float] = None
 ) -> None:
     em = _norm_email(email)
     if not em:
         return
     agora = datetime.now()
+    pg = float(profit_gross if profit_gross is not None else profit)
     with sqlite3.connect(RESULTS_DB_PATH) as conn:
         conn.execute(
             """
             INSERT INTO trade_results (
                 email, mode, trade_date, trade_month, trade_hour, trade_time,
-                asset, direction, stake, result, profit, gale_step, breakdown, reason, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                asset, direction, stake, result, profit, profit_gross, gale_step, breakdown, reason, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 em, (mode or "DEMO").upper(), agora.strftime("%Y-%m-%d"),
                 agora.strftime("%Y-%m"), agora.hour, trade_time,
-                asset, direction, float(stake), result, float(profit),
+                asset, direction, float(stake), result, float(profit), pg,
                 int(gale_step), breakdown, reason, time.time()
             )
         )
@@ -1119,9 +1127,9 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                 if is_winning:
                     live_status = "WINNING"
                     if gale_loss_ant > 0:
-                        live_profit = lucro_liquido_estimado
-                        live_text = f"+{simb} {lucro_liquido_estimado:.2f} (Líq G1)"
-                        status_banner = f"🟢 OPERAÇÃO DANDO VITÓRIA (+{simb} {lucro_liquido_estimado:.2f} líq / +{simb} {payout_estimado:.2f} BullEx) — FECHAMENTO EM {remaining}s"
+                        live_profit = payout_estimado
+                        live_text = f"+{simb} {payout_estimado:.2f} (Líq: +{simb} {lucro_liquido_estimado:.2f})"
+                        status_banner = f"🟢 OPERAÇÃO DANDO VITÓRIA (+{simb} {payout_estimado:.2f} BullEx | Líquido G1: +{simb} {lucro_liquido_estimado:.2f}) — FECHAMENTO EM {remaining}s"
                     else:
                         live_profit = payout_estimado
                         live_text = f"+{simb} {payout_estimado:.2f}"
@@ -1158,7 +1166,7 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     state.active_signal["clock_str"] = f"00:{remaining:02d}"
                     state.active_signal["stake_val"] = valor
                     state.active_signal["stake_str"] = f"{simb} {valor:.2f}"
-                    state.active_signal["lp_expected_str"] = (f"+{simb} {lucro_liquido_estimado:.2f}" if gale_loss_ant > 0 else f"+{simb} {payout_estimado:.2f}") if is_winning else (f"-{simb} {total_perda_estimada:.2f}" if gale_loss_ant > 0 else f"-{simb} {valor:.2f}")
+                    state.active_signal["lp_expected_str"] = (f"+{simb} {payout_estimado:.2f} (Líq: +{simb} {lucro_liquido_estimado:.2f})" if gale_loss_ant > 0 else f"+{simb} {payout_estimado:.2f}") if is_winning else (f"-{simb} {total_perda_estimada:.2f}" if gale_loss_ant > 0 else f"-{simb} {valor:.2f}")
                     state.active_signal["lp_pos_venda_str"] = lp_pos_venda_str
                     state.active_signal["lp_pos_venda_val"] = lp_pos_venda
                     state.active_signal["resale_percent"] = resale_percent
@@ -1385,8 +1393,10 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
 
     if venceu:
         state.wins += 1
+        lucro_bruto = round(lucro, 2)
         lucro_liquido = round(lucro - state.accumulated_gale_loss, 2)
         state.resultado = round(state.resultado + lucro_liquido, 2)
+        state.resultado_bruto = round(getattr(state, "resultado_bruto", 0.0) + lucro_bruto, 2)
         gale_usado = state.current_gale_step
         state.current_gale_step = 0
         state.accumulated_gale_loss = 0.0
@@ -1398,9 +1408,9 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
 
         simb = "$" if state.currency in ["USD", "$"] else "R$"
         if gale_usado > 0:
-            breakdown_str = f"Recuperado no G{gale_usado} (+{simb} {lucro_liquido:.2f} líquido na banca | BullEx: +{simb} {lucro:.2f})"
+            breakdown_str = f"Recuperado no G{gale_usado} (+{simb} {lucro_bruto:.2f} ganho real BullEx | +{simb} {lucro_liquido:.2f} líquido na banca)"
         else:
-            breakdown_str = f"Win 1ª mão (+{simb} {lucro_liquido:.2f})"
+            breakdown_str = f"Win 1ª mão (+{simb} {lucro_bruto:.2f} ganho real BullEx)"
 
         state.history_trades.insert(0, {
             "time": agora_exec_str,
@@ -1408,16 +1418,18 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             "direction": f"{direcao} (G{gale_usado})" if gale_usado > 0 else direcao,
             "stake": valor,
             "result": res_str,
-            "profit": lucro_liquido,
-            "profit_gross": lucro,
+            "profit": lucro_bruto,
+            "profit_gross": lucro_bruto,
+            "profit_net": lucro_liquido,
+            "win_amount": round(valor + lucro_bruto, 2),
             "breakdown": breakdown_str,
             "reason": motivo_str
         })
-        salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, res_str, lucro_liquido, gale_usado, breakdown_str, motivo_str, agora_exec_str)
+        salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, res_str, lucro_liquido, gale_usado, breakdown_str, motivo_str, agora_exec_str, profit_gross=lucro_bruto)
         if gale_usado > 0:
-            state.current_observation = f"[VITÓRIA BULLEX] {ativo} WIN no G{gale_usado}! Lucro Real na Banca: +{simb} {lucro_liquido:.2f} (Retorno Bruto BullEx: +{simb} {lucro:.2f})"
+            state.current_observation = f"[VITÓRIA BULLEX] {ativo} WIN no G{gale_usado}! Ganho Real BullEx: +{simb} {lucro_bruto:.2f} | Lucro Líquido na Banca: +{simb} {lucro_liquido:.2f}"
         else:
-            state.current_observation = f"[VITÓRIA INSTITUCIONAL] {ativo} WIN! Lucro: +{simb} {lucro_liquido:.2f}"
+            state.current_observation = f"[VITÓRIA INSTITUCIONAL] {ativo} WIN! Ganho Real: +{simb} {lucro_bruto:.2f}"
     else:
         # LOSS na entrada atual
         if state.use_martingale and state.current_gale_step < state.max_gales:
@@ -2060,6 +2072,7 @@ async def api_status():
             "losses": state.losses,
             "assertividade": state.assertividade,
             "resultado": state.resultado,
+            "resultado_bruto": state.resultado_bruto,
             "operacoes": state.operacoes
         },
         "history": state.history_trades[:15],

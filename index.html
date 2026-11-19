@@ -1896,6 +1896,7 @@
           <div class="top-score-cell">
             <span class="top-score-label">RESULTADO</span>
             <span class="top-score-number" id="scoreResult">$ 0.00</span>
+            <span id="scoreResultSub" style="font-size:11px; font-weight:700; color:#38bdf8; margin-top:2px; display:none;"></span>
           </div>
 
           <div class="top-score-cell">
@@ -3295,6 +3296,17 @@
           resEl.className = sc.resultado >= 0 ? 'top-score-number profit' : 'top-score-number loss';
           document.getElementById('scoreOps').textContent = sc.operacoes;
 
+          const resSub = document.getElementById('scoreResultSub');
+          if (resSub) {
+            if (sc.resultado_bruto !== undefined && Math.abs(sc.resultado_bruto - sc.resultado) > 0.01) {
+              const bSign = sc.resultado_bruto >= 0 ? `+` : `-`;
+              resSub.textContent = `Ganho Real: ${bSign}${currSym} ${Math.abs(sc.resultado_bruto).toFixed(2)}`;
+              resSub.style.display = 'block';
+            } else {
+              resSub.style.display = 'none';
+            }
+          }
+
           // Analytics diário e mensal por e-mail
           const netEl = document.getElementById('anNetProfit');
           netEl.textContent = prefix + Math.abs(sc.resultado).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -3322,8 +3334,27 @@
           items.forEach(item => {
             const dirClass = item.direction.toLowerCase().includes('call') ? 'call' : 'put';
             const resClass = item.result.toLowerCase() === 'win' ? 'win' : 'loss';
-            const sign = item.profit >= 0 ? '+' : '-';
-            const profitFmt = `${sign}${currSym} ${Math.abs(item.profit).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+            
+            // Valor Ganho Real (BullEx) e Lucro Líquido
+            const grossVal = (item.profit_gross !== undefined) ? item.profit_gross : item.profit;
+            const netVal = (item.profit_net !== undefined) ? item.profit_net : item.profit;
+            
+            let displayPill = '';
+            if (item.result.toLowerCase() === 'win') {
+              const grossSign = grossVal >= 0 ? '+' : '-';
+              const grossFmt = `${grossSign}${currSym} ${Math.abs(grossVal).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+              if (item.direction.includes('G') && Math.abs(grossVal - netVal) > 0.01) {
+                const netSign = netVal >= 0 ? '+' : '-';
+                const netFmt = `${netSign}${currSym} ${Math.abs(netVal).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                displayPill = `${item.result} (${grossFmt} Real | ${netFmt} Líq)`;
+              } else {
+                displayPill = `${item.result} (${grossFmt})`;
+              }
+            } else {
+              const sign = item.profit >= 0 ? '+' : '-';
+              const profitFmt = `${sign}${currSym} ${Math.abs(item.profit).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+              displayPill = `${item.result} (${profitFmt})`;
+            }
 
             out += `
               <div class="hist-trade-item-wrap">
@@ -3335,7 +3366,7 @@
                   </div>
                   <div class="hist-right">
                     <span class="hist-value">${currSym} ${item.stake.toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                    <span class="hist-result-pill ${resClass}">${item.result} (${profitFmt})</span>
+                    <span class="hist-result-pill ${resClass}">${displayPill}</span>
                   </div>
                 </div>
                 ${item.breakdown ? `<div class="hist-breakdown-badge" style="font-size:11px; color:#38bdf8; font-weight:700; margin-top:2px;">${item.breakdown}</div>` : ''}
