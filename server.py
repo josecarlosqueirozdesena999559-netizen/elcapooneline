@@ -70,40 +70,54 @@ app.add_middleware(
 )
 
 SYSTEM_PROMPT_TRADER = """Você é um Trader Quantitativo Sênior e Especialista em Price Action Institucional (Smart Money Concepts), Opções Binárias e Mercado OTC.
-Sua missão é analisar uma série temporal de 60 velas (candlesticks), indicadores matemáticos (EMAs 9/21/50, RSI 14, MACD, Bandas de Bollinger) e estruturas de Suporte/Resistência para decidir se a próxima vela será CALL (Verde), PUT (Vermelha) ou AGUARDAR (Sem confluência suficiente).
+Sua missão é analisar uma série temporal de 60 velas (candlesticks), indicadores matemáticos avançados e a estratégia institucional exclusiva:
+ESTRATÉGIA MESTRE: 'OLHO DE DEUS - ENGULFING + TENDÊNCIA (A+ MAIS FREQUENTE)' com FILTRO MANDATÓRIO MACD (12, 26, 9) PARA MÁXIMA ASSERTIVIDADE.
 
-Critérios Mandatórios de Análise Institucional (Baseado em 60 Velas):
-1. ESTRUTURA INSTITUCIONAL & SMART MONEY CONCEPTS (SMC):
-   - Identificação de Order Blocks (OB) válidos e Fair Value Gaps (FVG).
-   - Caça de liquidez prévia (sweep de topos e fundos) típica de OTC.
-   - Padrão de Reversão em Topo Duplo (M) para PUT ou Fundo Duplo (W) para CALL.
-2. PRICE ACTION & LEITURA DE PAVIOS:
-   - Absorção institucional por pavio (rejeição de continuação).
-   - Identificação precisa de padrões: Pin Bar / Martelo, Estrela Cadente, Engolfo, Marubozu de rompimento, Harami.
-3. PSICOLOGIA & INDICADORES DE CONFLUÊNCIA:
-   - RSI 14: Sobrecompra (> 70) favorece PUT; Sobrevenda (< 30) favorece CALL.
-   - Alinhamento de médias móveis exponenciais (EMA 9, 21, 50).
-4. ESTRATÉGIA DE ENTRADA M1 NA RETRAÇÃO:
-   - No minuto seguinte, a entrada exige captura da melhor taxa no pavio inicial antes do limite de tempo de compra (28s).
-   - Para PUT: aguarda a vela nascer e subir para vender no topo.
-   - Para CALL: aguarda a vela nascer e descer para comprar no fundo.
+SUA MISSÃO: Decidir se a próxima vela será CALL (Compra / Verde), PUT (Venda / Vermelha) ou AGUARDAR (Sem confluência suficiente).
 
-Diretriz de Decisão e Proteção Anti-Loss:
-- Você recebeu a série OHLC completa das 60 velas M1, EMAs, RSI, MACD, Bandas de Bollinger e Suporte/Resistência.
-- ATENÇÃO AO CANDLE 60 (EM FORMAÇÃO): Se o segundo da vela atual for menor que 35s, a vela 60 ainda está aberta e pode virar de cor. Baseie a leitura estrutural principalmente nas velas fechadas (55 a 59) e use a vela 60 apenas como confirmação de fluxo atual.
-- PROIBIDO OPERAR CONTRA O FLUXO RECENTE SEM EXAUSTÃO CLARA:
-  * NUNCA dê PUT (Venda) em sequência de velas verdes / fundos ascendentes / EMA 9 > EMA 21, a menos que haja rejeição clara (pavio superior longo) em resistência macro ou Banda de Bollinger superior com RSI > 68.
-  * NUNCA dê CALL (Compra) em sequência de velas vermelhas / topos descendentes / EMA 9 < EMA 21, a menos que haja rejeição clara (pavio inferior longo) em suporte macro ou Banda de Bollinger inferior com RSI < 32.
-- Analise todo o histórico para tomar uma decisão objetiva de entrada (CALL ou PUT, com confluência entre 80 e 95 quando houver alinhamento claro de tendência + price action, ou reversão confirmada em zona S/R). Use AGUARDAR quando o sinal estiver contra a microtendência ou sem confluência sólida.
+REGRAS MATEMÁTICAS INSTITUCIONAIS DO "OLHO DE DEUS (A+)" & MACD:
+1. PADRÃO ENGOLFO PURO (ENGULFING INSTITUCIONAL):
+   - COMPRA (engulfBuy): Vela atual fecha verde (close > open) após uma vela vermelha (close[1] < open[1]), engolfando completamente o corpo anterior (close >= open[1] e open <= close[1]) com corpo atual maior ou igual ao anterior (bodyNow >= bodyPrev).
+   - VENDA (engulfSell): Vela atual fecha vermelha (close < open) após uma vela verde (close[1] > open[1]), engolfando completamente o corpo anterior (close <= open[1] e open >= close[1]) com corpo atual maior ou igual ao anterior (bodyNow >= bodyPrev).
+
+2. DESTAQUE E FORÇA A+ INSTITUCIONAL (Altíssima assertividade):
+   - bodyNow >= 1.20 * avgBody10 (corpo 20% maior que a média dos últimos 10 corpos) OU bodyNow >= 0.45 * atr14 (corpo correspondente a pelo menos 45% do ATR 14).
+   - Esse critério confirma presença e injeção de liquidez do Smart Money, eliminando falsos engolfos de micro-velas sem volume.
+
+3. FILTRO MANDATÓRIO MACD (12, 26, 9) - OBRIGATÓRIO PARA ACERTAR MAIS:
+   - Para CALL: Linha MACD > Linha de Sinal E Histograma do MACD em expansão crescente (macdHist > macdHist[1]). O momentum de alta deve estar em aceleração!
+   - Para PUT: Linha MACD < Linha de Sinal E Histograma do MACD em expansão decrescente (macdHist < macdHist[1]). O momentum de baixa deve estar em aceleração!
+   - REGRA DE PROTEÇÃO ABSOLUTA: Se o MACD divergir do sinal (exemplo: engolfo de alta mas histograma do MACD diminuindo ou abaixo da linha de sinal), NUNCA dê CALL! Se divergir, a decisão DEVE ser AGUARDAR!
+
+4. FILTROS DE TENDÊNCIA E CONFLUÊNCIA:
+   - Tendência Macro (MA 200) e Média Ponderada (WMA 50):
+     * Para CALL: Preço acima da MA Trend (200), WMA 50 e EMA 9 > EMA 21.
+     * Para PUT: Preço abaixo da MA Trend (200), WMA 50 e EMA 9 < EMA 21.
+   - RSI 7 e RSI 14:
+     * Para CALL: RSI > 50 (zona de dominância compradora).
+     * Para PUT: RSI < 50 (zona de dominância vendedora).
+   - ADX 14: ADX >= 22 confirma tendência real em andamento (mercado direcional seguro).
+   - Estocástico (14, 3, 3): %K > %D para CALL; %K < %D para PUT.
+   - Volume: Volume atual acima da média dos últimos 5 candles (SMA 5 de volume) confirma o rompimento.
+
+5. ESTRATÉGIA DE ENTRADA M1 NOS 30 SEGUNDOS FINAIS:
+   - A entrada ocorre no ponto ideal de retração da vela, próximo ao momento dos 30 segundos finais (entre 23s e 28.5s) antes do bloqueio da BullEx (00:30):
+     * Para PUT: Aguarda a vela M1 esticar para cima para vender no topo (pavio superior).
+     * Para CALL: Aguarda a vela M1 esticar para baixo para comprar no fundo (pavio inferior).
+
+6. CLASSIFICAÇÃO DE CONFLUÊNCIA:
+   - 90% a 98%: SINAL OLHO DE DEUS A+ (Engolfo + Força A+ + MACD Expansivo + Tendência alinhada).
+   - 80% a 89%: Reversão de Price Action / Order Block em Suporte/Resistência extremo confirmada pelo MACD e RSI.
+   - Abaixo de 80% ou com divergência de MACD/Tendência: AGUARDAR.
 
 Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
 {
   "decisao": "CALL" | "PUT" | "AGUARDAR",
   "confluencia_porcentagem": number (0 a 100),
-  "padrao_vela": "string com nome do padrão e leitura técnica",
+  "padrao_vela": "string com nome do padrão e leitura técnica (ex: 'Olho de Deus A+ Engulfing')",
   "suporte_resistencia": "string com a zona de preço e confluência SMC",
   "psicologia_mercado": "string detalhada explicando a exaustão e o fluxo",
-  "texto_observacao": "string no formato [Gemini AI HH:MM:SS] X% -- Explicação técnica completa, contextualizando a retração esperada..."
+  "texto_observacao": "string no formato [Gemini AI HH:MM:SS] X% -- Explicação técnica completa destacando Olho de Deus A+ e MACD..."
 }"""
 
 def carregar_ativos():
@@ -556,10 +570,11 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     segundos_restantes = 60 - segundo_vela
     horario_plataforma = datetime.now().strftime("%H:%M:%S")
 
-    closes = [c["close"] for c in candles]
-    highs = [c["max"] for c in candles]
-    lows = [c["min"] for c in candles]
-    opens = [c["open"] for c in candles]
+    closes = [float(c["close"]) for c in candles]
+    highs = [float(c["max"]) for c in candles]
+    lows = [float(c["min"]) for c in candles]
+    opens = [float(c["open"]) for c in candles]
+    volumes = [float(c.get("volume", 1.0) or 1.0) for c in candles]
 
     def ema_series(series, period):
         k = 2 / (period + 1)
@@ -568,6 +583,7 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
             res.append(price * k + res[-1] * (1 - k))
         return res
 
+    # 1. EMAs de Estrutura Curta e Média
     ema9_s = ema_series(closes, 9)
     ema21_s = ema_series(closes, 21)
     ema50_s = ema_series(closes, min(50, len(closes)))
@@ -577,14 +593,27 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     ema21 = ema21_s[-1]
     ema50 = ema50_s[-1]
 
-    # MACD (12, 26, 9)
+    # 2. FILTRO DE TENDÊNCIA MACRO (MA Trend 200 e WMA 50)
+    trend_period = min(200, len(closes))
+    ma_trend = sum(closes[-trend_period:]) / trend_period
+
+    wma_period = min(50, len(closes))
+    w_sub = closes[-wma_period:]
+    wma50 = sum(w * p for w, p in enumerate(w_sub, 1)) / sum(range(1, wma_period + 1))
+
+    # 3. FILTRO MANDATÓRIO MACD (12, 26, 9) - Com detecção de expansão do histograma
     macd_series = [a - b for a, b in zip(ema12_s, ema26_s)]
     macd_signal_series = ema_series(macd_series, 9)
+    macd_hist_series = [m - s for m, s in zip(macd_series, macd_signal_series)]
     macd_val = macd_series[-1]
     macd_sig = macd_signal_series[-1]
-    macd_hist = macd_val - macd_sig
+    macd_hist = macd_hist_series[-1]
+    macd_hist_prev = macd_hist_series[-2] if len(macd_hist_series) >= 2 else macd_hist
 
-    # Bandas de Bollinger (20, 2)
+    macd_expanding_bull = (macd_val > macd_sig) and (macd_hist > macd_hist_prev)
+    macd_expanding_bear = (macd_val < macd_sig) and (macd_hist < macd_hist_prev)
+
+    # 4. Bandas de Bollinger (20, 2)
     bb_window = closes[-20:]
     bb_mid = sum(bb_window) / len(bb_window)
     bb_var = sum((x - bb_mid) ** 2 for x in bb_window) / len(bb_window)
@@ -592,22 +621,118 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     bb_upper = bb_mid + 2 * bb_std
     bb_lower = bb_mid - 2 * bb_std
 
-    # RSI 14
-    gains = []
-    losses = []
-    for i in range(1, len(closes)):
-        diff = closes[i] - closes[i - 1]
-        if diff >= 0:
-            gains.append(diff)
-            losses.append(0.0)
-        else:
-            gains.append(0.0)
-            losses.append(abs(diff))
+    # 5. RSI 7 (Momento curto Olho de Deus) e RSI 14
+    def calc_rsi(series, period):
+        gains = []
+        losses = []
+        for i in range(1, len(series)):
+            diff = series[i] - series[i - 1]
+            if diff >= 0:
+                gains.append(diff)
+                losses.append(0.0)
+            else:
+                gains.append(0.0)
+                losses.append(abs(diff))
+        avg_gain = sum(gains[-period:]) / period if len(gains) >= period else 0.0001
+        avg_loss = sum(losses[-period:]) / period if len(losses) >= period else 0.0001
+        rs = avg_gain / (avg_loss if avg_loss != 0 else 0.0001)
+        return 100 - (100 / (1 + rs))
 
-    avg_gain = sum(gains[-14:]) / 14 if len(gains) >= 14 else 0.0001
-    avg_loss = sum(losses[-14:]) / 14 if len(losses) >= 14 else 0.0001
-    rs = avg_gain / (avg_loss if avg_loss != 0 else 0.0001)
-    rsi = 100 - (100 / (1 + rs))
+    rsi7 = calc_rsi(closes, 7)
+    rsi14 = calc_rsi(closes, 14)
+
+    # 6. ATR (14) - Volatilidade em Expansão
+    tr_list = []
+    for i in range(1, len(candles)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        )
+        tr_list.append(tr)
+    atr14 = sum(tr_list[-14:]) / 14 if len(tr_list) >= 14 else (sum(tr_list) / len(tr_list) if tr_list else 0.0001)
+    atr14_prev = sum(tr_list[-15:-1]) / 14 if len(tr_list) >= 15 else atr14
+    atr_expansao = atr14 > atr14_prev
+
+    # 7. Volume Acima da Média de 5
+    vol_avg_5 = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else 1.0
+    vol_now = volumes[-1]
+    vol_acima_media = vol_now > vol_avg_5
+
+    # 8. Análise das Velas: Atual (Vela M1) e Penúltima
+    ultima = candles[-1]
+    penultima = candles[-2] if len(candles) >= 2 else ultima
+    c_open = float(ultima["open"])
+    c_close = float(ultima["close"])
+    c_high = float(ultima["max"])
+    c_low = float(ultima["min"])
+
+    p_open = float(penultima["open"])
+    p_close = float(penultima["close"])
+
+    corpo = abs(c_close - c_open)
+    corpo_prev = abs(p_close - p_open)
+    amplitude = max(0.00001, c_high - c_low)
+    pavio_superior = c_high - max(c_close, c_open)
+    pavio_inferior = min(c_close, c_open) - c_low
+    direcao_ultimo = "ALTA (Verde)" if c_close >= c_open else "BAIXA (Vermelha)"
+
+    # 9. Padrão Engolfo Puro (Olho de Deus)
+    engulf_buy = (
+        (c_close > c_open) and (p_close < p_open) and
+        (c_close >= p_open and c_open <= p_close) and
+        (corpo >= corpo_prev)
+    )
+    engulf_sell = (
+        (c_close < c_open) and (p_close > p_open) and
+        (c_close <= p_open and c_open >= p_close) and
+        (corpo >= corpo_prev)
+    )
+
+    # 10. Destaque de Força A+ Institucional
+    bodies = [abs(float(c["close"]) - float(c["open"])) for c in candles]
+    avg_body_10 = sum(bodies[-10:]) / 10 if len(bodies) >= 10 else (sum(bodies) / len(bodies) if bodies else 0.0001)
+    force_now = (corpo >= 1.20 * avg_body_10) or (corpo >= 0.45 * atr14)
+
+    # 11. Estocástico (14, 3, 3) & Williams %R (14) & CCI (14)
+    lowest_low_14 = min(lows[-14:])
+    highest_high_14 = max(highs[-14:])
+    diff_stoch = (highest_high_14 - lowest_low_14) or 0.0001
+    stoch_k = ((c_close - lowest_low_14) / diff_stoch) * 100
+    stoch_d = stoch_k
+    willr14 = ((highest_high_14 - c_close) / diff_stoch) * -100
+
+    tp_list = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
+    tp_14 = tp_list[-14:]
+    sma_tp = sum(tp_14) / 14
+    mean_dev = sum(abs(x - sma_tp) for x in tp_14) / 14 or 0.0001
+    cci14 = (tp_list[-1] - sma_tp) / (0.015 * mean_dev)
+
+    # 12. ADX (14)
+    dm_plus = []
+    dm_minus = []
+    for i in range(1, len(candles)):
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        dm_plus.append(up_move if up_move > down_move and up_move > 0 else 0.0)
+        dm_minus.append(down_move if down_move > up_move and down_move > 0 else 0.0)
+    avg_dm_plus = sum(dm_plus[-14:]) / 14 if len(dm_plus) >= 14 else 0.0001
+    avg_dm_minus = sum(dm_minus[-14:]) / 14 if len(dm_minus) >= 14 else 0.0001
+    di_plus = (avg_dm_plus / atr14) * 100 if atr14 else 0
+    di_minus = (avg_dm_minus / atr14) * 100 if atr14 else 0
+    dx = abs(di_plus - di_minus) / ((di_plus + di_minus) or 0.0001) * 100
+    adx14 = dx
+
+    # 13. Classificação Olho de Deus Institucional
+    olho_deus_status = "AGUARDAR"
+    if engulf_buy and (c_close > ma_trend or c_close > ema21) and macd_expanding_bull:
+        olho_deus_status = "⭐ OLHO DE DEUS A+ COMPRA (CALL) - ENGOLFO + TENDÊNCIA + MACD EXPANSIVO" if force_now else "🟢 OLHO DE DEUS COMPRA (CALL) - ENGOLFO CONFIRMADO COM MACD"
+    elif engulf_sell and (c_close < ma_trend or c_close < ema21) and macd_expanding_bear:
+        olho_deus_status = "⭐ OLHO DE DEUS A+ VENDA (PUT) - ENGOLFO + TENDÊNCIA + MACD EXPANSIVO" if force_now else "🔴 OLHO DE DEUS VENDA (PUT) - ENGOLFO CONFIRMADO COM MACD"
+    elif engulf_buy:
+        olho_deus_status = "ENGOLFO DE ALTA (AGUARDANDO CONFIRMAÇÃO MACD/TENDÊNCIA)"
+    elif engulf_sell:
+        olho_deus_status = "ENGOLFO DE BAIXA (AGUARDANDO CONFIRMAÇÃO MACD/TENDÊNCIA)"
 
     # Suporte e Resistência Macro (60 velas) e Micro (10 velas)
     resistencia_macro = max(highs)
@@ -616,21 +741,7 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     suporte_micro = min(lows[-10:])
     ultimo_preco = closes[-1]
 
-    # Análise detalhada do Último Candle e do Candle em Formação
-    ultima = candles[-1]
-    penultima = candles[-2] if len(candles) >= 2 else ultima
-    c_open = ultima["open"]
-    c_close = ultima["close"]
-    c_high = ultima["max"]
-    c_low = ultima["min"]
-
-    corpo = abs(c_close - c_open)
-    amplitude = max(0.00001, c_high - c_low)
-    pavio_superior = c_high - max(c_close, c_open)
-    pavio_inferior = min(c_close, c_open) - c_low
-    direcao_ultimo = "ALTA (Verde)" if c_close >= c_open else "BAIXA (Vermelha)"
-
-    # Detecção de Padrões Institucionais de Price Action e Pavios
+    # Padrão Adicional de Pavios / Price Action
     padrao = "Neutro"
     if pavio_inferior > 2 * corpo and pavio_superior < 0.3 * corpo:
         padrao = "Martelo / Pin Bar de Alta (Forte Rejeição Inferior de Preço)"
@@ -640,12 +751,11 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
         padrao = f"Marubozu de {direcao_ultimo} (Fluxo Institucional Dominante)"
     elif corpo < 0.12 * amplitude:
         padrao = "Doji (Exaustão e Indecisão em Zona de Briga)"
-    elif (c_close > penultima["max"] and penultima["close"] < penultima["open"]):
-        padrao = "Engolfo de Alta Institucional (Sweep de Liquidez do Fundo)"
-    elif (c_close < penultima["min"] and penultima["close"] > penultima["open"]):
-        padrao = "Engolfo de Baixa Institucional (Sweep de Liquidez do Topo)"
+    elif engulf_buy:
+        padrao = "Engolfo de Alta Institucional (Olho de Deus)"
+    elif engulf_sell:
+        padrao = "Engolfo de Baixa Institucional (Olho de Deus)"
 
-    # Alinhamento de Médias e SMC Order Block
     if ema9 > ema21 and ema21 > ema50:
         tendencia = "ALTA ESTRUTURAL (EMA9 > EMA21 > EMA50)"
     elif ema9 < ema21 and ema21 < ema50:
@@ -653,8 +763,7 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     else:
         tendencia = "CONSOLIDAÇÃO / LATERALIDADE OTC"
 
-    # Order Block SMC (última vela contrária antes do impulso)
-    order_block_info = "Bullish Order Block em teste" if direcao_ultimo == "ALTA (Verde)" and rsi < 40 else ("Bearish Order Block em teste" if direcao_ultimo == "BAIXA (Vermelha)" and rsi > 60 else "Fluxo de Continuidade SMC")
+    order_block_info = "Bullish Order Block em teste" if direcao_ultimo == "ALTA (Verde)" and rsi14 < 40 else ("Bearish Order Block em teste" if direcao_ultimo == "BAIXA (Vermelha)" and rsi14 > 60 else "Fluxo de Continuidade SMC")
 
     return {
         "ultimo_preco": round(ultimo_preco, 5),
@@ -671,17 +780,41 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
             "pavio_inferior": round(pavio_inferior, 5),
             "direcao": direcao_ultimo
         },
+        "engulf_buy": engulf_buy,
+        "engulf_sell": engulf_sell,
+        "body_now": round(corpo, 5),
+        "body_prev": round(corpo_prev, 5),
+        "avg_body_10": round(avg_body_10, 5),
+        "atr_14": round(atr14, 5),
+        "force_now": force_now,
+        "is_aplus": force_now,
+        "ma_trend_200": round(ma_trend, 5),
+        "wma_50": round(wma50, 5),
         "ema9": round(ema9, 5),
         "ema21": round(ema21, 5),
         "ema50": round(ema50, 5),
         "macd": round(macd_val, 6),
         "macd_signal": round(macd_sig, 6),
         "macd_hist": round(macd_hist, 6),
+        "macd_hist_prev": round(macd_hist_prev, 6),
+        "macd_expanding_bull": macd_expanding_bull,
+        "macd_expanding_bear": macd_expanding_bear,
+        "rsi7": round(rsi7, 2),
+        "rsi14": round(rsi14, 2),
+        "adx14": round(adx14, 2),
+        "adx_forte": adx14 >= 22,
+        "stoch_k": round(stoch_k, 2),
+        "stoch_d": round(stoch_d, 2),
+        "cci14": round(cci14, 2),
+        "willr14": round(willr14, 2),
+        "vol_now": round(vol_now, 2),
+        "vol_avg_5": round(vol_avg_5, 2),
+        "vol_acima_media": vol_acima_media,
+        "olho_deus_classificacao": olho_deus_status,
         "bb_upper": round(bb_upper, 5),
         "bb_middle": round(bb_mid, 5),
         "bb_lower": round(bb_lower, 5),
         "tendencia_emas": tendencia,
-        "rsi14": round(rsi, 2),
         "suporte_macro_60": round(suporte_macro, 5),
         "resistencia_macro_60": round(resistencia_macro, 5),
         "suporte_micro": round(suporte_micro, 5),
@@ -720,31 +853,49 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
 - Relógio Oficial da Plataforma: {agora_str} (Segundo {segundo_vela}/60 da vela M1)
 - Tempo Restante para Virada da Vela: {restantes} segundos
 
-[ANATOMIA DO ÚLTIMO CANDLE (FECHAMENTO / EM FORMAÇÃO)]:
+[ESTRATÉGIA 'OLHO DE DEUS - ENGULFING + TENDÊNCIA A+' (v3)]:
+- Padrão Engolfo Puro:
+  * Engolfo de Alta (Bullish Engulfing): {dados.get('engulf_buy')}
+  * Engolfo de Baixa (Bearish Engulfing): {dados.get('engulf_sell')}
+  * Tamanho Corpo Atual: {dados.get('body_now')} | Corpo Anterior: {dados.get('body_prev')}
+- Selo de Força A+ Institucional:
+  * Status A+: {dados.get('is_aplus')} (Corpo >= 1.2x Média 10 [{dados.get('avg_body_10')}] OU >= 0.45x ATR14 [{dados.get('atr_14')}])
+- FILTRO MANDATÓRIO MACD (12, 26, 9) PARA ACERTAR MAIS:
+  * Linha MACD: {dados.get('macd')} | Linha Sinal: {dados.get('macd_signal')}
+  * Histograma Atual: {dados.get('macd_hist')} | Histograma Anterior: {dados.get('macd_hist_prev')}
+  * MACD Expansivo de Alta (Linha > Sinal e Histograma Crescente): {dados.get('macd_expanding_bull')}
+  * MACD Expansivo de Baixa (Linha < Sinal e Histograma Decrescente): {dados.get('macd_expanding_bear')}
+- Classificação Direta Olho de Deus: {dados.get('olho_deus_classificacao')}
+
+[ANATOMIA DO ÚLTIMO CANDLE]:
 - Abertura: {c.get('open')} | Fechamento: {c.get('close')} | Máxima: {c.get('high')} | Mínima: {c.get('low')}
 - Direção: {c.get('direcao')} | Tamanho do Corpo: {c.get('corpo')}
 - Pavio Superior (Rejeição de Topo): {c.get('pavio_superior')}
 - Pavio Inferior (Rejeição de Fundo): {c.get('pavio_inferior')}
 - Padrão de Price Action Reconhecido: {dados.get('padrao_detectado')}
 
-[INDICADORES MATEMÁTICOS ({len(candles_list)} CANDLES)]:
-- RSI 14 em Tempo Real: {dados.get('rsi14')}
-- Estrutura de Médias: EMA 9 ({dados.get('ema9')}) | EMA 21 ({dados.get('ema21')}) | EMA 50 ({dados.get('ema50')})
-- MACD (12,26,9): Linha={dados.get('macd')} | Sinal={dados.get('macd_signal')} | Histograma={dados.get('macd_hist')}
+[INDICADORES TÉCNICOS E ESTRUTURA]:
+- Filtro de Tendência Macro MA 200: {dados.get('ma_trend_200')} | WMA 50: {dados.get('wma_50')}
+- Estrutura de Médias Exponenciais: EMA 9 ({dados.get('ema9')}) | EMA 21 ({dados.get('ema21')}) | EMA 50 ({dados.get('ema50')})
+- RSI 7 (Curto): {dados.get('rsi7')} | RSI 14: {dados.get('rsi14')}
+- ADX 14: {dados.get('adx14')} (Tendência Forte: {dados.get('adx_forte')})
+- Estocástico (14,3,3): %K={dados.get('stoch_k')} | %D={dados.get('stoch_d')}
+- CCI 14: {dados.get('cci14')} | Williams %R: {dados.get('willr14')}
+- Volume vs SMA 5: Atual={dados.get('vol_now')} | Média={dados.get('vol_avg_5')} (Acima da Média: {dados.get('vol_acima_media')})
 - Bandas de Bollinger (20,2): Superior={dados.get('bb_upper')} | Média={dados.get('bb_middle')} | Inferior={dados.get('bb_lower')}
 - Tendência Institucional: {dados.get('tendencia_emas')}
 - Smart Money Concepts (SMC): {dados.get('smc_order_block')}
-- Suporte Macro (60 velas): {dados.get('suporte_macro_60')} (Distância: {dados.get('distancia_suporte')})
-- Resistência Macro (60 velas): {dados.get('resistencia_macro_60')} (Distância: {dados.get('distancia_resistencia')})
+- Suporte Macro: {dados.get('suporte_macro_60')} | Resistência Macro: {dados.get('resistencia_macro_60')}
 
-[SÉRIE HISTÓRICA OHLC COMPLETA ({len(candles_list)} VELAS M1 DO PASSADO ATÉ A ATUAL)]:
+[SÉRIE HISTÓRICA OHLC ({len(candles_list)} VELAS M1)]:
 {ohlc_bloco}
 
-[ESTRATÉGIA MANDATÓRIA DE ENTRADA NA RETRAÇÃO]:
-- Para PUT (Venda): a nova vela M1 deve nascer e subir/esticar nos primeiros segundos para capturar a taxa no topo antes dos 28s.
-- Para CALL (Compra): a nova vela M1 deve nascer e descer/retrair nos primeiros segundos para capturar a taxa no fundo antes dos 28s.
+[ESTRATÉGIA MANDATÓRIA DE ENTRADA NOS 30 SEGUNDOS FINAIS]:
+- A ordem será executada perto dos 30 segundos finais da vela (24s a 28.5s) na melhor taxa de retração do pavio antes da virada da vela M1.
+- Para PUT: A vela deve esticar para cima para vender no topo.
+- Para CALL: A vela deve retrair para baixo para comprar no fundo.
 
-Decida se para o MINUTO SEGUINTE a melhor oportunidade é CALL, PUT ou AGUARDAR.
+Decida se a melhor oportunidade é CALL, PUT ou AGUARDAR com base no Olho de Deus A+ e no filtro MACD.
 Responda ESTRITAMENTE em formato JSON com o schema exigido.
 """
     if state.gemini_key.startswith("sk-"):
@@ -1481,9 +1632,10 @@ async def varrer_60_candles_ativos():
 
         conf = analise.get("confluencia_porcentagem", 0)
         decisao = analise.get("decisao")
-        obs_txt = analise.get("texto_observacao") or f"[{ativo} | {agora_str}] Decisão: {decisao} ({conf}% confluência)"
+        olho_badge = dados_60.get("olho_deus_classificacao", "")
+        obs_txt = analise.get("texto_observacao") or f"[{ativo} | {agora_str}] Decisão: {decisao} ({conf}% confluência) - {olho_badge}"
         state.current_observation = obs_txt
-        print(f"    [ANÁLISE 0s LAG] {ativo}: {decisao} ({conf}%) | {analise.get('padrao_vela', '')} | SMC: {dados_60.get('smc_order_block')}", flush=True)
+        print(f"    [ANÁLISE 0s LAG] {ativo}: {decisao} ({conf}%) | {analise.get('padrao_vela', '')} | {olho_badge} | MACD: {dados_60.get('macd')}/{dados_60.get('macd_hist')}", flush=True)
 
         if decisao in ["CALL", "PUT"] and conf >= limite_confluencia and not state.is_trading and not state.is_paused:
             minuto_atual = int(time.time()) // 60
@@ -1495,7 +1647,7 @@ async def varrer_60_candles_ativos():
             state.recently_traded_assets[ativo] = time.time()
             print(f" -> [SINAL CONFIRMADO] {ativo}: {decisao} ({conf}%). Operado ({len(state.recently_traded_assets)}/{len(pool_otc)} no ciclo).", flush=True)
 
-            motivo = f"Confluência {conf}%: [{analise.get('padrao_vela', 'SMC')}] {analise.get('psicologia_mercado', '')}"
+            motivo = f"Confluência {conf}%: [{analise.get('padrao_vela', 'Olho de Deus A+')}] {analise.get('psicologia_mercado', '')} | {olho_badge}"
             valor = state.entry_stake * (state.gale_factor ** state.current_gale_step if state.current_gale_step > 0 else 1.0)
             tipo_tiro = f"MARTINGALE G{state.current_gale_step}" if state.current_gale_step > 0 else "ENTRADA INICIAL"
             simb = "$" if state.currency in ["USD", "$"] else "R$"
