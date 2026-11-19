@@ -69,56 +69,54 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SYSTEM_PROMPT_TRADER = """Você é um Trader Quantitativo Sênior e Especialista em Price Action Institucional (Smart Money Concepts), Opções Binárias e Mercado OTC.
-Sua missão é analisar uma série temporal de 60 velas (candlesticks), indicadores matemáticos avançados e TODAS as estratégias institucionais de alta assertividade.
+SYSTEM_PROMPT_TRADER = """Você é um Trader Quantitativo Sênior e Especialista em Price Action Institucional (Smart Money Concepts), Opções Binárias M1 e Mercado OTC.
+Sua missão é analisar uma série temporal de 60 velas, indicadores matemáticos avançados, FRACTAIS DE WILLIAMS e estratégias institucionais de alta assertividade.
 
-REGRA MANDATÓRIA: O 'OLHO DE DEUS' É APENAS MAIS UM PROMPT / FATOR DE CONFLUÊNCIA EXTRA. NUNCA DEVE TRAVAR OU ATRASAR OPERAÇÕES!
-Não espere pelo Olho de Deus para emitir um sinal. Se houver qualquer confluência institucional válida (SMC Order Blocks, Pin Bar / Martelo, Reversão em Suporte/Resistência, Bollinger + RSI, Rompimento Marubozu com volume, Médias Móveis ou Momentum MACD), emita CALL ou PUT com confluência >= 75%!
+REGRAS DE PROTEÇÃO ANTI-LOSS (CRUCIAIS PARA MERCADO OTC):
+1. RESPEITE A TENDÊNCIA ESTRUTURAL (NUNCA VÁ CONTRA O FLUXO OTC SEM REVERSÃO EXTREMA):
+   - Se a tendência for de ALTA (EMA9 > EMA21 > EMA50) e ADX >= 20: DÊ PRIORIDADE TOTAL PARA CALL! Opere pullbacks nas médias, fundos fractais ou rompimento de topos fractais. NÃO venda PUT contra tendência de alta a menos que haja rejeição extrema em topo macro com RSI > 75 e divergência MACD.
+   - Se a tendência for de BAIXA (EMA9 < EMA21 < EMA50) and ADX >= 20: DÊ PRIORIDADE TOTAL PARA PUT! Opere pullbacks nas médias, topos fractais ou rompimento de fundos fractais. NÃO compre CALL contra tendência de baixa a menos que haja rejeição extrema em fundo macro com RSI < 25 e divergência MACD.
+2. O 'OLHO DE DEUS' É APENAS UM PROMPT EXTRA: NÃO trave o robô esperando por ele. Se houver Fractal + Price Action ou Rompimento + MACD, emita CALL ou PUT com confluência >= 75%!
+3. VELAS DE INDECISÃO / DOJI: Se o corpo da vela for insignificante (baixo volume), retorne AGUARDAR.
 
-GATILHOS VÁLIDOS DE ENTRADA (USAR TODOS OS GATILHOS):
-1. SMART MONEY CONCEPTS (SMC) & ZONAS DE LIQUIDEZ (GATILHO FORTE >= 75% A 90%):
-   - Bullish Order Block (OB): Rejeição e absorção compradora na zona de suporte institucional -> CALL.
-   - Bearish Order Block (OB): Rejeição e absorção vendedora na zona de resistência institucional -> PUT.
-   - Caça de Liquidez (Liquidity Sweep): Falso rompimento de máxima/mínima seguido de forte rejeição de pavio -> Reversão (CALL no fundo / PUT no topo).
+GATILHOS INSTITUCIONAIS DE ALTA ASSERTIVIDADE:
+1. FRACTAIS DE WILLIAMS (5 VELAS) - NÍVEIS DINÂMICOS DE EXAUSTÃO E SUPORTE:
+   - Rejeição em Fundo Fractal: O preço testou o suporte do Fundo Fractal anterior e retraiu deixando longo pavio inferior -> CALL (80% a 92%).
+   - Rejeição em Topo Fractal: O preço testou a resistência do Topo Fractal anterior e retraiu deixando longo pavio superior -> PUT (80% a 92%).
+   - Rompimento de Topo Fractal a favor da tendência de alta -> CALL (80% a 88%).
+   - Rompimento de Fundo Fractal a favor da tendência de baixa -> PUT (80% a 88%).
 
-2. PRICE ACTION INSTITUCIONAL & REJEIÇÃO DE PAVIOS (GATILHO FORTE >= 75% A 90%):
-   - Martelo / Pin Bar de Alta: Longo pavio inferior (mínimo 2x o corpo) rejeitando suporte ou fundo -> CALL.
-   - Estrela Cadente / Pin Bar de Baixa: Longo pavio superior (mínimo 2x o corpo) rejeitando resistência ou topo -> PUT.
-   - Padrão de Reversão em Topo Duplo (M) -> PUT.
-   - Padrão de Reversão em Fundo Duplo (W) -> CALL.
-   - Marubozu Institucional de Rompimento: Vela de corpo dominante (> 70% da amplitude) com volume acima da média (SMA 5) rompendo consolidação -> Seguir o fluxo (CALL se verde / PUT se vermelha).
+2. SMART MONEY CONCEPTS (SMC) & PRICE ACTION INSTITUCIONAL:
+   - Bullish Order Block (OB): Absorção compradora em zona de demanda -> CALL (80% a 90%).
+   - Bearish Order Block (OB): Absorção vendedora em zona de oferta -> PUT (80% a 90%).
+   - Martelo / Pin Bar de Alta em suporte ou fundo fractal -> CALL (80% a 92%).
+   - Estrela Cadente / Pin Bar de Baixa em resistência ou topo fractal -> PUT (80% a 92%).
+   - Rompimento Marubozu com Volume > SMA 5 na direção da tendência -> Seguir o fluxo (CALL verde / PUT vermelha) (80% a 88%).
 
-3. CONFLUÊNCIA COM BANDAS DE BOLLINGER, RSI E MÉDIAS (GATILHO FORTE >= 75% A 88%):
-   - Compra (CALL): Preço tocando ou furando a Banda de Bollinger inferior com pavio de retração + RSI sobrevendido (< 38) ou cruzando 50 para cima + Médias apontando alta.
-   - Venda (PUT): Preço tocando ou furando a Banda de Bollinger superior com pavio de retração + RSI sobrecomprado (> 62) ou cruzando 50 para baixo + Médias apontando baixa.
+3. CONFLUÊNCIA COM BANDAS DE BOLLINGER, RSI E MACD:
+   - Compra (CALL): Preço tocando Banda Inferior de Bollinger com retração + RSI sobrevendido (< 38) + MACD favorável.
+   - Venda (PUT): Preço tocando Banda Superior de Bollinger com retração + RSI sobrecomprado (> 62) + MACD favorável.
 
-4. ESTRATÉGIA OLHO DE DEUS A+ (ENGULFING - BÔNUS ADICIONAL DE FORÇA):
-   - Quando ocorrer Engolfo Puro institucional com selo A+ e médias/MACD alinhados, classifique com confluência máxima A+ (90% a 98%).
-   - Se NÃO ocorrer Engolfo, ISSO NÃO ANULA O SINAL! Use normalmente os outros gatilhos institucionais acima para emitir CALL ou PUT com 75% a 88%.
+4. OLHO DE DEUS A+ (ENGULFING):
+   - Quando ocorrer Engolfo Puro A+ alinhado à tendência e MACD, atribua confluência máxima A+ (90% a 98%).
 
 5. FILTRO DE MOMENTUM MACD (12, 26, 9):
-   - Para CALL: Linha MACD > Linha de Sinal E/OU Histograma crescente ou recuperando.
-   - Para PUT: Linha MACD < Linha de Sinal E/OU Histograma decrescente ou recuando.
-   - Apenas decida por AGUARDAR se o mercado estiver 100% lateral sem volume E sem nenhum padrão claro, ou com divergência grave.
+   - CALL: Linha MACD > Sinal E/OU Histograma crescendo.
+   - PUT: Linha MACD < Sinal E/OU Histograma decrescendo.
 
-6. ESTRATÉGIA DE ENTRADA M1 NOS 30 SEGUNDOS FINAIS:
-   - A ordem será executada no ponto ideal de retração próximo aos 30 segundos finais da vela (HORA DE COMPRA da BullEx):
-     * Para PUT: Vender no esticamento da retração para cima (no topo).
-     * Para CALL: Comprar no esticamento da retração para baixo (no fundo).
-
-7. ESCALA DE CONFLUÊNCIA:
-   - 90% a 98%: Sinal Olho de Deus A+ OU Rejeição Extrema em Suporte/Resistência com Order Block e MACD fortemente alinhado.
-   - 75% a 89%: Qualquer padrão de Price Action, Order Block SMC, Rompimento com Volume ou Reversão Bollinger + RSI com MACD favorável (mesmo SEM Olho de Deus).
-   - Abaixo de 75%: Mercado confuso / sem definição -> AGUARDAR.
+6. ESCALA DE CONFLUÊNCIA:
+   - 90% a 98%: Olho de Deus A+ OU Rejeição Extrema em Fractal/Order Block com MACD forte.
+   - 75% a 89%: Qualquer gatilho de Fractal, Price Action, Rompimento ou Bollinger com MACD alinhado.
+   - Abaixo de 75%: Mercado incerto ou contra a tendência -> AGUARDAR.
 
 Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
 {
   "decisao": "CALL" | "PUT" | "AGUARDAR",
   "confluencia_porcentagem": number (0 a 100),
-  "padrao_vela": "string com nome do padrão e leitura técnica (ex: 'Order Block SMC', 'Pin Bar de Rejeição', 'Rompimento com Volume', 'Olho de Deus A+')",
-  "suporte_resistencia": "string com a zona de preço e confluência SMC",
-  "psicologia_mercado": "string detalhada explicando a exaustão e o fluxo",
-  "texto_observacao": "string no formato [Gemini AI HH:MM:SS] X% -- Explicação técnica completa destacando o padrão identificado..."
+  "padrao_vela": "string com o padrão (ex: 'Rejeição em Fundo Fractal', 'Bullish Order Block SMC', 'Pin Bar de Alta', 'Olho de Deus A+')",
+  "suporte_resistencia": "string com os níveis de Fractal e suporte/resistência",
+  "psicologia_mercado": "string detalhada explicando o fluxo e por que o trade tem alta probabilidade",
+  "texto_observacao": "string no formato [Gemini AI HH:MM:SS] X% -- Explicação técnica completa destacando os Fractais e indicadores..."
 }"""
 
 def carregar_ativos():
@@ -748,6 +746,36 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     elif engulf_sell:
         olho_deus_status = "ENGOLFO DE BAIXA (AGUARDANDO CONFIRMAÇÃO MACD/TENDÊNCIA)"
 
+    # 14. FRACTAIS DE WILLIAMS (5 VELAS) - NÍVEIS DINÂMICOS INSTITUCIONAIS
+    fractais_topo = []
+    fractais_fundo = []
+    for i in range(2, len(candles) - 2):
+        h = highs[i]
+        l = lows[i]
+        if h > highs[i-1] and h > highs[i-2] and h > highs[i+1] and h > highs[i+2]:
+            fractais_topo.append(h)
+        if l < lows[i-1] and l < lows[i-2] and l < lows[i+1] and l < lows[i+2]:
+            fractais_fundo.append(l)
+
+    ultimo_fractal_topo = fractais_topo[-1] if fractais_topo else max(highs[-10:])
+    ultimo_fractal_fundo = fractais_fundo[-1] if fractais_fundo else min(lows[-10:])
+
+    # Rejeição e Rompimento de Fractal na Vela Atual
+    rejeicao_fractal_topo = (c_high >= ultimo_fractal_topo * 0.9998 and c_close < ultimo_fractal_topo and pavio_superior > corpo * 0.8)
+    rejeicao_fractal_fundo = (c_low <= ultimo_fractal_fundo * 1.0002 and c_close > ultimo_fractal_fundo and pavio_inferior > corpo * 0.8)
+    rompimento_fractal_alta = (c_close > ultimo_fractal_topo and p_close <= ultimo_fractal_topo)
+    rompimento_fractal_baixa = (c_close < ultimo_fractal_fundo and p_close >= ultimo_fractal_fundo)
+
+    fractal_status = "Neutro"
+    if rejeicao_fractal_fundo:
+        fractal_status = f"⭐ REJEIÇÃO EM FUNDO FRACTAL ({ultimo_fractal_fundo:.5f}) - Suporte Dinâmico Ativado (CALL)"
+    elif rejeicao_fractal_topo:
+        fractal_status = f"⭐ REJEIÇÃO EM TOPO FRACTAL ({ultimo_fractal_topo:.5f}) - Resistência Dinâmica Ativada (PUT)"
+    elif rompimento_fractal_alta:
+        fractal_status = f"🟢 ROMPIMENTO DE TOPO FRACTAL ({ultimo_fractal_topo:.5f}) - Fluxo Comprador (CALL)"
+    elif rompimento_fractal_baixa:
+        fractal_status = f"🔴 ROMPIMENTO DE FUNDO FRACTAL ({ultimo_fractal_fundo:.5f}) - Fluxo Vendedor (PUT)"
+
     # Suporte e Resistência Macro (60 velas) e Micro (10 velas)
     resistencia_macro = max(highs)
     suporte_macro = min(lows)
@@ -835,6 +863,13 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
         "resistencia_micro": round(resistencia_micro, 5),
         "padrao_detectado": padrao,
         "smc_order_block": order_block_info,
+        "ultimo_fractal_topo": round(ultimo_fractal_topo, 5),
+        "ultimo_fractal_fundo": round(ultimo_fractal_fundo, 5),
+        "fractal_status": fractal_status,
+        "rejeicao_fractal_topo": rejeicao_fractal_topo,
+        "rejeicao_fractal_fundo": rejeicao_fractal_fundo,
+        "rompimento_fractal_alta": rompimento_fractal_alta,
+        "rompimento_fractal_baixa": rompimento_fractal_baixa,
         "distancia_suporte": round(abs(ultimo_preco - suporte_micro), 5),
         "distancia_resistencia": round(abs(resistencia_micro - ultimo_preco), 5),
         "candles": candles[-60:],
@@ -846,7 +881,7 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
         state.gemini_status = "Desativado (GEMINI_API_KEY não configurada)"
         return None
 
-    candidate_models = ["gemini-3-flash-preview", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-lite-latest"]
+    candidate_models = ["gemini-2.5-flash", "gemini-3-flash-preview", "gemini-flash-lite-latest"]
     c = dados.get("candle_ultimo", {})
     agora_str = dados.get("relogio_horario", datetime.now().strftime("%H:%M:%S"))
     segundo_vela = dados.get("segundo_da_vela", 55)
@@ -887,6 +922,15 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
 - Pavio Superior (Rejeição de Topo): {c.get('pavio_superior')}
 - Pavio Inferior (Rejeição de Fundo): {c.get('pavio_inferior')}
 - Padrão de Price Action Reconhecido: {dados.get('padrao_detectado')}
+
+[FRACTAIS DE WILLIAMS & NÍVEIS DINÂMICOS]:
+- Topo Fractal Mais Recente (Resistência Dinâmica): {dados.get('ultimo_fractal_topo')}
+- Fundo Fractal Mais Recente (Suporte Dinâmico): {dados.get('ultimo_fractal_fundo')}
+- Status e Confluência de Fractais: {dados.get('fractal_status')}
+- Rejeição de Topo Fractal (Gatilho PUT): {dados.get('rejeicao_fractal_topo')}
+- Rejeição de Fundo Fractal (Gatilho CALL): {dados.get('rejeicao_fractal_fundo')}
+- Rompimento de Topo Fractal (Fluxo CALL): {dados.get('rompimento_fractal_alta')}
+- Rompimento de Fundo Fractal (Fluxo PUT): {dados.get('rompimento_fractal_baixa')}
 
 [INDICADORES TÉCNICOS E ESTRUTURA]:
 - Filtro de Tendência Macro MA 200: {dados.get('ma_trend_200')} | WMA 50: {dados.get('wma_50')}
@@ -991,7 +1035,7 @@ Responda ESTRITAMENTE em formato JSON com o schema exigido.
         }
     }
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
         for model in candidate_models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={state.gemini_key}"
             try:
@@ -1011,7 +1055,7 @@ Responda ESTRITAMENTE em formato JSON com o schema exigido.
                     print(f"[GEMINI ERR] {model} HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
             except Exception as ex:
                 state.gemini_status = f"Falha ({model}): {type(ex).__name__}"
-                print(f"[GEMINI EXC] {model}: {ex}", flush=True)
+                print(f"[GEMINI EXC] {model}: {type(ex).__name__} ({ex})", flush=True)
                 continue
     return None
 
@@ -1641,7 +1685,7 @@ async def varrer_60_candles_ativos():
 
         analise = None
         try:
-            gem_timeout = 90.0 if state.gemini_key.startswith("sk-") else 18.0
+            gem_timeout = 90.0 if state.gemini_key.startswith("sk-") else 24.0
             analise = await asyncio.wait_for(consultar_gemini(ativo, dados_60), timeout=gem_timeout)
         except Exception as ex:
             state.gemini_status = f"Atraso/Timeout: {type(ex).__name__}"
