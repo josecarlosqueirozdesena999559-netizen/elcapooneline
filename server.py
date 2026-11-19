@@ -13,6 +13,7 @@ import os
 import time
 import math
 import json
+import sqlite3
 import asyncio
 import logging
 from datetime import datetime
@@ -87,6 +88,14 @@ Critérios Mandatórios de Análise Institucional (Baseado em 60 Velas):
    - Para PUT: aguarda a vela nascer e subir para vender no topo.
    - Para CALL: aguarda a vela nascer e descer para comprar no fundo.
 
+Diretriz de Decisão e Proteção Anti-Loss:
+- Você recebeu a série OHLC completa das 60 velas M1, EMAs, RSI, MACD, Bandas de Bollinger e Suporte/Resistência.
+- ATENÇÃO AO CANDLE 60 (EM FORMAÇÃO): Se o segundo da vela atual for menor que 35s, a vela 60 ainda está aberta e pode virar de cor. Baseie a leitura estrutural principalmente nas velas fechadas (55 a 59) e use a vela 60 apenas como confirmação de fluxo atual.
+- PROIBIDO OPERAR CONTRA O FLUXO RECENTE SEM EXAUSTÃO CLARA:
+  * NUNCA dê PUT (Venda) em sequência de velas verdes / fundos ascendentes / EMA 9 > EMA 21, a menos que haja rejeição clara (pavio superior longo) em resistência macro ou Banda de Bollinger superior com RSI > 68.
+  * NUNCA dê CALL (Compra) em sequência de velas vermelhas / topos descendentes / EMA 9 < EMA 21, a menos que haja rejeição clara (pavio inferior longo) em suporte macro ou Banda de Bollinger inferior com RSI < 32.
+- Analise todo o histórico para tomar uma decisão objetiva de entrada (CALL ou PUT, com confluência entre 80 e 95 quando houver alinhamento claro de tendência + price action, ou reversão confirmada em zona S/R). Use AGUARDAR quando o sinal estiver contra a microtendência ou sem confluência sólida.
+
 Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
 {
   "decisao": "CALL" | "PUT" | "AGUARDAR",
@@ -116,32 +125,39 @@ def carregar_ativos():
 
 CATEGORIZED_ASSETS = carregar_ativos()
 
-# Principais ativos para varredura constante de 60 candles
-# Catálogo Completo de Ativos Binários OTC da Plataforma BullEx
-OTC_BINARY_CATALOG = [
-    # Pares Principais de Moedas OTC
+# Catálogo Completo de Ativos Binários OTC (fallback caso payouts ainda não sincronizados)
+OTC_BINARY_CATALOG = CATEGORIZED_ASSETS.get("otc", []) or [
     "EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "USDCHF-OTC", "NZDUSD-OTC",
     "EURGBP-OTC", "EURJPY-OTC", "GBPJPY-OTC", "AUDCAD-OTC", "AUDUSD-OTC",
     "AUDJPY-OTC", "CADJPY-OTC", "EURAUD-OTC", "EURCAD-OTC", "GBPAUD-OTC",
     "GBPCAD-OTC", "NZDJPY-OTC", "USDCAD-OTC", "USDBRL-OTC", "USDINR-OTC",
-    "XAUUSD-OTC",
-    # Índices e Ações OTC
-    "SP500-OTC", "US30-OTC", "UK100-OTC", "USNDAQ100-OTC", "APPLE-OTC",
-    "GOOGLE-OTC", "AMAZON-OTC", "TESLA-OTC", "ALIBABA-OTC", "FB-OTC"
+    "XAUUSD-OTC", "SP500-OTC", "US30-OTC", "UK100-OTC", "USNDAQ100-OTC",
+    "APPLE-OTC", "GOOGLE-OTC", "AMAZON-OTC", "TESLA-OTC", "ALIBABA-OTC", "FB-OTC"
 ]
+
+def obter_pool_otc_binarios() -> List[str]:
+    """Retorna TODOS os ativos OTC binários reais disponíveis na plataforma (sem limitar a 31 ou 8)."""
+    if state.asset_payouts:
+        ativos_plataforma = [
+            a for a in state.asset_payouts.keys()
+            if "OTC" in a.upper() and (not ALL_ACTIVES_MAP or a in ALL_ACTIVES_MAP)
+        ]
+        if ativos_plataforma:
+            return sorted(set(ativos_plataforma))
+    return list(OTC_BINARY_CATALOG)
 
 SCAN_ASSETS_PRIORITY = OTC_BINARY_CATALOG
 
 class BotMemoryState:
     def __init__(self):
         self.api: Optional[Bullex] = None
-        self.is_connected = True
-        self.email = os.getenv("BULLEX_EMAIL", "josecarlosqueirozdesena999559@gmail.com")
+        self.is_connected = False
+        self.email = os.getenv("BULLEX_EMAIL", "")
         self.password = os.getenv("BULLEX_PASSWORD", "")
         self.mode = "DEMO"  # Inicia sempre em DEMO conforme solicitado pelo usuário
-        self.trader_name = "Jose Carlos"
-        self.balance_real = 22776.06
-        self.balance_demo = 10000.00
+        self.trader_name = ""
+        self.balance_real = 0.0
+        self.balance_demo = 0.0
         self.currency = "USD"
         
         # Parâmetros
@@ -177,12 +193,347 @@ class BotMemoryState:
         self.active_signal: Optional[Dict[str, Any]] = None
         self.accumulated_gale_loss: float = 0.0
         self.asset_payouts: Dict[str, float] = {}
+        self.candles_cache: Dict[str, List[Dict[str, Any]]] = {}
+        self.warmup_done: bool = False
+        self.warmup_progress: Dict[str, Any] = {"active": False, "loaded": 0, "total": 0, "asset": "", "percent": 0}
+        self.gemini_status: str = "Aguardando análise" if self.gemini_key else "Desativado (GEMINI_API_KEY não configurada)"
+        self.current_date: str = datetime.now().strftime("%Y-%m-%d")
 
 state = BotMemoryState()
 
+RESULTS_DB_PATH = os.path.join(os.path.dirname(__file__), "results_history.db")
+
+def init_results_db() -> None:
+    with sqlite3.connect(RESULTS_DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS trade_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                trade_month TEXT NOT NULL,
+                trade_hour INTEGER NOT NULL,
+                trade_time TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                stake REAL NOT NULL,
+                result TEXT NOT NULL,
+                profit REAL NOT NULL,
+                gale_step INTEGER NOT NULL,
+                breakdown TEXT,
+                reason TEXT,
+                created_at REAL NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_email_date ON trade_results(email, trade_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_email_month ON trade_results(email, trade_month)")
+
+init_results_db()
+
+def _norm_email(email: Optional[str]) -> str:
+    return (email or "").strip().lower()
+
+def limpar_resultados_memoria() -> None:
+    state.wins = 0
+    state.losses = 0
+    state.resultado = 0.0
+    state.operacoes = 0
+    state.assertividade = 0.0
+    state.history_trades = []
+    state.current_gale_step = 0
+    state.accumulated_gale_loss = 0.0
+
+def carregar_resultados_usuario(email: Optional[str]) -> None:
+    limpar_resultados_memoria()
+    em = _norm_email(email)
+    if not em:
+        return
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    state.current_date = hoje
+    with sqlite3.connect(RESULTS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows_today = conn.execute(
+            "SELECT * FROM trade_results WHERE email = ? AND trade_date = ? ORDER BY id DESC",
+            (em, hoje)
+        ).fetchall()
+        rows_all_hist = conn.execute(
+            "SELECT * FROM trade_results WHERE email = ? ORDER BY id DESC",
+            (em,)
+        ).fetchall()
+    wins = 0
+    losses = 0
+    resultado = 0.0
+    operacoes = 0
+    for r in rows_today:
+        operacoes += 1
+        resultado += float(r["profit"])
+        if r["result"] == "WIN":
+            wins += 1
+        elif r["result"] == "LOSS":
+            losses += 1
+    hist = []
+    for r in rows_all_hist:
+        g_step = int(r["gale_step"])
+        d_str = r["trade_date"] or ""
+        d_fmt = (d_str[8:10] + "/" + d_str[5:7] + " ") if len(d_str) >= 10 else ""
+        hist.append({
+            "time": d_fmt + (r["trade_time"] or ""),
+            "asset": r["asset"],
+            "direction": f"{r['direction']} (G{g_step})" if g_step > 0 else r["direction"],
+            "stake": float(r["stake"]),
+            "result": r["result"],
+            "profit": float(r["profit"]),
+            "breakdown": r["breakdown"] or "",
+            "reason": r["reason"] or ""
+        })
+    tot = wins + losses
+    state.wins = wins
+    state.losses = losses
+    state.resultado = round(resultado, 2)
+    state.operacoes = operacoes
+    state.assertividade = round((wins / tot) * 100, 1) if tot > 0 else 0.0
+    state.history_trades = hist
+
+def verificar_virada_dia() -> None:
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    if state.current_date != hoje:
+        state.current_date = hoje
+        carregar_resultados_usuario(state.email)
+        print(f"[VIRADA DE DIA] Placar diário reiniciado para {hoje} (histórico mensal preservado).", flush=True)
+
+def salvar_resultado_db(
+    email: Optional[str], mode: str, asset: str, direction: str,
+    stake: float, result: str, profit: float, gale_step: int,
+    breakdown: str, reason: str, trade_time: str
+) -> None:
+    em = _norm_email(email)
+    if not em:
+        return
+    agora = datetime.now()
+    with sqlite3.connect(RESULTS_DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO trade_results (
+                email, mode, trade_date, trade_month, trade_hour, trade_time,
+                asset, direction, stake, result, profit, gale_step, breakdown, reason, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                em, (mode or "DEMO").upper(), agora.strftime("%Y-%m-%d"),
+                agora.strftime("%Y-%m"), agora.hour, trade_time,
+                asset, direction, float(stake), result, float(profit),
+                int(gale_step), breakdown, reason, time.time()
+            )
+        )
+
+def obter_analytics_usuario(
+    email: Optional[str],
+    scope: str = "day",
+    target_date: Optional[str] = None,
+    target_month: Optional[str] = None
+) -> Dict[str, Any]:
+    em = _norm_email(email)
+    agora = datetime.now()
+    hoje = target_date or agora.strftime("%Y-%m-%d")
+    mes_atual = target_month or (hoje[:7] if len(hoje) >= 7 else agora.strftime("%Y-%m"))
+    scope = "month" if (scope or "").lower() == "month" else "day"
+    empty = {
+        "email": em,
+        "scope": scope,
+        "today_date": hoje,
+        "current_month": mes_atual,
+        "selected": {"wins": 0, "losses": 0, "operacoes": 0, "win_rate": 0.0, "profit": 0.0},
+        "today": {"wins": 0, "losses": 0, "operacoes": 0, "win_rate": 0.0, "profit": 0.0},
+        "month": {"wins": 0, "losses": 0, "operacoes": 0, "win_rate": 0.0, "profit": 0.0},
+        "best_hour": None,
+        "hourly_series": [],
+        "gale_comparison": {
+            "unica": {"wins": 0, "losses": 0, "total": 0, "win_rate": 0.0, "profit": 0.0},
+            "g1": {"wins": 0, "losses": 0, "total": 0, "win_rate": 0.0, "profit": 0.0}
+        },
+        "daily_series": [],
+        "monthly_series": []
+    }
+    if not em:
+        return empty
+
+    with sqlite3.connect(RESULTS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows_month = conn.execute(
+            "SELECT * FROM trade_results WHERE email = ? AND trade_month = ? ORDER BY id ASC",
+            (em, mes_atual)
+        ).fetchall()
+        rows_all_months = conn.execute(
+            """
+            SELECT trade_month,
+                   SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN result = 'LOSS' THEN 1 ELSE 0 END) AS losses,
+                   COUNT(*) AS total,
+                   SUM(profit) AS profit
+            FROM trade_results
+            WHERE email = ?
+            GROUP BY trade_month
+            ORDER BY trade_month ASC
+            """,
+            (em,)
+        ).fetchall()
+
+    t_w = t_l = t_op = 0
+    t_p = 0.0
+    m_w = m_l = m_op = 0
+    m_p = 0.0
+    daily_map: Dict[str, Dict[str, Any]] = {}
+    hourly_map: Dict[int, Dict[str, Any]] = {}
+    unica = {"wins": 0, "losses": 0, "total": 0, "win_rate": 0.0, "profit": 0.0}
+    g1 = {"wins": 0, "losses": 0, "total": 0, "win_rate": 0.0, "profit": 0.0}
+
+    for r in rows_month:
+        d = r["trade_date"]
+        res = r["result"]
+        prof = float(r["profit"])
+        h = int(r["trade_hour"])
+        gs = int(r["gale_step"])
+        m_op += 1
+        m_p += prof
+        if res == "WIN":
+            m_w += 1
+        elif res == "LOSS":
+            m_l += 1
+
+        if d == hoje:
+            t_op += 1
+            t_p += prof
+            if res == "WIN":
+                t_w += 1
+            elif res == "LOSS":
+                t_l += 1
+
+        if d not in daily_map:
+            daily_map[d] = {"date": d, "label": d[8:10] + "/" + d[5:7], "profit": 0.0, "wins": 0, "losses": 0}
+        daily_map[d]["profit"] = round(daily_map[d]["profit"] + prof, 2)
+        if res == "WIN":
+            daily_map[d]["wins"] += 1
+        elif res == "LOSS":
+            daily_map[d]["losses"] += 1
+
+        in_scope = (scope == "month") or (d == hoje)
+        if in_scope:
+            if h not in hourly_map:
+                hourly_map[h] = {"hour": h, "label": f"{h:02d}h", "wins": 0, "losses": 0, "total": 0, "win_rate": 0.0, "profit": 0.0}
+            if res in ("WIN", "LOSS"):
+                hourly_map[h]["total"] += 1
+                if res == "WIN":
+                    hourly_map[h]["wins"] += 1
+                else:
+                    hourly_map[h]["losses"] += 1
+            hourly_map[h]["profit"] = round(hourly_map[h]["profit"] + prof, 2)
+
+            bucket = unica if gs == 0 else g1
+            if res in ("WIN", "LOSS"):
+                bucket["total"] += 1
+                if res == "WIN":
+                    bucket["wins"] += 1
+                else:
+                    bucket["losses"] += 1
+            bucket["profit"] = round(bucket["profit"] + prof, 2)
+
+    hourly_series = []
+    for h in sorted(hourly_map.keys()):
+        item = hourly_map[h]
+        tot_h = item["wins"] + item["losses"]
+        item["win_rate"] = round((item["wins"] / tot_h) * 100, 1) if tot_h > 0 else 0.0
+        hourly_series.append(item)
+
+    best_hour = None
+    if hourly_series:
+        best_hour = max(hourly_series, key=lambda x: (x["profit"], x["win_rate"], x["wins"]))
+
+    for b in (unica, g1):
+        tot_b = b["wins"] + b["losses"]
+        b["win_rate"] = round((b["wins"] / tot_b) * 100, 1) if tot_b > 0 else 0.0
+
+    monthly_series = [
+        {
+            "month": rm["trade_month"],
+            "label": rm["trade_month"][5:7] + "/" + rm["trade_month"][0:4],
+            "wins": int(rm["wins"] or 0),
+            "losses": int(rm["losses"] or 0),
+            "total": int(rm["total"] or 0),
+            "profit": round(float(rm["profit"] or 0.0), 2)
+        }
+        for rm in rows_all_months
+    ]
+
+    today_stats = {
+        "wins": t_w,
+        "losses": t_l,
+        "operacoes": t_op,
+        "win_rate": round((t_w / (t_w + t_l)) * 100, 1) if (t_w + t_l) > 0 else 0.0,
+        "profit": round(t_p, 2)
+    }
+    month_stats = {
+        "wins": m_w,
+        "losses": m_l,
+        "operacoes": m_op,
+        "win_rate": round((m_w / (m_w + m_l)) * 100, 1) if (m_w + m_l) > 0 else 0.0,
+        "profit": round(m_p, 2)
+    }
+
+    return {
+        "email": em,
+        "scope": scope,
+        "today_date": hoje,
+        "current_month": mes_atual,
+        "selected": month_stats if scope == "month" else today_stats,
+        "today": today_stats,
+        "month": month_stats,
+        "best_hour": best_hour,
+        "hourly_series": hourly_series,
+        "gale_comparison": {"unica": unica, "g1": g1},
+        "daily_series": [daily_map[k] for k in sorted(daily_map.keys())],
+        "monthly_series": monthly_series
+    }
+
+def saldo_atual_disponivel() -> float:
+    return float(state.balance_real if state.mode == "REAL" else state.balance_demo)
+
+def verificar_saldo_para_operar(valor_necessario: Optional[float] = None) -> tuple[bool, str]:
+    valor = float(valor_necessario if valor_necessario is not None else state.entry_stake)
+    simb = "$" if state.currency in ["USD", "$"] else "R$"
+    if state.mode == "REAL" and not (state.api and state.is_connected):
+        return False, "Conta REAL desconectada da BullEx. Faça login para operar."
+    saldo = saldo_atual_disponivel()
+    if saldo <= 0:
+        return False, f"Sem saldo na conta {state.mode} ({simb} {saldo:.2f}). Não é possível operar. Faça um depósito na BullEx."
+    if saldo < valor:
+        return False, f"Saldo insuficiente na conta {state.mode} ({simb} {saldo:.2f}) para entrada de {simb} {valor:.2f}."
+    return True, ""
+
+def sincronizar_payouts_plataforma(api_instance) -> None:
+    if not api_instance:
+        return
+    try:
+        all_profit = api_instance.get_all_profit()
+        if isinstance(all_profit, dict):
+            novos: Dict[str, float] = {}
+            for nome, tipos in all_profit.items():
+                if not isinstance(tipos, dict):
+                    continue
+                val = tipos.get("turbo") or tipos.get("binary")
+                if val is not None:
+                    novos[str(nome).upper()] = float(val)
+            if novos:
+                state.asset_payouts = novos
+                print(f"[PAYOUTS SYNC] {len(novos)} ativos sincronizados da BullEx.", flush=True)
+    except Exception as ex:
+        print(f"[PAYOUTS ERR] {ex}", flush=True)
+
 def get_real_asset_payout(ativo: str) -> float:
-    """Retorna o payout real da corretora para o ativo binário (ex: 84% no HK 33, 87% no GBP/USD)"""
-    clean = ativo.replace("-OTC", "").replace(" (OTC)", "").strip().upper()
+    """Retorna o payout real da corretora para o ativo binário."""
+    raw = ativo.strip().upper()
+    if raw in state.asset_payouts:
+        return state.asset_payouts[raw]
+    clean = raw.replace("-OTC", "").replace(" (OTC)", "").strip()
     if clean in state.asset_payouts:
         return state.asset_payouts[clean]
     for k, v in state.asset_payouts.items():
@@ -210,16 +561,36 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     lows = [c["min"] for c in candles]
     opens = [c["open"] for c in candles]
 
-    def ema(series, period):
+    def ema_series(series, period):
         k = 2 / (period + 1)
         res = [series[0]]
         for price in series[1:]:
             res.append(price * k + res[-1] * (1 - k))
-        return res[-1]
+        return res
 
-    ema9 = ema(closes, 9)
-    ema21 = ema(closes, 21)
-    ema50 = ema(closes, min(50, len(closes)))
+    ema9_s = ema_series(closes, 9)
+    ema21_s = ema_series(closes, 21)
+    ema50_s = ema_series(closes, min(50, len(closes)))
+    ema12_s = ema_series(closes, 12)
+    ema26_s = ema_series(closes, 26)
+    ema9 = ema9_s[-1]
+    ema21 = ema21_s[-1]
+    ema50 = ema50_s[-1]
+
+    # MACD (12, 26, 9)
+    macd_series = [a - b for a, b in zip(ema12_s, ema26_s)]
+    macd_signal_series = ema_series(macd_series, 9)
+    macd_val = macd_series[-1]
+    macd_sig = macd_signal_series[-1]
+    macd_hist = macd_val - macd_sig
+
+    # Bandas de Bollinger (20, 2)
+    bb_window = closes[-20:]
+    bb_mid = sum(bb_window) / len(bb_window)
+    bb_var = sum((x - bb_mid) ** 2 for x in bb_window) / len(bb_window)
+    bb_std = math.sqrt(bb_var)
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
 
     # RSI 14
     gains = []
@@ -303,6 +674,12 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
         "ema9": round(ema9, 5),
         "ema21": round(ema21, 5),
         "ema50": round(ema50, 5),
+        "macd": round(macd_val, 6),
+        "macd_signal": round(macd_sig, 6),
+        "macd_hist": round(macd_hist, 6),
+        "bb_upper": round(bb_upper, 5),
+        "bb_middle": round(bb_mid, 5),
+        "bb_lower": round(bb_lower, 5),
         "tendencia_emas": tendencia,
         "rsi14": round(rsi, 2),
         "suporte_macro_60": round(suporte_macro, 5),
@@ -313,19 +690,29 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
         "smc_order_block": order_block_info,
         "distancia_suporte": round(abs(ultimo_preco - suporte_micro), 5),
         "distancia_resistencia": round(abs(resistencia_micro - ultimo_preco), 5),
-        "candles": candles[-35:],
+        "candles": candles[-60:],
         "qtd_velas": len(candles)
     }
 
 async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not state.gemini_key:
+        state.gemini_status = "Desativado (GEMINI_API_KEY não configurada)"
         return None
 
-    candidate_models = ["gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-pro-latest"]
+    candidate_models = ["gemini-flash-lite-latest", "gemini-pro-latest"]
     c = dados.get("candle_ultimo", {})
     agora_str = dados.get("relogio_horario", datetime.now().strftime("%H:%M:%S"))
     segundo_vela = dados.get("segundo_da_vela", 55)
     restantes = dados.get("tempo_restante_vela", 5)
+
+    candles_list = dados.get("candles") or []
+    ohlc_linhas = []
+    for idx, vc in enumerate(candles_list[-60:], start=1):
+        ohlc_linhas.append(
+            f"{idx}: O={round(float(vc.get('open', 0)), 5)} H={round(float(vc.get('max', 0)), 5)} "
+            f"L={round(float(vc.get('min', 0)), 5)} C={round(float(vc.get('close', 0)), 5)}"
+        )
+    ohlc_bloco = "\n".join(ohlc_linhas)
 
     prompt_usuario = f"""
 === DADOS DA PLATAFORMA BULLEX EM TEMPO REAL (SEM ATRASO - 0s LAG) ===
@@ -340,13 +727,18 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
 - Pavio Inferior (Rejeição de Fundo): {c.get('pavio_inferior')}
 - Padrão de Price Action Reconhecido: {dados.get('padrao_detectado')}
 
-[SÉRIE HISTÓRICA DOS 60 CANDLES ANTERIORES]:
+[INDICADORES MATEMÁTICOS ({len(candles_list)} CANDLES)]:
 - RSI 14 em Tempo Real: {dados.get('rsi14')}
 - Estrutura de Médias: EMA 9 ({dados.get('ema9')}) | EMA 21 ({dados.get('ema21')}) | EMA 50 ({dados.get('ema50')})
+- MACD (12,26,9): Linha={dados.get('macd')} | Sinal={dados.get('macd_signal')} | Histograma={dados.get('macd_hist')}
+- Bandas de Bollinger (20,2): Superior={dados.get('bb_upper')} | Média={dados.get('bb_middle')} | Inferior={dados.get('bb_lower')}
 - Tendência Institucional: {dados.get('tendencia_emas')}
 - Smart Money Concepts (SMC): {dados.get('smc_order_block')}
 - Suporte Macro (60 velas): {dados.get('suporte_macro_60')} (Distância: {dados.get('distancia_suporte')})
 - Resistência Macro (60 velas): {dados.get('resistencia_macro_60')} (Distância: {dados.get('distancia_resistencia')})
+
+[SÉRIE HISTÓRICA OHLC COMPLETA ({len(candles_list)} VELAS M1 DO PASSADO ATÉ A ATUAL)]:
+{ohlc_bloco}
 
 [ESTRATÉGIA MANDATÓRIA DE ENTRADA NA RETRAÇÃO]:
 - Para PUT (Venda): a nova vela M1 deve nascer e subir/esticar nos primeiros segundos para capturar a taxa no topo antes dos 28s.
@@ -355,6 +747,69 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
 Decida se para o MINUTO SEGUINTE a melhor oportunidade é CALL, PUT ou AGUARDAR.
 Responda ESTRITAMENTE em formato JSON com o schema exigido.
 """
+    if state.gemini_key.startswith("sk-"):
+        headers = {
+            "x-manus-api-key": state.gemini_key,
+            "Content-Type": "application/json",
+            "User-Agent": "OriunBinary15/1.0"
+        }
+        full_prompt = f"{SYSTEM_PROMPT_TRADER}\n\n{prompt_usuario}"
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            try:
+                resp = await client.post(
+                    "https://api.manus.ai/v2/task.create",
+                    headers=headers,
+                    json={"message": {"content": full_prompt}}
+                )
+                if resp.status_code != 200:
+                    state.gemini_status = f"Erro HTTP {resp.status_code} (Gemini AI)"
+                    print(f"[GEMINI ERR] HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
+                    return None
+                task_id = resp.json().get("task_id")
+                if not task_id:
+                    state.gemini_status = "Erro: task_id ausente (Gemini AI)"
+                    return None
+
+                await asyncio.sleep(1.5)
+                for _ in range(75):
+                    poll = await client.get(
+                        f"https://api.manus.ai/v2/task.listMessages?task_id={task_id}",
+                        headers=headers
+                    )
+                    if poll.status_code == 200:
+                        pdata = poll.json()
+                        messages = pdata.get("messages") or []
+                        for m in reversed(messages):
+                            if isinstance(m, dict) and m.get("type") == "assistant_message":
+                                am = m.get("assistant_message") or {}
+                                content = am.get("content") if isinstance(am, dict) else ""
+                                if not isinstance(content, str) or not content.strip():
+                                    continue
+                                candidate = content.strip()
+                                if candidate.startswith("```"):
+                                    candidate = candidate.strip("`")
+                                    if candidate.lower().startswith("json"):
+                                        candidate = candidate[4:].strip()
+                                start_idx = candidate.find("{")
+                                end_idx = candidate.rfind("}")
+                                if start_idx == -1 or end_idx == -1:
+                                    continue
+                                try:
+                                    parsed = json.loads(candidate[start_idx:end_idx + 1])
+                                    if isinstance(parsed, dict) and parsed.get("decisao") in ["CALL", "PUT", "AGUARDAR"]:
+                                        state.gemini_status = "Ativo e pensando (Gemini AI)"
+                                        print(f"[GEMINI OK] Gemini AI respondeu para {ativo}: {parsed.get('decisao')} ({parsed.get('confluencia_porcentagem')}%)", flush=True)
+                                        return parsed
+                                except Exception:
+                                    continue
+                    await asyncio.sleep(1.0)
+                state.gemini_status = "Timeout aguardando resposta (Gemini AI)"
+                return None
+            except Exception as ex:
+                state.gemini_status = f"Falha (Gemini AI): {type(ex).__name__}"
+                print(f"[GEMINI EXC] Gemini AI: {ex}", flush=True)
+                return None
+
     payload = {
         "contents": [
             {
@@ -370,7 +825,7 @@ Responda ESTRITAMENTE em formato JSON com o schema exigido.
         }
     }
 
-    async with httpx.AsyncClient(timeout=2.8) as client:
+    async with httpx.AsyncClient(timeout=8.0) as client:
         for model in candidate_models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={state.gemini_key}"
             try:
@@ -378,53 +833,61 @@ Responda ESTRITAMENTE em formato JSON com o schema exigido.
                 if resp.status_code == 200:
                     data = resp.json()
                     raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    return json.loads(raw_text)
-            except Exception:
+                    parsed = json.loads(raw_text)
+                    state.gemini_status = f"Ativo e pensando ({model})"
+                    print(f"[GEMINI OK] {model} respondeu para {ativo}: {parsed.get('decisao')} ({parsed.get('confluencia_porcentagem')}%)", flush=True)
+                    return parsed
+                else:
+                    state.gemini_status = f"Erro HTTP {resp.status_code} ({model})"
+                    print(f"[GEMINI ERR] {model} HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
+            except Exception as ex:
+                state.gemini_status = f"Falha ({model}): {type(ex).__name__}"
+                print(f"[GEMINI EXC] {model}: {ex}", flush=True)
                 continue
     return None
+
+def calcular_expiracao_m1_epoch(now_ts: Optional[float] = None, expiracao_min: int = 1) -> float:
+    """Calcula o timestamp exato de fechamento da vela na BullEx (múltiplo de 60s; se >= 30s, rola para o próximo minuto)."""
+    ts = int(now_ts if now_ts is not None else time.time())
+    seg = ts % 60
+    minutos_extras = expiracao_min + (1 if seg >= 30 else 0)
+    return float(((ts // 60) + minutos_extras) * 60)
 
 def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, expiracao: int):
     try:
         status, order_id = api.buy(valor, ativo, direcao.lower(), expiracao)
         print(f"[BULLEX BUY] status: {status}, order_id: {order_id}", flush=True)
         if status and order_id:
-            # Aguarda o fechamento oficial da vela de 1 minuto com contagem precisa segundo a segundo
+            if not state.asset_payouts:
+                sincronizar_payouts_plataforma(api)
+            # Aguarda o fechamento oficial da vela de 1 minuto sincronizado com o relógio da plataforma
             start_t = time.time()
-            total_espera = 60
-            payout_estimado = round(valor * 0.91, 2)
+            target_epoch = calcular_expiracao_m1_epoch(start_t, expiracao)
+            total_espera = max(1, int(round(target_epoch - start_t)))
+            payout_pct = get_real_asset_payout(ativo)
+            payout_estimado = round(valor * payout_pct, 2)
             
-            # Taxa de entrada inicial da vela
+            # Taxa de entrada inicial real da vela na plataforma
             taxa_entrada = 0.0
             try:
                 c_init = api.get_candles(ativo, 60, 1, int(time.time()))
                 if c_init and len(c_init) > 0:
-                    taxa_entrada = float(c_init[0].get('open', 0.0))
+                    taxa_entrada = float(c_init[-1].get('close') or c_init[-1].get('open') or 0.0)
             except Exception:
                 taxa_entrada = 0.0
-            if taxa_entrada == 0.0:
-                if "CHF" in ativo: taxa_entrada = 0.83556
-                elif "HK" in ativo or "33" in ativo: taxa_entrada = 22812.40803
-                elif "GBP" in ativo: taxa_entrada = 1.33842
-                elif "US" in ativo or "30" in ativo: taxa_entrada = 43850.25
-                elif "JPY" in ativo: taxa_entrada = 152.320
-                else: taxa_entrada = 1.08500
 
             while time.time() - start_t < 75:
                 elapsed = int(time.time() - start_t)
-                remaining = max(0, total_espera - elapsed)
+                remaining = max(0, int(round(target_epoch - time.time())))
                 
-                # Coleta taxa atual da vela para avaliação em tempo real (sem atrasos)
+                # Coleta taxa atual real da vela na plataforma
                 taxa_atual = taxa_entrada
                 try:
                     c_now = api.get_candles(ativo, 60, 1, int(time.time()))
                     if c_now and len(c_now) > 0:
-                        taxa_atual = float(c_now[0].get('close', taxa_entrada))
+                        taxa_atual = float(c_now[-1].get('close') or taxa_entrada)
                 except Exception:
                     pass
-
-                # Micro-variação realista caso a corretora não envie tick intermediário
-                if taxa_atual == taxa_entrada:
-                    taxa_atual = taxa_entrada + math.sin(elapsed / 2.5) * 0.00012
 
                 # Avaliação de vitória em tempo real (CALL: taxa atual >= taxa entrada | PUT: taxa atual <= taxa entrada)
                 if direcao.upper() == "CALL":
@@ -454,6 +917,8 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
 
                 if state.active_signal:
                     state.active_signal["seconds_left"] = remaining
+                    state.active_signal["target_epoch"] = target_epoch
+                    state.active_signal["payout_pct"] = payout_pct
                     state.active_signal["status"] = status_banner
                     state.active_signal["live_status"] = live_status
                     state.active_signal["live_profit"] = live_profit
@@ -475,7 +940,9 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     if order_id in api.api.socket_option_closed and api.api.socket_option_closed[order_id] is not None:
                         x = api.api.socket_option_closed[order_id]
                         win_str = x['msg']['win']
-                        lucro = 0.0 if win_str == 'equal' else (float(x['msg']['sum']) * -1 if win_str == 'loose' else float(x['msg']['win_amount']) - float(x['msg']['sum']))
+                        if win_str == 'equal':
+                            return True, None, 0.0, None
+                        lucro = float(x['msg']['sum']) * -1 if win_str == 'loose' else float(x['msg']['win_amount']) - float(x['msg']['sum'])
                         return True, (win_str == "win"), lucro, None
                 except Exception:
                     pass
@@ -489,17 +956,25 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
 async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, ativo: str, conf: int):
     if state.is_trading:
         return
+    pode_operar, msg_saldo = verificar_saldo_para_operar(valor)
+    if not pode_operar:
+        state.ai_enabled = False
+        state.current_observation = msg_saldo
+        print(f"[BLOQUEIO SALDO] {msg_saldo}", flush=True)
+        return
     state.is_trading = True
 
     tipo_operacao = f"MARTINGALE G{state.current_gale_step}" if state.current_gale_step > 0 else "ENTRADA INICIAL"
 
     # 1. Sinal identificado para o minuto seguinte (M1)
+    agora_ts = time.time()
     agora = datetime.now()
     seg_atual = agora.second
     # Segundos restantes no candle atual até o nascimento da nova vela M1
     seg_ate_virada = (60 - seg_atual) % 60
     if seg_ate_virada == 0:
         seg_ate_virada = 60
+    target_virada_epoch = agora_ts + seg_ate_virada
 
     if direcao == "PUT":
         hint = f"[{tipo_operacao}] Aguardando vela M1 nascer e subir um pouco para pegar taxa de VENDA (PUT) no topo antes dos 28s de compra."
@@ -513,6 +988,7 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         "expiration": "M1 (1 Minuto)",
         "target": "Minuto Seguinte",
         "seconds_left": seg_ate_virada,
+        "target_epoch": target_virada_epoch,
         "action_hint": hint,
         "status": f"SINAL DETECTADO ({tipo_operacao}) — AGUARDANDO NASCIMENTO DA VELA M1",
         "time": agora.strftime("%H:%M:%S"),
@@ -523,12 +999,16 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
     print(f"\n[SINAL IDENTIFICADO - {tipo_operacao}] {direcao} em {ativo} (M1) | {seg_ate_virada}s para virada | {hint}", flush=True)
 
     # Contagem regressiva precisa segundo a segundo até a virada da vela M1
-    while seg_ate_virada > 1:
-        await asyncio.sleep(1)
-        seg_ate_virada -= 1
+    while time.time() < target_virada_epoch - 0.5:
+        if not state.ai_enabled and "Manual" not in motivo_str:
+            state.is_trading = False
+            state.active_signal = None
+            return
+        await asyncio.sleep(0.5)
+        rest_virada = max(0, int(round(target_virada_epoch - time.time())))
         if state.active_signal:
-            state.active_signal["seconds_left"] = seg_ate_virada
-            state.active_signal["status"] = f"AGUARDANDO NASCIMENTO DA VELA M1 ({seg_ate_virada}s)"
+            state.active_signal["seconds_left"] = rest_virada
+            state.active_signal["status"] = f"AGUARDANDO NASCIMENTO DA VELA M1 ({rest_virada}s)"
 
     # 2. A vela M1 acabou de nascer!
     # Aguarda a micro-retração (pullback) nos primeiros segundos (antes do limite de 28s de compra)
@@ -539,110 +1019,89 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         pullback_hint = f"[{tipo_operacao}] Vela M1 nasceu! Aguardando micro-queda (fundo) para pegar taxa de COMPRA (CALL) antes do limite de compra..."
 
     print(f" -> [MICRO-RETRAÇÃO] {pullback_hint}", flush=True)
-    tempo_pullback = 3.0
+    max_pb_segundos = 20.0
     start_pb = time.time()
-    while time.time() - start_pb < tempo_pullback:
-        elapsed_pb = int(time.time() - start_pb)
-        seg_restantes_compra = max(1, 28 - elapsed_pb)
+    pb_target_epoch = start_pb + max_pb_segundos
+
+    preco_abertura = None
+    if state.api and state.is_connected:
+        try:
+            c_open = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(time.time()))
+            if c_open and len(c_open) > 0:
+                preco_abertura = float(c_open[-1].get("open") or c_open[-1].get("close") or 0.0)
+        except Exception:
+            preco_abertura = None
+
+    melhor_taxa_atingida = False
+    while time.time() - start_pb < max_pb_segundos:
+        if not state.ai_enabled and "Manual" not in motivo_str:
+            state.is_trading = False
+            state.active_signal = None
+            return
+
+        elapsed_pb = time.time() - start_pb
+        rem_pb = max(0, int(round(pb_target_epoch - time.time())))
+        seg_restantes_compra = max(1, 28 - int(elapsed_pb))
+
+        preco_atual = None
+        if state.api and state.is_connected:
+            try:
+                c_live = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(time.time()))
+                if c_live and len(c_live) > 0:
+                    if preco_abertura is None or preco_abertura == 0.0:
+                        preco_abertura = float(c_live[-1].get("open") or c_live[-1].get("close") or 0.0)
+                    preco_atual = float(c_live[-1].get("close") or 0.0)
+            except Exception:
+                pass
+
+        if preco_abertura and preco_atual and elapsed_pb >= 2.0:
+            if direcao == "PUT" and preco_atual > preco_abertura:
+                melhor_taxa_atingida = True
+                print(f" -> [RETRAÇÃO PUT CAPTURADA] Subiu de {preco_abertura} para {preco_atual} em {elapsed_pb:.1f}s! Executando VENDA.", flush=True)
+                break
+            elif direcao == "CALL" and preco_atual < preco_abertura:
+                melhor_taxa_atingida = True
+                print(f" -> [RETRAÇÃO CALL CAPTURADA] Desceu de {preco_abertura} para {preco_atual} em {elapsed_pb:.1f}s! Executando COMPRA.", flush=True)
+                break
+
         if state.active_signal:
             state.active_signal["status"] = f"AGUARDANDO RETRAÇÃO DA TAXA ({seg_restantes_compra}s de compra)"
             state.active_signal["action_hint"] = pullback_hint
-            state.active_signal["seconds_left"] = int(tempo_pullback - (time.time() - start_pb))
+            state.active_signal["seconds_left"] = rem_pb
+            state.active_signal["target_epoch"] = pb_target_epoch
         await asyncio.sleep(0.5)
+
+    if not melhor_taxa_atingida:
+        print(f" -> [RETRAÇÃO LIMITE] {max_pb_segundos:.0f}s atingidos antes do limite de compra (28s). Executando entrada agora.", flush=True)
 
     # 3. Disparo da ordem no ponto ideal da retração com expiração M1
     agora_exec_str = datetime.now().strftime("%H:%M:%S")
     if state.active_signal:
-        state.active_signal["status"] = f"OPERAÇÃO EM ANDAMENTO (M1) — FECHAMENTO EM 60s"
-        state.active_signal["seconds_left"] = 60
+        exp_epoch = calcular_expiracao_m1_epoch(time.time(), 1)
+        rem_exp = max(1, int(round(exp_epoch - time.time())))
+        state.active_signal["status"] = f"OPERAÇÃO EM ANDAMENTO (M1) — FECHAMENTO EM {rem_exp}s"
+        state.active_signal["seconds_left"] = rem_exp
+        state.active_signal["target_epoch"] = exp_epoch
         state.active_signal["action_hint"] = f"[{tipo_operacao}] Ordem executada no ápice da retração! Monitorando fechamento da vela M1."
 
-    executou = True
+    executou = False
     venceu = False
     lucro = 0.0
     err = None
 
-    print(f" -> [EXECUÇÃO AUTÔNOMA ({tipo_operacao})] Enviando ordem {direcao} R$ {valor:.2f} na conta BullEx ({state.mode}) M1...", flush=True)
+    print(f" -> [EXECUÇÃO AUTÔNOMA ({tipo_operacao})] Enviando ordem {direcao} {valor:.2f} na conta BullEx ({state.mode}) M1...", flush=True)
 
     if state.api and state.is_connected:
         executou, venceu, lucro, err = await asyncio.to_thread(
             executar_ordem_sync, state.api, valor, ativo, direcao, 1
         )
         try:
-            saldo = await asyncio.to_thread(state.api.get_balance)
-            if state.mode == "REAL":
-                state.balance_real = float(saldo)
-            else:
-                state.balance_demo = float(saldo)
+            await asyncio.to_thread(sincronizar_saldos_plataforma, state.api)
         except Exception:
             pass
     else:
-        # Modo simulação local caso não conectado à BullEx
-        start_sim = time.time()
-        payout_pct = get_real_asset_payout(ativo)
-        payout_estimado = round(valor * payout_pct, 2)
-        if "CHF" in ativo:
-            taxa_entrada = 0.83556
-        elif "HK" in ativo or "33" in ativo:
-            taxa_entrada = 22812.40803
-        elif "GBP" in ativo:
-            taxa_entrada = 1.33842
-        elif "EUR" in ativo:
-            taxa_entrada = 1.08540
-        elif "US" in ativo or "30" in ativo:
-            taxa_entrada = 43850.25
-        elif "JPY" in ativo:
-            taxa_entrada = 152.320
-        else:
-            taxa_entrada = 0.83556
-
-        simb = "$" if state.currency in ["USD", "$"] else "R$"
-        while time.time() - start_sim < 60:
-            elapsed = time.time() - start_sim
-            remaining = max(0, int(60 - elapsed))
-            delta_factor = 0.00010 if ("CHF" in ativo or "EUR" in ativo or "GBP" in ativo) else (2.5 if "HK" in ativo else 0.00012)
-            delta = math.sin(elapsed / 2.5) * delta_factor
-            decimals = 5 if ("HK" in ativo or "CHF" in ativo or "EUR" in ativo or "GBP" in ativo) else 3
-            taxa_atual = round(taxa_entrada + delta, decimals)
-            is_winning = (taxa_atual >= taxa_entrada) if direcao.upper() == "CALL" else (taxa_atual <= taxa_entrada)
-
-            live_status = "WINNING" if is_winning else "LOSING"
-            live_profit = payout_estimado if is_winning else -valor
-            live_text = f"+{simb} {payout_estimado:.2f}" if is_winning else f"-{simb} {valor:.2f}"
-            status_banner = f"🟢 OPERAÇÃO DANDO VITÓRIA ({live_text}) — FECHAMENTO EM {remaining}s" if is_winning else f"🔴 ENTRADA NEGATIVA ({live_text}) — FECHAMENTO EM {remaining}s"
-
-            if is_winning:
-                perc_recompra = min(0.85, 0.35 + (60 - remaining) / 100.0)
-                lp_pos_venda = round(payout_estimado * perc_recompra, 2)
-                lp_pos_venda_str = f"+{simb} {lp_pos_venda:.2f}"
-                resale_percent = f"+{perc_recompra * 100:.2f}%"
-            else:
-                perc_perda = min(0.95, 0.45 + (60 - remaining) / 120.0)
-                lp_pos_venda = -round(valor * perc_perda, 2)
-                lp_pos_venda_str = f"-{simb} {abs(lp_pos_venda):.2f}"
-                resale_percent = f"-{perc_perda * 100:.2f}%"
-
-            if state.active_signal:
-                state.active_signal["seconds_left"] = remaining
-                state.active_signal["status"] = status_banner
-                state.active_signal["live_status"] = live_status
-                state.active_signal["live_profit"] = live_profit
-                state.active_signal["live_profit_text"] = live_text
-                state.active_signal["entry_rate"] = taxa_entrada
-                state.active_signal["current_rate"] = taxa_atual
-                state.active_signal["order_id"] = "SIM_1001"
-                state.active_signal["order_type"] = "Binária"
-                state.active_signal["clock_str"] = f"00:{remaining:02d}"
-                state.active_signal["stake_val"] = valor
-                state.active_signal["stake_str"] = f"{simb} {valor:.2f}"
-                state.active_signal["payout_pct"] = payout_pct
-                state.active_signal["lp_expected_str"] = f"+{simb} {payout_estimado:.2f}" if is_winning else f"-{simb} {valor:.2f}"
-                state.active_signal["lp_pos_venda_str"] = lp_pos_venda_str
-                state.active_signal["lp_pos_venda_val"] = lp_pos_venda
-                state.active_signal["resale_percent"] = resale_percent
-            await asyncio.sleep(0.25)
-        venceu = True
-        lucro = payout_estimado
+        err = "Plataforma BullEx não conectada. Faça login para operar com dados reais."
+        state.current_observation = f"[BLOQUEIO] {err}"
 
     state.is_trading = False
     state.active_signal = None  # Limpa o card apenas quando a vela termina e o resultado é conhecido!
@@ -654,6 +1113,23 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         return
 
     # Se executou com sucesso na corretora e o resultado saiu:
+    verificar_virada_dia()
+    if venceu is None:
+        state.operacoes += 1
+        state.history_trades.insert(0, {
+            "time": agora_exec_str,
+            "asset": ativo,
+            "direction": direcao,
+            "stake": valor,
+            "result": "EMPATE",
+            "profit": 0.0,
+            "breakdown": "Empate (valor devolvido)",
+            "reason": motivo_str
+        })
+        salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, "EMPATE", 0.0, state.current_gale_step, "Empate (valor devolvido)", motivo_str, agora_exec_str)
+        state.current_observation = f"[EMPATE] Operação em {ativo} empatou (valor devolvido)."
+        return
+
     if venceu:
         state.wins += 1
         lucro_liquido = lucro - state.accumulated_gale_loss
@@ -667,6 +1143,7 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         tot = state.wins + state.losses
         state.assertividade = round((state.wins / tot) * 100, 1) if tot > 0 else 0.0
 
+        breakdown_str = f"Recuperado com G{gale_usado}" if gale_usado > 0 else ""
         state.history_trades.insert(0, {
             "time": agora_exec_str,
             "asset": ativo,
@@ -674,9 +1151,10 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             "stake": valor,
             "result": res_str,
             "profit": lucro_liquido,
-            "breakdown": f"Recuperado com G{gale_usado}" if gale_usado > 0 else "",
+            "breakdown": breakdown_str,
             "reason": motivo_str
         })
+        salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, res_str, lucro_liquido, gale_usado, breakdown_str, motivo_str, agora_exec_str)
         state.current_observation = f"[VITÓRIA INSTITUCIONAL] Operação WIN em {ativo}! Lucro: +R$ {lucro_liquido:.2f}"
     else:
         # LOSS na entrada atual
@@ -704,6 +1182,7 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             tot = state.wins + state.losses
             state.assertividade = round((state.wins / tot) * 100, 1) if tot > 0 else 0.0
 
+            breakdown_str = f"Loss confirmado após G{gale_usado}" if gale_usado > 0 else "Loss primeira entrada"
             state.history_trades.insert(0, {
                 "time": agora_exec_str,
                 "asset": ativo,
@@ -711,9 +1190,10 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
                 "stake": valor,
                 "result": res_str,
                 "profit": -total_perdido,
-                "breakdown": f"Loss confirmado após G{gale_usado}" if gale_usado > 0 else "Loss primeira entrada",
+                "breakdown": breakdown_str,
                 "reason": motivo_str
             })
+            salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, res_str, -total_perdido, gale_usado, breakdown_str, motivo_str, agora_exec_str)
             state.current_observation = f"[FIM DE CICLO G1] Loss confirmado (-R$ {total_perdido:.2f}). Analisando novas confluências para recuperação..."
 
     # Proteção de Stop Win / Stop Loss
@@ -829,89 +1309,155 @@ def analisar_quant_smc(ativo: str, dados: Dict[str, Any]) -> Dict[str, Any]:
 # ========================================================
 # LOOP DE VARREDURA DOS ÚLTIMOS 60 CANDLES DE TODOS OS ATIVOS
 # ========================================================
-async def varrer_60_candles_ativos():
-    """Varre TODOS os ativos binários OTC da corretora sem repetir entradas recentes"""
-    if not state.ai_enabled or state.is_trading:
-        return
+CANDLES_CACHE_FILE = os.path.join(os.path.dirname(__file__), "candles_cache.json")
 
-    agora_ts = int(time.time())
-    agora_str = datetime.now().strftime("%H:%M:%S")
-    segundo_vela = agora_ts % 60
-    state.candle_clock = f"00:{60 - segundo_vela:02d}"
+async def aquecer_candles_todos_ativos():
+    """Ao ligar a IA, puxa os 60 candles atuais de TODOS os ativos OTC e salva no computador com progresso visível."""
+    pool_otc = obter_pool_otc_binarios()
+    total = len(pool_otc)
+    state.candles_cache = {}
+    state.warmup_progress = {"active": True, "loaded": 0, "total": total, "asset": "", "percent": 0}
+    print(f"\n[AQUECIMENTO GLOBAL] Carregando 60 candles de todos os {total} ativos OTC...", flush=True)
 
-    # FILTRO ANTI-REPETIÇÃO: Cooldown de 240 segundos (4 min) para não repetir entrada no mesmo par
-    cooldown_tempo = 240
-    ativos_livres = [
-        a for a in OTC_BINARY_CATALOG
-        if (agora_ts - state.recently_traded_assets.get(a, 0)) > cooldown_tempo
-    ]
-    if not ativos_livres:
-        ativos_livres = sorted(OTC_BINARY_CATALOG, key=lambda a: state.recently_traded_assets.get(a, 0))
+    for idx, ativo in enumerate(pool_otc, start=1):
+        if not state.ai_enabled or state.is_paused:
+            state.warmup_progress["active"] = False
+            return
+        pct = int((idx / total) * 100) if total > 0 else 100
+        state.warmup_progress = {"active": True, "loaded": idx, "total": total, "asset": ativo, "percent": pct}
+        state.current_observation = f"🔄 Carregando histórico de 60 candles: {ativo} ({idx}/{total} — {pct}%)"
 
-    # Prioriza o ativo ativo se estiver livre, seguido pelos demais da lista OTC
-    ativos_para_varrer = ([state.active_asset] if state.active_asset in ativos_livres else []) + [a for a in ativos_livres if a != state.active_asset]
-
-    melhor_oportunidade = None
-    maior_confluencia = 0
-
-    print(f"\n[VARREDURA OTC EM TEMPO REAL - {agora_str} (Vela {segundo_vela}s/60s)] Analisando pool de {len(ativos_para_varrer)} ativos sem repetir entradas...", flush=True)
-
-    # Varre os ativos da fila de rotação
-    for ativo in ativos_para_varrer[:8]:
-        if not state.ai_enabled or state.is_paused or state.is_trading:
-            break
-
-        candles = []
         if state.api and state.is_connected:
             try:
                 candles = await asyncio.wait_for(
-                    asyncio.to_thread(state.api.get_candles, ativo, 60, 60, agora_ts),
-                    timeout=1.2
+                    asyncio.to_thread(state.api.get_candles, ativo, 60, 60, int(time.time())),
+                    timeout=4.0
                 )
-            except Exception:
-                pass
+                if candles and len(candles) >= 20:
+                    state.candles_cache[ativo] = candles[-60:]
+            except Exception as ex:
+                print(f"[AQUECIMENTO ERR] {ativo}: {ex}", flush=True)
+
+    try:
+        with open(CANDLES_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state.candles_cache, f)
+    except Exception as ex:
+        print(f"[CACHE SAVE ERR] {ex}", flush=True)
+
+    state.warmup_done = True
+    state.warmup_progress = {"active": False, "loaded": len(state.candles_cache), "total": total, "asset": "", "percent": 100}
+    state.current_observation = f"✅ Histórico de 60 candles carregado para {len(state.candles_cache)}/{total} ativos! Iniciando análises com Gemini AI..."
+    print(f"[AQUECIMENTO CONCLUÍDO] {len(state.candles_cache)}/{total} ativos salvos em {CANDLES_CACHE_FILE}", flush=True)
+
+async def varrer_60_candles_ativos():
+    """Varre TODOS os ativos binários OTC da corretora sem repetir até operar em todos"""
+    if not state.ai_enabled or state.is_trading or state.is_scanning:
+        return
+
+    pode_operar, msg_saldo = verificar_saldo_para_operar(state.entry_stake)
+    if not pode_operar:
+        state.ai_enabled = False
+        state.current_observation = msg_saldo
+        print(f"[IA BLOQUEADA] {msg_saldo}", flush=True)
+        return
+
+    state.is_scanning = True
+    try:
+        if not state.warmup_done:
+            await aquecer_candles_todos_ativos()
+            if not state.ai_enabled or state.is_paused:
+                return
+        agora_ts = int(time.time())
+        agora_str = datetime.now().strftime("%H:%M:%S")
+        segundo_vela = agora_ts % 60
+        state.candle_clock = f"00:{60 - segundo_vela:02d}"
+
+        pool_otc = obter_pool_otc_binarios()
+
+        # FILTRO ANTI-REPETIÇÃO: Não repete ativo até operar em TODOS os ativos do pool
+        ativos_livres = [a for a in pool_otc if a not in state.recently_traded_assets]
+        if not ativos_livres:
+            state.recently_traded_assets.clear()
+            ativos_livres = list(pool_otc)
+            print(f"\n[CICLO COMPLETO] Todos os {len(pool_otc)} ativos OTC foram operados. Reiniciando ciclo!", flush=True)
+
+        # Prioriza o ativo ativo se estiver livre, seguido pelos demais da lista OTC
+        ativos_para_varrer = ([state.active_asset] if state.active_asset in ativos_livres else []) + [a for a in ativos_livres if a != state.active_asset]
+
+        # Fica no ativo atual até encontrar uma entrada válida baseada no histórico de 60 velas
+        ativo = ativos_para_varrer[0]
+        limite_confluencia = 75 if state.current_gale_step > 0 else 80
+
+        agora_ts = int(time.time())
+        agora_str = datetime.now().strftime("%H:%M:%S")
+        segundo_vela = agora_ts % 60
+        minuto_inicio_analise = agora_ts // 60
+        state.candle_clock = f"00:{60 - segundo_vela:02d}"
+
+        print(f"\n[ANÁLISE FOCADA NO ATIVO - {agora_str} (Vela {segundo_vela}s/60s)] {ativo} | Restantes no ciclo: {len(ativos_para_varrer)}/{len(pool_otc)}", flush=True)
+
+        candles = []
+        if state.api and state.is_connected:
+            cached = state.candles_cache.get(ativo, [])
+            qtd_fetch = 5 if len(cached) >= 55 else 60
+            try:
+                novos = await asyncio.wait_for(
+                    asyncio.to_thread(state.api.get_candles, ativo, 60, qtd_fetch, agora_ts),
+                    timeout=4.0
+                )
+                if novos:
+                    if cached and qtd_fetch == 5:
+                        by_id = {c.get("id"): c for c in cached if isinstance(c, dict) and c.get("id") is not None}
+                        for c in novos:
+                            if isinstance(c, dict) and c.get("id") is not None:
+                                by_id[c.get("id")] = c
+                        candles = [by_id[k] for k in sorted(by_id.keys())][-60:]
+                    else:
+                        candles = novos[-60:]
+                    if len(candles) >= 20:
+                        state.candles_cache[ativo] = candles
+            except Exception as ex:
+                print(f"[CANDLES ERR] {ativo}: {ex}", flush=True)
+                if len(cached) >= 20:
+                    candles = cached
+                else:
+                    return
+            if not candles or len(candles) < 20:
+                print(f"[CANDLES VAZIO] {ativo}: menos de 20 velas recebidas da plataforma.", flush=True)
+                return
 
         if not candles or len(candles) < 20:
-            # Dados de velas em tempo real
-            base_p = 1.08500 if "EUR" in ativo else (1.25400 if "GBP" in ativo else (152.300 if "JPY" in ativo else 0.88500))
-            candles = []
-            for i in range(60):
-                p = base_p + math.sin((i + agora_ts % 60) / 4.0) * 0.0012 + (math.cos(i / 7.0) * 0.0006)
-                d_open = round(math.sin(i * 3 + agora_ts % 59) * 0.00015, 5)
-                d_close = round(math.cos(i * 2 + agora_ts % 59) * 0.00018, 5)
-                c_o = round(p + d_open, 5)
-                c_c = round(p + d_close, 5)
-                p_sup = round(abs(math.sin(i * 4 + agora_ts % 47)) * 0.00025 + 0.00008, 5)
-                p_inf = round(abs(math.cos(i * 5 + agora_ts % 53)) * 0.00022 + 0.00008, 5)
-                c_h = round(max(c_o, c_c) + p_sup, 5)
-                c_l = round(min(c_o, c_c) - p_inf, 5)
-                candles.append({
-                    "id": agora_ts - (60 - i) * 60,
-                    "open": c_o,
-                    "close": c_c,
-                    "min": c_l,
-                    "max": c_h,
-                    "volume": 250 + (i * 7) % 180
-                })
+            return
 
         dados_60 = calcular_indicadores_60(candles)
         if not dados_60:
-            continue
+            return
 
         state.active_asset = ativo
         state.last_candle_data = dados_60
 
-        # Análise quantitativa institucional SMC em tempo real (0.00s LAG)
-        analise = analisar_quant_smc(ativo, dados_60)
-        
-        # Enriquecimento assíncrono com Gemini se chave configurada
-        if state.gemini_key:
-            try:
-                g_res = await asyncio.wait_for(consultar_gemini(ativo, dados_60), timeout=0.8)
-                if g_res and g_res.get("decisao") in ["CALL", "PUT"]:
-                    analise = g_res
-            except Exception:
-                pass
+        # Análise EXCLUSIVA via API (Manus v2 / Gemini AI)
+        if not state.gemini_key:
+            state.ai_enabled = False
+            state.gemini_status = "Desativado (GEMINI_API_KEY não configurada)"
+            state.current_observation = "Chave da API Gemini não configurada. Robô desligado — só opera com a API."
+            print("[IA DESLIGADA] GEMINI_API_KEY não configurada.", flush=True)
+            return
+
+        analise = None
+        try:
+            gem_timeout = 90.0 if state.gemini_key.startswith("sk-") else 9.0
+            analise = await asyncio.wait_for(consultar_gemini(ativo, dados_60), timeout=gem_timeout)
+        except Exception as ex:
+            state.gemini_status = f"Timeout/Erro: {type(ex).__name__}"
+            print(f"[GEMINI TIMEOUT] {ativo}: {ex}", flush=True)
+
+        if not analise or not isinstance(analise, dict) or analise.get("decisao") not in ["CALL", "PUT", "AGUARDAR"]:
+            state.ai_enabled = False
+            state.active_signal = None
+            state.current_observation = f"Falha na API do Gemini ({state.gemini_status}). Robô desligado — só opera com a API."
+            print(f"[IA DESLIGADA - ERRO GEMINI] {state.current_observation}", flush=True)
+            return
 
         conf = analise.get("confluencia_porcentagem", 0)
         decisao = analise.get("decisao")
@@ -919,50 +1465,91 @@ async def varrer_60_candles_ativos():
         state.current_observation = obs_txt
         print(f"    [ANÁLISE 0s LAG] {ativo}: {decisao} ({conf}%) | {analise.get('padrao_vela', '')} | SMC: {dados_60.get('smc_order_block')}", flush=True)
 
-        if decisao in ["CALL", "PUT"] and conf > maior_confluencia:
-            maior_confluencia = conf
-            melhor_oportunidade = {
-                "ativo": ativo,
-                "decisao": decisao,
-                "confluencia": conf,
-                "motivo": f"Confluência {conf}%: [{analise.get('padrao_vela', 'SMC')}] {analise.get('psicologia_mercado', '')}",
-                "observacao": obs_txt
-            }
+        if decisao in ["CALL", "PUT"] and conf >= limite_confluencia and not state.is_trading and not state.is_paused:
+            minuto_atual = int(time.time()) // 60
+            if minuto_atual != minuto_inicio_analise:
+                print(f" -> [PROTEÇÃO ANTI-ATRASO] {ativo}: a vela virou durante a análise ({decisao} {conf}%). Reavaliando vela atual antes de entrar!", flush=True)
+                return
 
-    # Se encontrou oportunidade com alta confluência (ou G1 de recuperação), executa sozinho
-    limite_confluencia = 75 if state.current_gale_step > 0 else 80
-    if melhor_oportunidade and maior_confluencia >= limite_confluencia and not state.is_trading and not state.is_paused:
-        state.active_asset = melhor_oportunidade["ativo"]
-        # Marca o ativo como recém negociado para NÃO repetir entradas
-        state.recently_traded_assets[melhor_oportunidade["ativo"]] = time.time()
-        print(f" -> [ANTI-REPETIÇÃO] {melhor_oportunidade['ativo']} registrado em cooldown para garantir rotação de pares!", flush=True)
+            state.active_asset = ativo
+            state.recently_traded_assets[ativo] = time.time()
+            print(f" -> [SINAL CONFIRMADO] {ativo}: {decisao} ({conf}%). Operado ({len(state.recently_traded_assets)}/{len(pool_otc)} no ciclo).", flush=True)
 
-        if melhor_oportunidade["observacao"]:
-            state.current_observation = melhor_oportunidade["observacao"]
-
-        valor = state.entry_stake * (state.gale_factor ** state.current_gale_step if state.current_gale_step > 0 else 1.0)
-        tipo_tiro = f"MARTINGALE G{state.current_gale_step}" if state.current_gale_step > 0 else "ENTRADA INICIAL"
-        simb = "$" if state.currency in ["USD", "$"] else "R$"
-        print(f"\n[ORDEM AUTÔNOMA DISPARADA ({tipo_tiro})] {melhor_oportunidade['decisao']} em {melhor_oportunidade['ativo']} | Valor: {simb} {valor:.2f}", flush=True)
-        asyncio.create_task(disparar_trade_autonomo(
-            melhor_oportunidade["decisao"], valor, melhor_oportunidade["motivo"],
-            melhor_oportunidade["ativo"], melhor_oportunidade["confluencia"]
-        ))
+            motivo = f"Confluência {conf}%: [{analise.get('padrao_vela', 'SMC')}] {analise.get('psicologia_mercado', '')}"
+            valor = state.entry_stake * (state.gale_factor ** state.current_gale_step if state.current_gale_step > 0 else 1.0)
+            tipo_tiro = f"MARTINGALE G{state.current_gale_step}" if state.current_gale_step > 0 else "ENTRADA INICIAL"
+            simb = "$" if state.currency in ["USD", "$"] else "R$"
+            print(f"\n[ORDEM AUTÔNOMA DISPARADA ({tipo_tiro})] {decisao} em {ativo} | Valor: {simb} {valor:.2f}", flush=True)
+            asyncio.create_task(disparar_trade_autonomo(
+                decisao, valor, motivo, ativo, conf
+            ))
+        else:
+            # Permanece no mesmo ativo e aguarda atualização da vela antes de reavaliar
+            print(f" -> [PERMANECENDO EM {ativo}] {decisao} ({conf}% < {limite_confluencia}%). Aguardando melhor formação sem pular de ativo.", flush=True)
+            await asyncio.sleep(3)
+    finally:
+        state.is_scanning = False
 
 async def loop_trader_background():
     while True:
         try:
             await asyncio.sleep(1)
-            state.candle_clock = f"00:{60 - (int(time.time()) % 60):02d}"
-            if not state.ai_enabled or state.is_paused or state.is_trading:
+            agora_s = int(time.time())
+            seg_v = agora_s % 60
+            state.candle_clock = f"00:{60 - seg_v:02d}"
+            if state.last_candle_data:
+                state.last_candle_data["segundo_da_vela"] = seg_v
+                state.last_candle_data["tempo_restante_vela"] = 60 - seg_v
+                state.last_candle_data["relogio_horario"] = datetime.now().strftime("%H:%M:%S")
+            if not state.ai_enabled or state.is_paused or state.is_trading or state.is_scanning:
                 continue
 
-            state.is_scanning = True
             await varrer_60_candles_ativos()
-            state.is_scanning = False
 
         except Exception as e:
             logging.error(f"Erro no loop autônomo: {e}")
+
+def atualizar_saldos_plataforma(api_instance) -> tuple[Optional[float], Optional[float]]:
+    """Busca os saldos REAL (type=1) e PRACTICE (type=4) diretamente da plataforma BullEx."""
+    real_bal = None
+    demo_bal = None
+    try:
+        balances_raw = api_instance.get_balances()
+        msgs = balances_raw.get("msg") if isinstance(balances_raw, dict) else None
+        if isinstance(msgs, list):
+            for item in msgs:
+                if not isinstance(item, dict):
+                    continue
+                b_type = item.get("type")
+                amount = item.get("amount")
+                if amount is None:
+                    continue
+                if b_type == 1:
+                    real_bal = float(amount)
+                elif b_type == 4:
+                    demo_bal = float(amount)
+    except Exception as ex:
+        print(f"[GET_BALANCES ERR] {ex}", flush=True)
+    return real_bal, demo_bal
+
+def sincronizar_saldos_plataforma(api_instance) -> None:
+    if not api_instance:
+        return
+    real_bal, demo_bal = atualizar_saldos_plataforma(api_instance)
+    if real_bal is not None:
+        state.balance_real = real_bal
+    if demo_bal is not None:
+        state.balance_demo = demo_bal
+    if (state.mode == "REAL" and real_bal is None) or (state.mode != "REAL" and demo_bal is None):
+        try:
+            saldo = api_instance.get_balance()
+            if saldo is not None:
+                if state.mode == "REAL":
+                    state.balance_real = float(saldo)
+                else:
+                    state.balance_demo = float(saldo)
+        except Exception as ex:
+            print(f"[GET_BALANCE ERR] {ex}", flush=True)
 
 async def auto_conectar_bullex():
     if Bullex and state.email and state.password:
@@ -978,12 +1565,11 @@ async def auto_conectar_bullex():
                     pass
                 state.api = api_instance
                 state.is_connected = True
-                saldo = await asyncio.to_thread(api_instance.get_balance) or 0.0
-                if state.mode == "REAL":
-                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22776.06)
-                else:
-                    state.balance_demo = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_demo or 10000.0)
-                print(f"[AUTO-LOGIN SUCESSO] Conectado na BullEx! Saldo: R$ {saldo:.2f}", flush=True)
+                carregar_resultados_usuario(state.email)
+                await asyncio.to_thread(sincronizar_saldos_plataforma, api_instance)
+                await asyncio.to_thread(sincronizar_payouts_plataforma, api_instance)
+                saldo = state.balance_demo if state.mode == "DEMO" else state.balance_real
+                print(f"[AUTO-LOGIN SUCESSO] Conectado na BullEx! Saldo REAL: {state.balance_real:.2f} | Saldo ativo: {saldo:.2f}", flush=True)
         except Exception as e:
             print(f"[AUTO-LOGIN ERRO] {e}", flush=True)
 
@@ -1034,12 +1620,10 @@ async def api_connect(req: ConnectRequest):
 
                 state.api = api_instance
                 state.is_connected = True
+                carregar_resultados_usuario(state.email)
 
-                saldo = 0.0
-                try:
-                    saldo = await asyncio.to_thread(api_instance.get_balance) or 0.0
-                except Exception as ex:
-                    print(f"[GET_BALANCE ERR] {ex}", flush=True)
+                await asyncio.to_thread(sincronizar_saldos_plataforma, api_instance)
+                await asyncio.to_thread(sincronizar_payouts_plataforma, api_instance)
 
                 moeda = "BRL"
                 try:
@@ -1048,12 +1632,9 @@ async def api_connect(req: ConnectRequest):
                     pass
 
                 state.currency = moeda
-                if state.mode == "REAL":
-                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22776.06)
-                else:
-                    state.balance_demo = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_demo or 10000.0)
+                saldo = state.balance_demo if state.mode == "DEMO" else state.balance_real
                 
-                print(f"[LOGIN SUCCESS] Conectado na BullEx! Modo: {state.mode} ({mode_bx}), Saldo: {saldo} {moeda}", flush=True)
+                print(f"[LOGIN SUCCESS] Conectado na BullEx! Modo: {state.mode} ({mode_bx}), Saldo REAL: {state.balance_real} | Saldo: {saldo} {moeda}", flush=True)
                 
                 return {
                     "success": True,
@@ -1085,14 +1666,8 @@ async def api_connect(req: ConnectRequest):
 
 @app.post("/api/demo_bypass")
 async def api_demo_bypass():
-    state.is_connected = True
-    state.mode = "DEMO"
-    state.trader_name = "Jose Carlos"
-    state.email = "josecarlosqueirozdesena999559@gmail.com"
-    state.balance_real = 22776.06
-    state.balance_demo = 10000.00
-    state.currency = "USD"
-    return {"success": True, "mode": "DEMO", "balance": 10000.00}
+    state.is_connected = False
+    return {"success": False, "message": "Login em conta falsa desativado. Conecte uma conta BullEx válida."}
 
 class TwoFactorRequest(BaseModel):
     code: str
@@ -1109,6 +1684,7 @@ async def api_connect_2fa(req: TwoFactorRequest):
                 except Exception:
                     pass
                 state.is_connected = True
+                carregar_resultados_usuario(state.email)
                 saldo = await asyncio.to_thread(state.api.get_balance) or 0.0
                 return {"success": True, "balance": saldo, "mode": state.mode}
             return {"success": False, "message": f"Falha no 2FA: {reason}"}
@@ -1126,7 +1702,11 @@ async def api_trade_manual(req: ManualTradeRequest):
     if direcao not in ["CALL", "PUT"]:
         return {"success": False, "message": "Direção inválida"}
     valor = req.stake if req.stake else state.entry_stake
-    asyncio.create_task(disparar_trade_autonomo(direcao, valor, "Disparo Manual do Usuário"))
+    pode_operar, msg_saldo = verificar_saldo_para_operar(valor)
+    if not pode_operar:
+        state.current_observation = msg_saldo
+        return {"success": False, "message": msg_saldo}
+    asyncio.create_task(disparar_trade_autonomo(direcao, valor, "Disparo Manual do Usuário", state.active_asset, 100))
     return {"success": True, "message": f"Ordem {direcao} disparada na conta {state.mode}!"}
 
 @app.post("/api/sell_option")
@@ -1161,27 +1741,30 @@ async def api_logout():
     state.email = ""
     state.password = ""
     state.balance_real = 0.0
+    limpar_resultados_memoria()
     return {"success": True}
 
 @app.get("/api/assets")
 async def api_assets():
     return CATEGORIZED_ASSETS
 
+@app.get("/api/analytics")
+async def api_analytics(scope: str = "day", date: Optional[str] = None, month: Optional[str] = None):
+    if not (state.is_connected and state.email):
+        return obter_analytics_usuario(None, scope=scope, target_date=date, target_month=month)
+    return obter_analytics_usuario(state.email, scope=scope, target_date=date, target_month=month)
+
 @app.get("/api/status")
 async def api_status():
+    verificar_virada_dia()
     if state.api and state.is_connected:
         try:
-            b = state.api.get_balance()
-            if b is not None and float(b) > 0:
-                if state.mode == "REAL":
-                    state.balance_real = float(b)
-                else:
-                    state.balance_demo = float(b)
+            await asyncio.to_thread(sincronizar_saldos_plataforma, state.api)
         except Exception:
             pass
     bal = state.balance_demo if state.mode == "DEMO" else state.balance_real
     return {
-        "connected": state.is_connected,
+        "connected": bool(state.is_connected and state.api is not None),
         "email": state.email,
         "trader_name": state.trader_name,
         "mode": state.mode,
@@ -1189,6 +1772,9 @@ async def api_status():
         "balance": bal,
         "balance_demo": state.balance_demo,
         "balance_real": state.balance_real,
+        "gemini_active": bool(state.gemini_key),
+        "gemini_status": state.gemini_status,
+        "warmup_progress": state.warmup_progress,
         "ai_enabled": state.ai_enabled,
         "is_paused": state.is_paused,
         "is_trading": state.is_trading,
@@ -1199,7 +1785,7 @@ async def api_status():
         "candle_clock": state.candle_clock,
         "last_candle_data": state.last_candle_data,
         "recently_traded": list(state.recently_traded_assets.keys()),
-        "otc_catalog_size": len(OTC_BINARY_CATALOG),
+        "otc_catalog_size": len(obter_pool_otc_binarios()),
         "scoreboard": {
             "wins": state.wins,
             "losses": state.losses,
@@ -1208,6 +1794,8 @@ async def api_status():
             "operacoes": state.operacoes
         },
         "history": state.history_trades[:15],
+        "history_full": state.history_trades,
+        "analytics": obter_analytics_usuario(state.email) if (state.is_connected and state.email) else None,
         "config": {
             "stake": state.entry_stake,
             "use_martingale": state.use_martingale,
@@ -1220,17 +1808,34 @@ async def api_status():
 
 @app.post("/api/toggle_ai")
 async def api_toggle_ai():
+    if not state.ai_enabled:
+        carregar_env()
+        state.gemini_key = os.getenv("GEMINI_API_KEY", state.gemini_key)
+        if not state.gemini_key:
+            msg_gem = "Chave da API Gemini não configurada. O robô só opera com a API do Gemini."
+            state.ai_enabled = False
+            state.current_observation = msg_gem
+            return {"ai_enabled": False, "success": False, "message": msg_gem}
+        pode_operar, msg_saldo = verificar_saldo_para_operar(state.entry_stake)
+        if not pode_operar:
+            state.ai_enabled = False
+            state.current_observation = msg_saldo
+            return {"ai_enabled": False, "success": False, "message": msg_saldo}
     state.ai_enabled = not state.ai_enabled
     if state.ai_enabled:
-        # Ao ligar a IA: limpa sinais antigos e aquece imediatamente os ativos com os 60 últimos candles
+        # Ao ligar a IA: limpa sinais antigos e força recarga dos 60 candles de TODOS os ativos
         state.active_signal = None
         state.last_candle_data = {}
-        state.current_observation = "Aquecendo ativos com os últimos 60 candles em tempo real da BullEx..."
-        print("\n[IA LIGADA PELO USUÁRIO] Aquecendo ativos com os últimos 60 candles em tempo real...", flush=True)
+        state.warmup_done = False
+        state.warmup_progress = {"active": True, "loaded": 0, "total": len(obter_pool_otc_binarios()), "asset": "", "percent": 0}
+        state.current_observation = "🔄 Iniciando carregamento dos 60 candles atuais de todos os ativos OTC..."
+        print("\n[IA LIGADA PELO USUÁRIO] Carregando 60 candles atuais de todos os ativos OTC...", flush=True)
         asyncio.create_task(varrer_60_candles_ativos())
     else:
-        # Ao desligar a IA: limpa sinal ativo e congela análise
+        # Ao desligar a IA: limpa sinal ativo e reseta warmup para recarregar ao ligar novamente
         state.active_signal = None
+        state.warmup_done = False
+        state.warmup_progress = {"active": False, "loaded": 0, "total": 0, "asset": "", "percent": 0}
         state.current_observation = "Inteligência Artificial desligada. Clique no botão 'Ligar IA' para aquecer os ativos com os últimos 60 candles e iniciar."
         print("\n[IA DESLIGADA PELO USUÁRIO] Operações e varredura pausadas.", flush=True)
     return {"ai_enabled": state.ai_enabled}
@@ -1291,11 +1896,7 @@ async def api_config(cfg: ConfigUpdate):
             try:
                 mode_bx = bullex_balance_mode(state.mode)
                 await asyncio.to_thread(state.api.change_balance, mode_bx)
-                saldo = await asyncio.to_thread(state.api.get_balance) or 0.0
-                if state.mode == "REAL":
-                    state.balance_real = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_real or 22776.06)
-                else:
-                    state.balance_demo = float(saldo) if (saldo and float(saldo) > 0) else (state.balance_demo or 10000.0)
+                await asyncio.to_thread(sincronizar_saldos_plataforma, state.api)
             except Exception:
                 pass
     return {"success": True}

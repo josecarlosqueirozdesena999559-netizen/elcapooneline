@@ -25,3 +25,5 @@ frontend-dashboard/
 
 .DS_Store
 Thumbs.db
+candles_cache.json
+results_history.db

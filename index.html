@@ -745,21 +745,54 @@
     }
     .analytics-kpis-grid {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 12px;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+    @media (max-width: 780px) {
+      .analytics-kpis-grid { grid-template-columns: repeat(2, 1fr); }
     }
     .an-kpi-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border-card);
-      border-radius: 4px;
-      padding: 16px 18px;
+      background: linear-gradient(145deg, rgba(255, 255, 255, 0.06), rgba(15, 21, 32, 0.55));
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      border-radius: 20px;
+      padding: 18px 20px;
       display: flex;
       flex-direction: column;
       gap: 6px;
+      transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+    .an-kpi-card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(56, 189, 248, 0.38);
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.14);
     }
     .an-kpi-card.highlight {
-      border-color: rgba(0, 213, 99, 0.35);
-      background: linear-gradient(180deg, rgba(0, 213, 99, 0.08) 0%, rgba(13, 18, 21, 0.95) 100%);
+      border-color: rgba(0, 230, 118, 0.38);
+      background: linear-gradient(145deg, rgba(0, 230, 118, 0.14), rgba(15, 23, 34, 0.6));
+      box-shadow: 0 12px 32px rgba(0, 230, 118, 0.08), inset 0 1px 0 rgba(0, 230, 118, 0.18);
+    }
+    .an-chart-card {
+      background: linear-gradient(145deg, rgba(255, 255, 255, 0.055), rgba(13, 18, 28, 0.62));
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.11);
+      border-radius: 22px;
+      padding: 22px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    }
+    .an-charts-two-col {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 14px;
+    }
+    @media (max-width: 860px) {
+      .an-charts-two-col { grid-template-columns: 1fr; }
     }
     .an-kpi-title { font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; }
     .an-kpi-number { font-size: 22px; font-weight: 900; color: #fff; font-variant-numeric: tabular-nums; }
@@ -767,39 +800,46 @@
 
     /* Config Tab */
     .config-card-box {
-      background: var(--bg-card);
-      border-radius: 4px;
-      border: 1px solid var(--border-card);
+      background: linear-gradient(145deg, rgba(20, 26, 38, 0.94), rgba(12, 16, 24, 0.98));
+      border-radius: 18px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
       padding: 20px 24px;
       display: flex;
       flex-direction: column;
       gap: 12px;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
     }
     .config-card-title {
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 800;
       color: #ffffff;
+      letter-spacing: 0.03em;
       display: flex;
       align-items: center;
       justify-content: space-between;
     }
-    .config-stepper-row { display: flex; align-items: center; gap: 10px; }
+    .config-stepper-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .cfg-step-btn {
-      width: 40px;
-      height: 40px;
-      border-radius: 4px;
-      background: rgba(255, 255, 255, 0.08);
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.07);
       border: 1px solid rgba(255, 255, 255, 0.12);
       color: #fff;
       font-size: 16px;
       font-weight: 800;
       cursor: pointer;
+      transition: background 0.2s ease, border-color 0.2s ease;
+    }
+    .cfg-step-btn:hover {
+      background: rgba(56, 189, 248, 0.16);
+      border-color: rgba(56, 189, 248, 0.35);
     }
     .cfg-number-input {
       flex: 1;
-      height: 40px;
-      border-radius: 4px;
-      background: rgba(0, 0, 0, 0.4);
+      height: 42px;
+      border-radius: 12px;
+      background: rgba(13, 17, 23, 0.85);
       border: 1px solid rgba(255, 255, 255, 0.12);
       color: #fff;
       font-size: 15px;
@@ -807,12 +847,16 @@
       text-align: center;
       font-family: var(--font-mono);
       outline: none;
+      transition: border-color 0.2s ease;
+    }
+    .cfg-number-input:focus {
+      border-color: rgba(0, 230, 118, 0.5);
     }
     .config-stops-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
     .btn-save-cfg {
       width: 100%;
       height: 52px;
-      border-radius: 4px;
+      border-radius: 14px;
       background: linear-gradient(135deg, #00e676 0%, #008744 100%);
       color: #03140a;
       font-size: 15px;
@@ -1360,6 +1404,15 @@
             <p class="obs-content-text" id="obsText">
               Carregando leitura técnica institucional dos candles com Google Gemini...
             </p>
+            <div id="warmupProgressContainer" style="display:none; margin-top:10px;">
+              <div style="display:flex; justify-content:space-between; font-size:11px; color:#38bdf8; margin-bottom:4px; font-family:var(--font-mono);">
+                <span id="warmupProgressLabel">Carregando ativos...</span>
+                <span id="warmupProgressPct">0%</span>
+              </div>
+              <div style="width:100%; height:6px; background:#0d1117; border-radius:9999px; overflow:hidden; border:1px solid rgba(56,189,248,0.25);">
+                <div id="warmupProgressBar" style="width:0%; height:100%; background:linear-gradient(90deg, #38bdf8, #00e676); transition:width 0.25s ease;"></div>
+              </div>
+            </div>
           </div>
 
 
@@ -1521,30 +1574,92 @@
         </section>
       </div>
 
-      <!-- ABA 2: RESULTADOS (ANALYTICS ESTILO TRELLU) -->
+      <!-- ABA 2: RESULTADOS (ANALYTICS POR CONTA/E-MAIL) -->
       <div id="viewResultados" class="tab-view-content">
-        <div class="analytics-view-container">
-          <div class="ai-master-control-card">
-            <h2 class="ai-control-h2">Desempenho Geral da Inteligência Artificial</h2>
-            <p class="ai-control-p">Métricas auditadas em tempo real da sessão operacional.</p>
+        <div class="analytics-view-container" style="display:flex; flex-direction:column; gap:16px;">
+          <div class="ai-master-control-card" style="border-radius:22px; background:linear-gradient(145deg, rgba(255,255,255,0.06), rgba(13,18,28,0.62)); backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px); border:1px solid rgba(255,255,255,0.12); box-shadow:0 14px 36px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.08); display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:14px;">
+            <div>
+              <h2 class="ai-control-h2">Desempenho por Conta (<span id="anUserEmail" style="color:#38bdf8;">—</span>)</h2>
+              <p class="ai-control-p">Resultados salvos individualmente por e-mail. O placar diário reinicia todo dia e fica acumulado no mês.</p>
+            </div>
+            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+              <div style="display:inline-flex; background:rgba(13,17,23,0.9); border:1px solid rgba(255,255,255,0.1); border-radius:9999px; padding:4px; gap:4px;">
+                <button type="button" id="btnScopeDay" onclick="setAnalyticsScope('day')" style="border:none; border-radius:9999px; padding:7px 16px; font-size:12px; font-weight:800; cursor:pointer; background:linear-gradient(135deg,#00e676,#22c55e); color:#04120a; transition:all 0.2s;">Dia</button>
+                <button type="button" id="btnScopeMonth" onclick="setAnalyticsScope('month')" style="border:none; border-radius:9999px; padding:7px 16px; font-size:12px; font-weight:800; cursor:pointer; background:transparent; color:#94a3b8; transition:all 0.2s;">Mês</button>
+              </div>
+              <input type="date" id="anDateInput" onchange="refreshAnalyticsFilter()" style="background:#0d1117; border:1px solid rgba(255,255,255,0.12); border-radius:9999px; padding:7px 14px; color:#e2e8f0; font-size:12px; font-weight:700; outline:none;">
+              <input type="month" id="anMonthInput" onchange="refreshAnalyticsFilter()" style="display:none; background:#0d1117; border:1px solid rgba(255,255,255,0.12); border-radius:9999px; padding:7px 14px; color:#e2e8f0; font-size:12px; font-weight:700; outline:none;">
+            </div>
           </div>
 
           <div class="analytics-kpis-grid">
-            <div class="an-kpi-card highlight">
-              <span class="an-kpi-title">LUCRO LÍQUIDO DA IA</span>
+            <div class="an-kpi-card highlight" id="kpiCardDay">
+              <span class="an-kpi-title">LUCRO DO DIA (<span id="anTodayDate">--/--</span>)</span>
               <span class="an-kpi-number green" id="anNetProfit">$ 0.00</span>
             </div>
+            <div class="an-kpi-card highlight" id="kpiCardMonth" style="display:none;">
+              <span class="an-kpi-title">LUCRO DO MÊS (<span id="anCurrentMonth">--/----</span>)</span>
+              <span class="an-kpi-number green" id="anMonthProfit">$ 0.00</span>
+            </div>
             <div class="an-kpi-card">
-              <span class="an-kpi-title">ASSERTIVIDADE</span>
+              <span class="an-kpi-title" id="anWinRateTitle">ASSERTIVIDADE (DIA)</span>
               <span class="an-kpi-number" id="anWinRate">0.0%</span>
             </div>
             <div class="an-kpi-card">
-              <span class="an-kpi-title">TOTAL DE VITÓRIAS</span>
+              <span class="an-kpi-title">MELHOR HORÁRIO</span>
+              <span class="an-kpi-number" style="color:#38bdf8;" id="anBestHour">--</span>
+            </div>
+            <div class="an-kpi-card">
+              <span class="an-kpi-title" id="anWinsTitle">VITÓRIAS (DIA)</span>
               <span class="an-kpi-number green" id="anTotalWins">0</span>
             </div>
             <div class="an-kpi-card">
-              <span class="an-kpi-title">TOTAL DE DERROTAS</span>
+              <span class="an-kpi-title" id="anLossesTitle">DERROTAS (DIA)</span>
               <span class="an-kpi-number" style="color: var(--red-negative);" id="anTotalLosses">0</span>
+            </div>
+          </div>
+
+          <div class="an-charts-two-col" id="dailyChartsRow">
+            <!-- GRÁFICO: COMPARAÇÃO ENTRADAS ÚNICAS vs MARTINGALE G1 -->
+            <div class="an-chart-card">
+              <div class="config-card-title">
+                <span>ENTRADAS ÚNICAS (1ª) vs MARTINGALE G1</span>
+              </div>
+              <div id="chartGaleComparison" style="display:flex; flex-direction:column; gap:12px;">
+                <span style="font-size:12px; color:var(--text-secondary);">Sem operações registradas para esta conta.</span>
+              </div>
+            </div>
+
+            <!-- GRÁFICO: MELHOR HORÁRIO -->
+            <div class="an-chart-card">
+              <div class="config-card-title">
+                <span>MELHOR HORÁRIO PARA OPERAR</span>
+              </div>
+              <div id="chartBestHours" style="display:flex; flex-direction:column; gap:8px;">
+                <span style="font-size:12px; color:var(--text-secondary);">Sem dados por horário ainda.</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="an-charts-two-col" id="monthlyChartsRow" style="display:none;">
+            <!-- GRÁFICO: LUCRO POR DIA NO MÊS -->
+            <div class="an-chart-card">
+              <div class="config-card-title">
+                <span>LUCRO POR DIA (MÊS ATUAL)</span>
+              </div>
+              <div id="chartDailyProfit" style="display:flex; align-items:flex-end; gap:10px; min-height:140px; overflow-x:auto; padding-top:16px;">
+                <span style="font-size:12px; color:var(--text-secondary);">Sem registros diários no mês.</span>
+              </div>
+            </div>
+
+            <!-- GRÁFICO: LUCRO POR MÊS -->
+            <div class="an-chart-card">
+              <div class="config-card-title">
+                <span>LUCRO ACUMULADO POR MÊS</span>
+              </div>
+              <div id="chartMonthlyProfit" style="display:flex; flex-direction:column; gap:10px;">
+                <span style="font-size:12px; color:var(--text-secondary);">Sem registros mensais ainda.</span>
+              </div>
             </div>
           </div>
         </div>
@@ -1680,7 +1795,7 @@
       aiOn: false,
       paused: false,
       mode: 'DEMO', // Inicia sempre no modo DEMO conforme solicitado pelo usuário
-      balanceReal: 22776.06,
+      balanceReal: 0.00,
       balanceDemo: 10000.00,
       currency: 'USD',
       balanceHidden: false,
@@ -1884,6 +1999,7 @@
     let currentCountdown = null;
     let currentCountdownPrefix = 'ENTRADA EM: ';
     let activeTradeTargetEpoch = null;
+    let entryTargetEpoch = null;
     window.activeTradeState = null;
 
     // Relógio da Vela M1 sem atrasos e sem saltos (baseado no segundo cravado do sistema: de 00:59 a 00:00)
@@ -1990,9 +2106,9 @@
 
         // Micro-atualização do preço e lucros sem pulos
         tickLiveTradePrices(remExp);
-      } else if (currentCountdown !== null && currentCountdown > 0) {
-        currentCountdown--;
-        const ss = currentCountdown < 10 ? '0' + currentCountdown : currentCountdown;
+      } else if (entryTargetEpoch !== null) {
+        const rem = Math.max(0, Math.ceil((entryTargetEpoch - Date.now()) / 1000));
+        const ss = rem < 10 ? '0' + rem : rem;
         const timerBadge = document.getElementById('signalTimerBadge');
         if (timerBadge) timerBadge.textContent = `${currentCountdownPrefix}00:${ss}s`;
       }
@@ -2021,7 +2137,7 @@
         if (bDemo) bDemo.classList.remove('active', 'demo');
         if (tag) { tag.textContent = 'REAL'; tag.style.color = 'var(--green-positive)'; }
         if (balEl && !appState.balanceHidden) {
-          const val = (appState.balanceReal || 22776.06).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          const val = (appState.balanceReal ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
           balEl.textContent = `${currSym} ${val}`;
         }
       } else {
@@ -2053,7 +2169,14 @@
     }
 
     function toggleAI() {
-      fetch('/api/toggle_ai', { method: 'POST' }).then(() => fetchStatus());
+      fetch('/api/toggle_ai', { method: 'POST' })
+        .then(res => res.json())
+        .then(d => {
+          if (d && d.success === false && d.message) {
+            alert(d.message);
+          }
+          fetchStatus();
+        });
     }
 
     function togglePause() {
@@ -2223,8 +2346,8 @@
 
                 // Modo e Saldo (Começa sempre em DEMO / REAL)
         appState.mode = data.mode || 'DEMO';
-        appState.balanceReal = data.balance_real !== undefined ? data.balance_real : 22776.06;
-        appState.balanceDemo = data.balance_demo !== undefined ? data.balance_demo : 10000.00;
+        appState.balanceReal = (data.balance_real !== undefined && data.balance_real !== null) ? data.balance_real : 0;
+        appState.balanceDemo = (data.balance_demo !== undefined && data.balance_demo !== null) ? data.balance_demo : 10000.00;
         appState.isTrading = !!data.is_trading;
         const bDemo = document.getElementById('btnCapsuleDemo');
         const bReal = document.getElementById('btnCapsuleReal');
@@ -2306,9 +2429,19 @@
           btnPause.style.color = '#e2e8f0';
         }
 
-        // Observação do Gemini
+        // Observação do Gemini e progresso de carregamento dos 60 candles
         if (data.observation) {
           document.getElementById('obsText').textContent = data.observation;
+        }
+        const wpBox = document.getElementById('warmupProgressContainer');
+        if (wpBox && data.warmup_progress && data.warmup_progress.active) {
+          wpBox.style.display = 'block';
+          const wp = data.warmup_progress;
+          document.getElementById('warmupProgressLabel').textContent = `Carregando 60 candles: ${wp.asset || '...'} (${wp.loaded}/${wp.total})`;
+          document.getElementById('warmupProgressPct').textContent = `${wp.percent || 0}%`;
+          document.getElementById('warmupProgressBar').style.width = `${wp.percent || 0}%`;
+        } else if (wpBox) {
+          wpBox.style.display = 'none';
         }
 
         // Exibição do Card de Sinal e Expiração M1 com Melhor Taxa, Lucro em Tempo Real e Contagem Fluida
@@ -2329,16 +2462,23 @@
           document.getElementById('signalStatusText').textContent = sig.status || 'PREPARANDO ORDEM';
 
           const secs = sig.seconds_left !== undefined ? sig.seconds_left : 0;
-          currentCountdown = secs;
           currentCountdownPrefix = (sig.status && sig.status.includes('FECHAMENTO')) ? 'FECHAMENTO EM: ' : ((sig.status && sig.status.includes('ANDAMENTO')) ? 'EXPIRAÇÃO EM: ' : 'ENTRADA EM: ');
-          document.getElementById('signalTimerBadge').textContent = `${currentCountdownPrefix}00:${secs < 10 ? '0' + secs : secs}s`;
 
           const headerTitle = document.getElementById('signalHeaderTitle');
           const isTradeRunning = sig.status && (sig.status.includes('ANDAMENTO') || sig.status.includes('FECHAMENTO'));
+          const serverTargetMs = sig.target_epoch ? (sig.target_epoch * 1000) : (Date.now() + secs * 1000);
           if (isTradeRunning) {
-            activeTradeTargetEpoch = Date.now() + (secs * 1000);
+            entryTargetEpoch = null;
+            if (!activeTradeTargetEpoch || Math.abs(activeTradeTargetEpoch - serverTargetMs) > 2500) {
+              activeTradeTargetEpoch = serverTargetMs;
+            }
           } else {
             activeTradeTargetEpoch = null;
+            if (!entryTargetEpoch || Math.abs(entryTargetEpoch - serverTargetMs) > 2500) {
+              entryTargetEpoch = serverTargetMs;
+            }
+            const remEntry = Math.max(0, Math.ceil((entryTargetEpoch - Date.now()) / 1000));
+            document.getElementById('signalTimerBadge').textContent = `${currentCountdownPrefix}00:${remEntry < 10 ? '0' + remEntry : remEntry}s`;
           }
 
           // Painel de Lucro em Tempo Real (Verde = Vitória, Vermelho = Entrada Negativa)
@@ -2463,6 +2603,7 @@
         } else {
           currentCountdown = null;
           activeTradeTargetEpoch = null;
+          entryTargetEpoch = null;
           window.activeTradeState = null;
           sigCard.style.display = 'none';
           const bxSection = document.getElementById('openPositionsSection');
@@ -2492,25 +2633,37 @@
           resEl.className = sc.resultado >= 0 ? 'top-score-number profit' : 'top-score-number loss';
           document.getElementById('scoreOps').textContent = sc.operacoes;
 
-          // Analytics
-          document.getElementById('anNetProfit').textContent = prefix + Math.abs(sc.resultado).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-          document.getElementById('anWinRate').textContent = sc.assertividade + '%';
+          // Analytics diário e mensal por e-mail
+          const netEl = document.getElementById('anNetProfit');
+          netEl.textContent = prefix + Math.abs(sc.resultado).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          netEl.style.color = sc.resultado >= 0 ? 'var(--green-positive)' : 'var(--red-negative)';
           document.getElementById('anTotalWins').textContent = sc.wins;
           document.getElementById('anTotalLosses').textContent = sc.losses;
+
+          if (data.analytics) {
+            window.lastCurrencySym = currSym;
+            window.lastNumLocale = numLocale;
+            window.lastScoreboard = sc;
+            if (window.analyticsScope === 'day' && !window.analyticsCustomFilter) {
+              renderAnalyticsCharts(data.analytics, currSym, numLocale, sc);
+            }
+          } else {
+            document.getElementById('anWinRate').textContent = sc.assertividade + '%';
+          }
         }
 
-        // Histórico de Ordens
+        // Histórico de Ordens (Operações recentes + Histórico completo preservado)
         const listEl = document.getElementById('historyTradesList');
         const fullListEl = document.getElementById('historyTradesFullList');
-        if (data.history && data.history.length > 0) {
-          let html = '';
-          data.history.forEach(item => {
+        const renderHistRows = (items) => {
+          let out = '';
+          items.forEach(item => {
             const dirClass = item.direction.toLowerCase().includes('call') ? 'call' : 'put';
             const resClass = item.result.toLowerCase() === 'win' ? 'win' : 'loss';
             const sign = item.profit >= 0 ? '+' : '-';
             const profitFmt = `${sign}${currSym} ${Math.abs(item.profit).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-            html += `
+            out += `
               <div class="hist-trade-item-wrap">
                 <div class="history-trade-row">
                   <div class="hist-left">
@@ -2527,15 +2680,229 @@
               </div>
             `;
           });
-          listEl.innerHTML = html;
-          fullListEl.innerHTML = html;
+          return out;
+        };
+        const emptyHtml = '<div class="empty-state-box">Nenhuma operação realizada nesta sessão. O robô analisará as confluências em tempo real e registrará os tiros aqui.</div>';
+        if (data.history && data.history.length > 0) {
+          listEl.innerHTML = renderHistRows(data.history);
         } else {
-          const emptyHtml = '<div class="empty-state-box">Nenhuma operação realizada nesta sessão. O robô analisará as confluências em tempo real e registrará os tiros aqui.</div>';
           listEl.innerHTML = emptyHtml;
+        }
+        const fullItems = (data.history_full && data.history_full.length > 0) ? data.history_full : data.history;
+        if (fullItems && fullItems.length > 0) {
+          fullListEl.innerHTML = renderHistRows(fullItems);
+        } else {
           fullListEl.innerHTML = emptyHtml;
         }
 
       } catch {}
+    }
+
+    window.analyticsScope = 'day';
+    window.analyticsCustomFilter = false;
+
+    function setAnalyticsScope(scope) {
+      window.analyticsScope = scope;
+      const bDay = document.getElementById('btnScopeDay');
+      const bMonth = document.getElementById('btnScopeMonth');
+      const dInp = document.getElementById('anDateInput');
+      const mInp = document.getElementById('anMonthInput');
+      const mRow = document.getElementById('monthlyChartsRow');
+      const kpiDay = document.getElementById('kpiCardDay');
+      const kpiMonth = document.getElementById('kpiCardMonth');
+      const wrTitle = document.getElementById('anWinRateTitle');
+      const wTitle = document.getElementById('anWinsTitle');
+      const lTitle = document.getElementById('anLossesTitle');
+      if (scope === 'month') {
+        if (mRow) mRow.style.display = 'grid';
+        if (kpiDay) kpiDay.style.display = 'none';
+        if (kpiMonth) kpiMonth.style.display = 'flex';
+        if (wrTitle) wrTitle.textContent = 'ASSERTIVIDADE (MÊS)';
+        if (wTitle) wTitle.textContent = 'VITÓRIAS (MÊS)';
+        if (lTitle) lTitle.textContent = 'DERROTAS (MÊS)';
+        bMonth.style.background = 'linear-gradient(135deg,#38bdf8,#0ea5e9)';
+        bMonth.style.color = '#04121a';
+        bDay.style.background = 'transparent';
+        bDay.style.color = '#94a3b8';
+        if (dInp) dInp.style.display = 'none';
+        if (mInp) {
+          mInp.style.display = 'inline-block';
+          if (!mInp.value) mInp.value = new Date().toISOString().slice(0, 7);
+        }
+        window.analyticsCustomFilter = true;
+      } else {
+        if (mRow) mRow.style.display = 'none';
+        if (kpiDay) kpiDay.style.display = 'flex';
+        if (kpiMonth) kpiMonth.style.display = 'none';
+        if (wrTitle) wrTitle.textContent = 'ASSERTIVIDADE (DIA)';
+        if (wTitle) wTitle.textContent = 'VITÓRIAS (DIA)';
+        if (lTitle) lTitle.textContent = 'DERROTAS (DIA)';
+        bDay.style.background = 'linear-gradient(135deg,#00e676,#22c55e)';
+        bDay.style.color = '#04120a';
+        bMonth.style.background = 'transparent';
+        bMonth.style.color = '#94a3b8';
+        if (mInp) mInp.style.display = 'none';
+        if (dInp) {
+          dInp.style.display = 'inline-block';
+          if (!dInp.value) dInp.value = new Date().toISOString().slice(0, 10);
+        }
+        window.analyticsCustomFilter = (dInp && dInp.value !== new Date().toISOString().slice(0, 10));
+      }
+      refreshAnalyticsFilter();
+    }
+
+    async function refreshAnalyticsFilter() {
+      const scope = window.analyticsScope || 'day';
+      const dVal = (document.getElementById('anDateInput') || {}).value || '';
+      const mVal = (document.getElementById('anMonthInput') || {}).value || '';
+      const todayIso = new Date().toISOString().slice(0, 10);
+      window.analyticsCustomFilter = (scope === 'month') || (dVal && dVal !== todayIso);
+      const qs = new URLSearchParams({ scope });
+      if (scope === 'day' && dVal) qs.set('date', dVal);
+      if (scope === 'month' && mVal) qs.set('month', mVal);
+      try {
+        const res = await fetch('/api/analytics?' + qs.toString());
+        const an = await res.json();
+        renderAnalyticsCharts(an, window.lastCurrencySym || '$', window.lastNumLocale || 'en-US', window.lastScoreboard || { assertividade: 0 });
+      } catch {}
+    }
+
+    function renderAnalyticsCharts(an, currSym, numLocale, sc) {
+      const fmtMoney = (v) => `${v >= 0 ? '+' : '-'}${currSym} ${Math.abs(v || 0).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      const emailEl = document.getElementById('anUserEmail');
+      if (emailEl) emailEl.textContent = an.email || '—';
+      const todayEl = document.getElementById('anTodayDate');
+      if (todayEl && an.today_date) todayEl.textContent = an.today_date.split('-').reverse().slice(0, 2).join('/');
+      const monthEl = document.getElementById('anCurrentMonth');
+      if (monthEl && an.current_month) monthEl.textContent = an.current_month.split('-').reverse().join('/');
+      const dInp = document.getElementById('anDateInput');
+      if (dInp && !dInp.value && an.today_date) dInp.value = an.today_date;
+      const mInp = document.getElementById('anMonthInput');
+      if (mInp && !mInp.value && an.current_month) mInp.value = an.current_month;
+
+      if (an.selected) {
+        const selProf = an.selected.profit || 0;
+        const netEl = document.getElementById('anNetProfit');
+        if (netEl) {
+          netEl.textContent = fmtMoney(selProf);
+          netEl.style.color = selProf >= 0 ? 'var(--green-positive)' : 'var(--red-negative)';
+        }
+        const wEl = document.getElementById('anTotalWins');
+        if (wEl) wEl.textContent = an.selected.wins || 0;
+        const lEl = document.getElementById('anTotalLosses');
+        if (lEl) lEl.textContent = an.selected.losses || 0;
+      }
+
+      const mProf = an.month ? (an.month.profit || 0) : 0;
+      const mEl = document.getElementById('anMonthProfit');
+      if (mEl) {
+        mEl.textContent = fmtMoney(mProf);
+        mEl.style.color = mProf >= 0 ? 'var(--green-positive)' : 'var(--red-negative)';
+      }
+      const selWr = an.selected ? (an.selected.win_rate || 0) : (sc.assertividade || 0);
+      const wrEl = document.getElementById('anWinRate');
+      if (wrEl) wrEl.textContent = `${selWr}%`;
+
+      const bhEl = document.getElementById('anBestHour');
+      if (bhEl) {
+        bhEl.textContent = an.best_hour ? `${an.best_hour.label} (${an.best_hour.win_rate}%)` : '--';
+      }
+
+      const galeBox = document.getElementById('chartGaleComparison');
+      if (galeBox && an.gale_comparison) {
+        const u = an.gale_comparison.unica;
+        const g = an.gale_comparison.g1;
+        const totalOps = (u.total || 0) + (g.total || 0);
+        if (totalOps === 0) {
+          galeBox.innerHTML = '<span style="font-size:12px; color:var(--text-secondary);">Sem operações registradas para esta conta.</span>';
+        } else {
+          const mkRow = (label, item, color) => {
+            const pct = item.win_rate || 0;
+            const profColor = item.profit >= 0 ? '#22c55e' : '#ff4d4f';
+            return `
+              <div style="display:flex; flex-direction:column; gap:4px;">
+                <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:700;">
+                  <span style="color:#e2e8f0;">${label} (${item.wins}W / ${item.losses}L • ${item.total} ops)</span>
+                  <span style="color:${profColor};">${pct}% | ${fmtMoney(item.profit)}</span>
+                </div>
+                <div style="width:100%; height:10px; background:#0d1117; border-radius:9999px; overflow:hidden; border:1px solid #1e293b;">
+                  <div style="width:${pct}%; height:100%; background:${color}; transition:width 0.3s;"></div>
+                </div>
+              </div>
+            `;
+          };
+          galeBox.innerHTML = mkRow('Entrada Única (1ª)', u, 'linear-gradient(90deg, #00e676, #22c55e)') +
+                              mkRow('Martingale G1', g, 'linear-gradient(90deg, #38bdf8, #818cf8)');
+        }
+      }
+
+      const hrBox = document.getElementById('chartBestHours');
+      if (hrBox) {
+        const hs = an.hourly_series || [];
+        if (hs.length === 0) {
+          hrBox.innerHTML = '<span style="font-size:12px; color:var(--text-secondary);">Sem dados por horário ainda.</span>';
+        } else {
+          const bestH = an.best_hour ? an.best_hour.hour : -1;
+          hrBox.innerHTML = hs.map(h => {
+            const isBest = h.hour === bestH;
+            const barColor = h.profit >= 0 ? (isBest ? '#00e676' : '#22c55e') : '#ff4d4f';
+            const badge = isBest ? ' ⭐ MELHOR' : '';
+            return `
+              <div style="display:grid; grid-template-columns: 52px 1fr 145px; align-items:center; gap:10px; font-size:12px;">
+                <span style="font-weight:700; color:${isBest ? '#00e676' : '#cbd5e1'}; font-family:var(--font-mono);">${h.label}</span>
+                <div style="width:100%; height:10px; background:#0d1117; border-radius:9999px; overflow:hidden;">
+                  <div style="width:${h.win_rate}%; height:100%; background:${barColor};"></div>
+                </div>
+                <span style="text-align:right; font-family:var(--font-mono); color:${h.profit >= 0 ? '#22c55e' : '#ff4d4f'};">${h.win_rate}% | ${fmtMoney(h.profit)}${badge}</span>
+              </div>
+            `;
+          }).join('');
+        }
+      }
+
+      const dayBox = document.getElementById('chartDailyProfit');
+      if (dayBox) {
+        const ds = an.daily_series || [];
+        if (ds.length === 0) {
+          dayBox.innerHTML = '<span style="font-size:12px; color:var(--text-secondary);">Sem registros diários no mês.</span>';
+        } else {
+          const maxAbs = Math.max(1, ...ds.map(d => Math.abs(d.profit)));
+          dayBox.innerHTML = ds.map(d => {
+            const hPx = Math.max(10, Math.round((Math.abs(d.profit) / maxAbs) * 90));
+            const color = d.profit >= 0 ? '#22c55e' : '#ff4d4f';
+            return `
+              <div style="display:flex; flex-direction:column; align-items:center; min-width:54px; gap:4px;" title="${d.date}: ${d.wins}W/${d.losses}L">
+                <span style="font-size:10px; font-family:var(--font-mono); color:${color};">${fmtMoney(d.profit)}</span>
+                <div style="width:26px; height:${hPx}px; background:${color}; border-radius:8px 8px 4px 4px; box-shadow:0 4px 12px ${d.profit >= 0 ? 'rgba(34,197,94,0.25)' : 'rgba(255,77,79,0.25)'};"></div>
+                <span style="font-size:10px; color:#94a3b8; font-family:var(--font-mono);">${d.label}</span>
+              </div>
+            `;
+          }).join('');
+        }
+      }
+
+      const monBox = document.getElementById('chartMonthlyProfit');
+      if (monBox) {
+        const ms = an.monthly_series || [];
+        if (ms.length === 0) {
+          monBox.innerHTML = '<span style="font-size:12px; color:var(--text-secondary);">Sem registros mensais ainda.</span>';
+        } else {
+          const maxAbsM = Math.max(1, ...ms.map(m => Math.abs(m.profit)));
+          monBox.innerHTML = ms.map(m => {
+            const pct = Math.min(100, Math.max(6, Math.round((Math.abs(m.profit) / maxAbsM) * 100)));
+            const color = m.profit >= 0 ? '#22c55e' : '#ff4d4f';
+            return `
+              <div style="display:grid; grid-template-columns: 70px 1fr 150px; align-items:center; gap:10px; font-size:12px;">
+                <span style="font-weight:700; color:#e2e8f0; font-family:var(--font-mono);">${m.label}</span>
+                <div style="width:100%; height:10px; background:#0d1117; border-radius:9999px; overflow:hidden;">
+                  <div style="width:${pct}%; height:100%; background:${color};"></div>
+                </div>
+                <span style="text-align:right; font-family:var(--font-mono); color:${color};">${m.wins}W/${m.losses}L | ${fmtMoney(m.profit)}</span>
+              </div>
+            `;
+          }).join('');
+        }
+      }
     }
 
     // Inicia polling a cada 500ms para resposta em tempo real sem delay
