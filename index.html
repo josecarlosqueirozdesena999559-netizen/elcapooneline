@@ -9,8 +9,8 @@
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,400;1,600;1,700&family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      --font-mono: 'JetBrains Mono', monospace;
+      --font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --font-mono: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       --bg-main: #090a0f;
       --bg-card: #13151b;
       --bg-card-hover: #181b23;
@@ -1563,7 +1563,7 @@
       box-shadow: none !important;
     }
 
-    /* Placar Estilo BullEx */
+    /* Placar Estilo BullEx - Fontes Padronizadas */
     .top-score-cell {
       background: #151b29 !important;
       border: 1px solid #1f2738 !important;
@@ -1572,18 +1572,49 @@
     }
 
     .top-score-label {
-      font-size: 10px !important;
-      font-weight: 800 !important;
-      color: #717b8f !important;
-      letter-spacing: 0.08em !important;
+      font-size: 11px !important;
+      font-weight: 700 !important;
+      color: #8492a6 !important;
+      letter-spacing: 0.06em !important;
       text-transform: uppercase !important;
+      font-family: var(--font-family) !important;
     }
 
     .top-score-number {
       font-size: 20px !important;
       font-weight: 800 !important;
       color: #ffffff !important;
-      font-family: var(--font-mono) !important;
+      font-family: var(--font-family) !important;
+    }
+
+    .top-badge-win {
+      font-size: 20px !important;
+      font-weight: 800 !important;
+      color: var(--green-positive) !important;
+      font-family: var(--font-family) !important;
+    }
+
+    .top-sep {
+      font-size: 16px !important;
+      font-weight: 700 !important;
+      color: #475569 !important;
+      font-family: var(--font-family) !important;
+      margin: 0 4px !important;
+    }
+
+    .top-badge-loss {
+      font-size: 20px !important;
+      font-weight: 800 !important;
+      color: var(--red-negative) !important;
+      font-family: var(--font-family) !important;
+    }
+
+    .analyzing-asset-tag {
+      font-size: 15px !important;
+      font-weight: 800 !important;
+      color: #ffffff !important;
+      font-family: var(--font-family) !important;
+      letter-spacing: 0.02em !important;
     }
 
     /* Botões de Ação no Padrão BullEx */
@@ -1882,17 +1913,22 @@
           </div>
         </section>
 
-        <!-- AI Master Control Card -->
-        <section class="ai-master-control-card">
-          <div class="ai-control-top">
-            <div class="ai-info-col">
-              <h2 class="ai-control-h2">Inteligência Artificial OTC</h2>
-              <p class="ai-control-p">Análise probabilística de candles, SMC e confluência técnica em tempo real com Google Gemini.</p>
+        <!-- AI Dynamic Analysis Card (Centerpiece) -->
+        <section class="ai-dynamic-display-card" style="margin-top: 12px;">
+          <div class="analyzing-header-row" style="display:flex; align-items:center; justify-content:space-between; width:100%; gap:12px; flex-wrap:wrap;">
+            <div style="display:flex; align-items:center; gap:10px;">
+              <div class="asset-selector-pill" style="cursor:default;" title="Par selecionado dinamicamente">
+                <span class="analyzing-asset-tag" id="currentActiveAsset">EURUSD-OTC</span>
+              </div>
+
+              <span id="candleClockBadge" style="font-size:12px; font-weight:700; color:#38bdf8; background:#151b29; border:1px solid rgba(56,189,248,0.25); border-radius:4px; padding:6px 14px; font-family:var(--font-family); display:flex; align-items:center; gap:6px;">
+                ⏱ HORA DE COMPRA: <strong id="txtCandleClock" style="color:#ffffff;">00:00</strong>
+              </span>
             </div>
 
-            <div class="ai-control-buttons-group">
+            <div class="ai-control-buttons-group" style="display:flex; align-items:center; gap:8px;">
               <button class="btn-pause-ai" id="btnPauseAI" onclick="togglePause()">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
                   <rect x="6" y="4" width="4" height="16"></rect>
                   <rect x="14" y="4" width="4" height="16"></rect>
                 </svg>
@@ -1900,27 +1936,12 @@
               </button>
 
               <button class="btn-power-ai off" id="btnToggleAI" onclick="toggleAI()">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
                   <line x1="12" y1="2" x2="12" y2="12"></line>
                 </svg>
                 <span id="txtPower">Ligar IA</span>
               </button>
-            </div>
-          </div>
-        </section>
-
-        <!-- AI Dynamic Analysis Card (Centerpiece) -->
-        <section class="ai-dynamic-display-card">
-          <div class="analyzing-header-row" style="display:flex; align-items:center; justify-content:space-between; width:100%;">
-            <div style="display:flex; align-items:center; gap:8px;">
-              <span id="candleClockBadge" style="font-size:11px; font-weight:800; color:#38bdf8; background:#0d1117; border:1px solid rgba(56,189,248,0.3); border-radius:9999px; padding:4px 12px; font-family:var(--font-mono); display:flex; align-items:center; gap:6px;">
-                ⏱ HORA DE COMPRA: <strong id="txtCandleClock" style="color:#ffffff;">00:00</strong>
-              </span>
-            </div>
-
-            <div class="asset-selector-pill" style="cursor:default;" title="Par selecionado dinamicamente">
-              <span class="analyzing-asset-tag" id="currentActiveAsset">EURUSD-OTC</span>
             </div>
           </div>
 

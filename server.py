@@ -832,7 +832,7 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
         state.gemini_status = "Desativado (GEMINI_API_KEY não configurada)"
         return None
 
-    candidate_models = ["gemini-flash-lite-latest", "gemini-pro-latest"]
+    candidate_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-lite-latest"]
     c = dados.get("candle_ultimo", {})
     agora_str = dados.get("relogio_horario", datetime.now().strftime("%H:%M:%S"))
     segundo_vela = dados.get("segundo_da_vela", 55)
@@ -976,7 +976,7 @@ Responda ESTRITAMENTE em formato JSON com o schema exigido.
         }
     }
 
-    async with httpx.AsyncClient(timeout=8.0) as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         for model in candidate_models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={state.gemini_key}"
             try:
@@ -988,6 +988,9 @@ Responda ESTRITAMENTE em formato JSON com o schema exigido.
                     state.gemini_status = f"Ativo e pensando ({model})"
                     print(f"[GEMINI OK] {model} respondeu para {ativo}: {parsed.get('decisao')} ({parsed.get('confluencia_porcentagem')}%)", flush=True)
                     return parsed
+                elif resp.status_code == 429:
+                    state.gemini_status = f"Cota temporária ({model})"
+                    continue
                 else:
                     state.gemini_status = f"Erro HTTP {resp.status_code} ({model})"
                     print(f"[GEMINI ERR] {model} HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
@@ -1617,17 +1620,18 @@ async def varrer_60_candles_ativos():
 
         analise = None
         try:
-            gem_timeout = 90.0 if state.gemini_key.startswith("sk-") else 9.0
+            gem_timeout = 90.0 if state.gemini_key.startswith("sk-") else 18.0
             analise = await asyncio.wait_for(consultar_gemini(ativo, dados_60), timeout=gem_timeout)
         except Exception as ex:
-            state.gemini_status = f"Timeout/Erro: {type(ex).__name__}"
+            state.gemini_status = f"Atraso/Timeout: {type(ex).__name__}"
             print(f"[GEMINI TIMEOUT] {ativo}: {ex}", flush=True)
 
         if not analise or not isinstance(analise, dict) or analise.get("decisao") not in ["CALL", "PUT", "AGUARDAR"]:
-            state.ai_enabled = False
+            # NÃO desliga o robô por timeout ou atraso passageiro! Mantém o robô ativo e reanalisa no próximo ciclo.
             state.active_signal = None
-            state.current_observation = f"Falha na API do Gemini ({state.gemini_status}). Robô desligado — só opera com a API."
-            print(f"[IA DESLIGADA - ERRO GEMINI] {state.current_observation}", flush=True)
+            state.current_observation = f"[Gemini AI] {state.gemini_status}. Reanalisando próximo candle de {ativo} sem desligar..."
+            print(f"[IA REAVALIANDO] {state.current_observation}", flush=True)
+            await asyncio.sleep(2)
             return
 
         conf = analise.get("confluencia_porcentagem", 0)
