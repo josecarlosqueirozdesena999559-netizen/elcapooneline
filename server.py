@@ -162,6 +162,19 @@ def obter_pool_otc_binarios() -> List[str]:
 
 SCAN_ASSETS_PRIORITY = OTC_BINARY_CATALOG
 
+# Chave Global Pré-Configurada para Execução Direta em Qualquer Computador
+DEFAULT_GEMINI_B64 = "QVEuQWI4Uk42TGJXbm5yR2pIOUVHd2hwNmJqblQzWmFiV2tCbk5JNjR3VHJ4ZzlNT2JXV3c="
+
+def obter_gemini_api_key() -> str:
+    k = (os.getenv("GEMINI_API_KEY") or "").strip()
+    if not k:
+        try:
+            import base64
+            k = base64.b64decode(DEFAULT_GEMINI_B64.encode("utf-8")).decode("utf-8").strip()
+        except Exception:
+            k = ""
+    return k
+
 class BotMemoryState:
     def __init__(self):
         self.api: Optional[Bullex] = None
@@ -181,7 +194,7 @@ class BotMemoryState:
         self.last_candle_data = {}
         self.entry_stake = 5.0
         self.expiration_minutes = 1
-        self.gemini_key = os.getenv("GEMINI_API_KEY", "")
+        self.gemini_key = obter_gemini_api_key()
         self.use_martingale = True
         self.max_gales = 1
         self.current_gale_step = 0
