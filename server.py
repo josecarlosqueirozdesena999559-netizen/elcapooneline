@@ -72,50 +72,50 @@ app.add_middleware(
 SYSTEM_PROMPT_TRADER = """Você é um Trader Quantitativo Sênior e Especialista em Price Action Institucional (Smart Money Concepts), Opções Binárias e Mercado OTC.
 Sua missão é analisar uma série temporal de 60 velas (candlesticks), indicadores matemáticos avançados e TODAS as estratégias institucionais de alta assertividade.
 
-ATENÇÃO: VOCÊ DEVE USAR TODOS OS GATILHOS E PROMPTS DE ANÁLISE DISPONÍVEIS, NÃO OPERANDO EXCLUSIVAMENTE COM O OLHO DE DEUS!
-Analise todo o contexto de mercado e recomende CALL (Compra), PUT (Venda) ou AGUARDAR quando houver confluência em qualquer um dos seguintes cenários institucionais:
+REGRA MANDATÓRIA: O 'OLHO DE DEUS' É APENAS MAIS UM PROMPT / FATOR DE CONFLUÊNCIA EXTRA. NUNCA DEVE TRAVAR OU ATRASAR OPERAÇÕES!
+Não espere pelo Olho de Deus para emitir um sinal. Se houver qualquer confluência institucional válida (SMC Order Blocks, Pin Bar / Martelo, Reversão em Suporte/Resistência, Bollinger + RSI, Rompimento Marubozu com volume, Médias Móveis ou Momentum MACD), emita CALL ou PUT com confluência >= 75%!
 
 GATILHOS VÁLIDOS DE ENTRADA (USAR TODOS OS GATILHOS):
-1. PRICE ACTION INSTITUCIONAL & REJEIÇÃO DE PAVIOS:
+1. SMART MONEY CONCEPTS (SMC) & ZONAS DE LIQUIDEZ (GATILHO FORTE >= 75% A 90%):
+   - Bullish Order Block (OB): Rejeição e absorção compradora na zona de suporte institucional -> CALL.
+   - Bearish Order Block (OB): Rejeição e absorção vendedora na zona de resistência institucional -> PUT.
+   - Caça de Liquidez (Liquidity Sweep): Falso rompimento de máxima/mínima seguido de forte rejeição de pavio -> Reversão (CALL no fundo / PUT no topo).
+
+2. PRICE ACTION INSTITUCIONAL & REJEIÇÃO DE PAVIOS (GATILHO FORTE >= 75% A 90%):
    - Martelo / Pin Bar de Alta: Longo pavio inferior (mínimo 2x o corpo) rejeitando suporte ou fundo -> CALL.
    - Estrela Cadente / Pin Bar de Baixa: Longo pavio superior (mínimo 2x o corpo) rejeitando resistência ou topo -> PUT.
    - Padrão de Reversão em Topo Duplo (M) -> PUT.
    - Padrão de Reversão em Fundo Duplo (W) -> CALL.
-   - Marubozu Institucional de Rompimento: Vela de corpo dominante (> 75% da amplitude) com volume acima da média de 5 períodos rompendo consolidação no sentido da tendência -> Seguir o fluxo (CALL se verde / PUT se vermelha).
+   - Marubozu Institucional de Rompimento: Vela de corpo dominante (> 70% da amplitude) com volume acima da média (SMA 5) rompendo consolidação -> Seguir o fluxo (CALL se verde / PUT se vermelha).
 
-2. SMART MONEY CONCEPTS (SMC) & ZONAS DE LIQUIDEZ:
-   - Bullish Order Block (OB): Rejeição e absorção compradora na última vela de baixa antes do impulso -> CALL.
-   - Bearish Order Block (OB): Rejeição e absorção vendedora na última vela de alta antes do impulso -> PUT.
-   - Caça de Liquidez (Sweep): Falso rompimento de topo/fundo seguido de forte rejeição de pavio em OTC.
+3. CONFLUÊNCIA COM BANDAS DE BOLLINGER, RSI E MÉDIAS (GATILHO FORTE >= 75% A 88%):
+   - Compra (CALL): Preço tocando ou furando a Banda de Bollinger inferior com pavio de retração + RSI sobrevendido (< 38) ou cruzando 50 para cima + Médias apontando alta.
+   - Venda (PUT): Preço tocando ou furando a Banda de Bollinger superior com pavio de retração + RSI sobrecomprado (> 62) ou cruzando 50 para baixo + Médias apontando baixa.
 
-3. CONFLUÊNCIA COM BANDAS DE BOLLINGER, RSI E MACD:
-   - Compra (CALL): Preço tocando ou furando a Banda de Bollinger inferior com pavio de retração + RSI sobrevendido (< 35) ou cruzando 50 para cima + Histograma MACD virando para positivo.
-   - Venda (PUT): Preço tocando ou furando a Banda de Bollinger superior com pavio de retração + RSI sobrecomprado (> 65) ou cruzando 50 para baixo + Histograma MACD virando para negativo.
+4. ESTRATÉGIA OLHO DE DEUS A+ (ENGULFING - BÔNUS ADICIONAL DE FORÇA):
+   - Quando ocorrer Engolfo Puro institucional com selo A+ e médias/MACD alinhados, classifique com confluência máxima A+ (90% a 98%).
+   - Se NÃO ocorrer Engolfo, ISSO NÃO ANULA O SINAL! Use normalmente os outros gatilhos institucionais acima para emitir CALL ou PUT com 75% a 88%.
 
-4. ESTRATÉGIA OLHO DE DEUS A+ (ENGULFING INSTITUCIONAL):
-   - Engolfo de Alta (`engulfBuy` com corpo expressivo >= 1.2x média de 10) + Preço acima da MA Trend ou EMA21 + MACD expansivo -> CALL A+ (90% a 98% confluência).
-   - Engolfo de Baixa (`engulfSell` com corpo expressivo >= 1.2x média de 10) + Preço abaixo da MA Trend ou EMA21 + MACD expansivo -> PUT A+ (90% a 98% confluência).
-
-5. FILTRO MACD (12, 26, 9) - OBRIGATÓRIO PARA CONFIRMAR O MOMENTUM:
-   - Para CALL: Linha MACD > Linha de Sinal E/OU Histograma crescendo.
-   - Para PUT: Linha MACD < Linha de Sinal E/OU Histograma decrescendo.
-   - Se o MACD estiver completamente divergente contra a operação pretendida, decida por AGUARDAR.
+5. FILTRO DE MOMENTUM MACD (12, 26, 9):
+   - Para CALL: Linha MACD > Linha de Sinal E/OU Histograma crescente ou recuperando.
+   - Para PUT: Linha MACD < Linha de Sinal E/OU Histograma decrescente ou recuando.
+   - Apenas decida por AGUARDAR se o mercado estiver 100% lateral sem volume E sem nenhum padrão claro, ou com divergência grave.
 
 6. ESTRATÉGIA DE ENTRADA M1 NOS 30 SEGUNDOS FINAIS:
-   - A entrada ocorre no ponto ideal da retração da vela, próximo ao momento dos 30 segundos finais (entre 23s e 28.5s) antes do travamento da BullEx (00:30):
-     * Para PUT: Aguarda a vela M1 esticar para cima para vender no topo.
-     * Para CALL: Aguarda a vela M1 retrair para baixo para comprar no fundo.
+   - A ordem será executada no ponto ideal de retração próximo aos 30 segundos finais da vela (HORA DE COMPRA da BullEx):
+     * Para PUT: Vender no esticamento da retração para cima (no topo).
+     * Para CALL: Comprar no esticamento da retração para baixo (no fundo).
 
-7. CLASSIFICAÇÃO DE CONFLUÊNCIA:
-   - 90% a 98%: Sinal Olho de Deus A+ OU Rejeição Extrema em Suporte/Resistência com Pin Bar/Order Block e MACD forte.
-   - 80% a 89%: Rompimento institucional com volume, reversão em Bollinger ou Order Block com confluência de médias.
-   - Abaixo de 80% ou com divergência grave: AGUARDAR.
+7. ESCALA DE CONFLUÊNCIA:
+   - 90% a 98%: Sinal Olho de Deus A+ OU Rejeição Extrema em Suporte/Resistência com Order Block e MACD fortemente alinhado.
+   - 75% a 89%: Qualquer padrão de Price Action, Order Block SMC, Rompimento com Volume ou Reversão Bollinger + RSI com MACD favorável (mesmo SEM Olho de Deus).
+   - Abaixo de 75%: Mercado confuso / sem definição -> AGUARDAR.
 
 Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
 {
   "decisao": "CALL" | "PUT" | "AGUARDAR",
   "confluencia_porcentagem": number (0 a 100),
-  "padrao_vela": "string com nome do padrão e leitura técnica (ex: 'Pin Bar de Rejeição', 'Order Block SMC', 'Olho de Deus A+')",
+  "padrao_vela": "string com nome do padrão e leitura técnica (ex: 'Order Block SMC', 'Pin Bar de Rejeição', 'Rompimento com Volume', 'Olho de Deus A+')",
   "suporte_resistencia": "string com a zona de preço e confluência SMC",
   "psicologia_mercado": "string detalhada explicando a exaustão e o fluxo",
   "texto_observacao": "string no formato [Gemini AI HH:MM:SS] X% -- Explicação técnica completa destacando o padrão identificado..."
@@ -846,7 +846,7 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
         state.gemini_status = "Desativado (GEMINI_API_KEY não configurada)"
         return None
 
-    candidate_models = ["gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-flash-lite-latest"]
+    candidate_models = ["gemini-3-flash-preview", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-lite-latest"]
     c = dados.get("candle_ultimo", {})
     agora_str = dados.get("relogio_horario", datetime.now().strftime("%H:%M:%S"))
     segundo_vela = dados.get("segundo_da_vela", 55)
@@ -909,7 +909,8 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
 - Para PUT: A vela deve esticar para cima para vender no topo.
 - Para CALL: A vela deve retrair para baixo para comprar no fundo.
 
-Decida se a melhor oportunidade é CALL, PUT ou AGUARDAR avaliando TODOS OS GATILHOS INSTITUCIONAIS (Smart Money Concepts / Order Blocks, Price Action / Pin Bar / Reversões / Rompimento Marubozu, Bandas de Bollinger com RSI, Olho de Deus A+ e o filtro mandatório de aceleração do MACD). Responda com confluência >= 80% sempre que houver confirmação institucional.
+Decida se a melhor oportunidade é CALL, PUT ou AGUARDAR avaliando TODOS OS GATILHOS INSTITUCIONAIS (Smart Money Concepts / Order Blocks, Price Action / Pin Bar / Reversões / Rompimento Marubozu, Bandas de Bollinger com RSI, Olho de Deus A+ e o filtro de momentum do MACD).
+IMPORTANTE: O 'Olho de Deus' é apenas mais um prompt de força extra (A+), NÃO espere por ele! Se qualquer outro padrão institucional de Price Action, Order Block ou Bollinger/RSI estiver presente com MACD favorável, emita CALL ou PUT com confluência >= 75%!
 Responda ESTRITAMENTE em formato JSON com o schema exigido.
 """
     if state.gemini_key.startswith("sk-"):
@@ -1134,15 +1135,21 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
 
     tipo_operacao = f"MARTINGALE G{state.current_gale_step}" if state.current_gale_step > 0 else "ENTRADA INICIAL"
 
-    # 1. Sinal identificado para o minuto seguinte (M1)
+    # 1. Sinal identificado (M1 com entrada nos 30s finais)
     agora_ts = time.time()
     agora = datetime.now()
     seg_atual = agora.second
-    # Segundos restantes no candle atual até o nascimento da nova vela M1
-    seg_ate_virada = (60 - seg_atual) % 60
-    if seg_ate_virada == 0:
-        seg_ate_virada = 60
-    target_virada_epoch = agora_ts + seg_ate_virada
+
+    if seg_atual <= 22:
+        # A vela acabou de nascer ou está nos primeiros segundos: executa na retração dos 30s desta mesma vela!
+        seg_ate_virada = 0
+        target_virada_epoch = agora_ts
+    else:
+        # A vela já passou dos 22 segundos: programa para o nascimento da próxima vela M1
+        seg_ate_virada = (60 - seg_atual) % 60
+        if seg_ate_virada == 0:
+            seg_ate_virada = 60
+        target_virada_epoch = agora_ts + seg_ate_virada
 
     if direcao == "PUT":
         hint = f"[{tipo_operacao}] Aguardando vela M1 nascer e subir um pouco para pegar taxa de VENDA (PUT) no topo antes dos 28s de compra."
@@ -1187,8 +1194,8 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         pullback_hint = f"[{tipo_operacao}] Vela M1 nasceu! Aguardando micro-queda (fundo) para pegar taxa de COMPRA (CALL) antes do limite de compra..."
 
     print(f" -> [MICRO-RETRAÇÃO] {pullback_hint}", flush=True)
-    max_pb_segundos = 20.0
-    start_pb = time.time()
+    start_pb = time.time() - (datetime.now().second if seg_ate_virada == 0 else 0)
+    max_pb_segundos = 28.5
     pb_target_epoch = start_pb + max_pb_segundos
 
     preco_abertura = None
@@ -1574,7 +1581,7 @@ async def varrer_60_candles_ativos():
 
         # Fica no ativo atual até encontrar uma entrada válida baseada no histórico de 60 velas
         ativo = ativos_para_varrer[0]
-        limite_confluencia = 75 if state.current_gale_step > 0 else 80
+        limite_confluencia = 70 if state.current_gale_step > 0 else 75
 
         agora_ts = int(time.time())
         agora_str = datetime.now().strftime("%H:%M:%S")
@@ -1656,9 +1663,10 @@ async def varrer_60_candles_ativos():
         print(f"    [ANÁLISE 0s LAG] {ativo}: {decisao} ({conf}%) | {analise.get('padrao_vela', '')} | {olho_badge} | MACD: {dados_60.get('macd')}/{dados_60.get('macd_hist')}", flush=True)
 
         if decisao in ["CALL", "PUT"] and conf >= limite_confluencia and not state.is_trading and not state.is_paused:
-            minuto_atual = int(time.time()) // 60
-            if minuto_atual != minuto_inicio_analise:
-                print(f" -> [PROTEÇÃO ANTI-ATRASO] {ativo}: a vela virou durante a análise ({decisao} {conf}%). Reavaliando vela atual antes de entrar!", flush=True)
+            seg_agora = int(time.time()) % 60
+            # Se virou a vela durante a análise, mas ainda está no início (<= 25s), entra com perfeição nesta nova vela!
+            if seg_agora > 29 and (int(time.time()) // 60) != minuto_inicio_analise:
+                print(f" -> [ATRASO EXCESSIVO] {ativo}: a vela virou e já passou da janela de 30s ({seg_agora}s). Reavaliando próximo candle...", flush=True)
                 return
 
             state.active_asset = ativo
