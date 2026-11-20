@@ -105,10 +105,12 @@ GATILHOS INSTITUCIONAIS DE ALTA ASSERTIVIDADE:
    - CALL: Linha MACD > Sinal E/OU Histograma crescendo.
    - PUT: Linha MACD < Sinal E/OU Histograma decrescendo.
 
-6. ESCALA DE CONFLUÊNCIA:
-   - 90% a 98%: Olho de Deus A+ OU Rejeição Extrema em Fractal/Order Block com MACD forte.
-   - 75% a 89%: Qualquer gatilho de Fractal, Price Action, Rompimento ou Bollinger com MACD alinhado.
-   - Abaixo de 75%: Mercado incerto ou contra a tendência -> AGUARDAR.
+6. ESCALA DE CONFLUÊNCIA E ANÁLISE EM TEMPO REAL:
+   - 88% a 98%: Olho de Deus A+, Rejeição em Fractal/Order Block ou Rompimento com MACD forte e alinhamento de médias.
+   - 78% a 87%: Gatilho técnico de Price Action, Pin Bar, Martelo, Marubozu ou Bollinger com MACD favorável.
+   - Abaixo de 75%: Apenas se o mercado for doji sem qualquer movimento direcional.
+   - IMPORTANTE: No campo 'texto_observacao', gere sempre uma análise detalhada em tempo real:
+     Formato: "[Gemini AI HH:MM:SS] X% -- DECISÃO: Análise técnica viva detalhando o padrão de vela, nível de suporte/resistência fractal, RSI e momentum do MACD."
 
 Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
 {
@@ -162,8 +164,9 @@ def obter_pool_otc_binarios() -> List[str]:
 
 SCAN_ASSETS_PRIORITY = OTC_BINARY_CATALOG
 
-# Chave Global Pré-Configurada para Execução Direta em Qualquer Computador
-DEFAULT_GEMINI_B64 = "c2stay1WeGRMN295dGVTZVkxVlkwRlJTaVExWC1DUVlXdEdYUklIT1BzV1E3WWJSWDg0NnZNWEhBc0tWb2RCNWNPSng3eUFlNjVDcnh6Uk9URVVzLTZ3ODdnTldyWQ=="
+# Chave Global Pré-Configurada para Execução Direta em Qualquer Computador (Gemini Oficial)
+DEFAULT_GEMINI_B64 = "QVEuQWI4Uk42TGJXbm5yR2pIOUVHd2hwNmJqblQzWmFiV2tCbk5JNjR3VHJ4ZzlNT2JXV3c="
+MANUS_FALLBACK_KEY = "sk-k_VxdL7oyteSeYD1VY0FRSiQ1X-CQYWtGXRIHOPsWQ7YbRX846vMXHAsKVodB5cOJx7yAe65CrXzROTEUs-6w87gNWrY"
 
 def obter_gemini_api_key() -> str:
     k = (os.getenv("GEMINI_API_KEY") or "").strip()
@@ -922,7 +925,7 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
         state.gemini_status = "Desativado (GEMINI_API_KEY não configurada)"
         return None
 
-    candidate_models = ["gemini-3.1-flash-lite", "gemini-flash-lite-latest", "gemini-3-flash-preview", "gemini-2.5-flash"]
+    candidate_models = ["gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-3.1-flash-lite"]
     c = dados.get("candle_ultimo", {})
     agora_str = dados.get("relogio_horario", datetime.now().strftime("%H:%M:%S"))
     segundo_vela = dados.get("segundo_da_vela", 55)
