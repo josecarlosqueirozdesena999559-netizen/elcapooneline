@@ -1161,13 +1161,13 @@
     }
 
     .login-card-container {
-      background: rgba(14, 18, 28, 0.88) !important;
-      backdrop-filter: blur(32px) saturate(200%) !important;
-      -webkit-backdrop-filter: blur(32px) saturate(200%) !important;
-      border: 1px solid rgba(255, 255, 255, 0.1) !important;
-      border-radius: 26px !important;
-      padding: 34px 30px !important;
-      box-shadow: 0 25px 65px -12px rgba(0, 0, 0, 0.75), 0 0 40px rgba(0, 230, 118, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+      background: transparent !important;
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+      border: none !important;
+      border-radius: 0 !important;
+      padding: 16px 20px !important;
+      box-shadow: none !important;
     }
 
     .login-brand-icon-square {
@@ -1656,33 +1656,6 @@
   ======================================================== -->
     <div id="loginView" class="login-screen-wrap" style="display: flex;">
     <div class="login-card-container">
-      
-      <!-- Simulação de Barra de Status Mobile (iOS/Android App Style) -->
-      <div class="mobile-status-bar">
-        <span>9:41</span>
-        <div class="status-bar-icons">
-          <!-- Signal -->
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
-            <rect x="2" y="16" width="3" height="6" rx="1"></rect>
-            <rect x="7" y="12" width="3" height="10" rx="1"></rect>
-            <rect x="12" y="8" width="3" height="14" rx="1"></rect>
-            <rect x="17" y="4" width="3" height="18" rx="1"></rect>
-          </svg>
-          <!-- Wifi -->
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-            <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
-            <path d="M1.42 9a16 16 0 0 1 21.16 0"></path>
-            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
-            <line x1="12" y1="20" x2="12.01" y2="20"></line>
-          </svg>
-          <!-- Battery -->
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <rect x="2" y="7" width="16" height="10" rx="2" ry="2"></rect>
-            <line x1="22" y1="11" x2="22" y2="13"></line>
-            <rect x="4" y="9" width="10" height="6" fill="currentColor"></rect>
-          </svg>
-        </div>
-      </div>
 
       <!-- Logotipo Oficial ORIUN BINARY 15.COM -->
       <div class="login-header-group">
@@ -1793,12 +1766,12 @@
 
         <div class="header-top-right">
 
-          <!-- Perfil do Usuário / Botão de Conectar -->
-          <div class="header-user-profile-badge" id="btnOpenLoginModal" onclick="openLoginModal()" title="Clique para conectar ou alterar sua conta BullEx">
+          <!-- Perfil do Usuário -->
+          <div class="header-user-profile-badge" style="cursor:default;">
             <div class="header-user-avatar-circle" id="userInitials">TB</div>
             <div class="header-user-text-info">
-              <span class="header-user-name" id="userName">Conectar BullEx</span>
-              <span class="header-user-email" id="userEmail">Clique para fazer login</span>
+              <span class="header-user-name" id="userName">Trader BullEx</span>
+              <span class="header-user-email" id="userEmail">Conectado</span>
             </div>
           </div>
 
@@ -1867,6 +1840,14 @@
         </svg>
         <span>Histórico</span>
       </button>
+
+      <button class="action-tab-button" id="tabBtnTradeRoom" onclick="switchNavTab('traderoom')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"></polyline>
+          <polyline points="16 7 22 7 22 13"></polyline>
+        </svg>
+        <span>Trade Room</span>
+      </button>
     </nav>
 
     <!-- Body Views -->
@@ -1916,6 +1897,7 @@
               <span id="candleClockBadge" style="font-size:12px; font-weight:700; color:#38bdf8; background:#151b29; border:1px solid rgba(56,189,248,0.25); border-radius:4px; padding:6px 14px; font-family:var(--font-family); display:flex; align-items:center; gap:6px;">
                 ⏱ HORA DE COMPRA: <strong id="txtCandleClock" style="color:#ffffff;">00:00</strong>
               </span>
+              <span id="geminiCreditsBadge" style="display:none; font-size:11px; font-weight:800; padding:6px 12px; border-radius:9999px; border:1px solid rgba(56,189,248,0.3); background:rgba(56,189,248,0.12); color:#38bdf8;"></span>
             </div>
 
             <div class="ai-control-buttons-group" style="display:flex; align-items:center; gap:8px;">
@@ -2288,11 +2270,11 @@
           <div class="config-card-box">
             <div class="config-card-title">
               <span>ESTRATÉGIA DE MARTINGALE</span>
-              <input type="checkbox" id="cfgGaleCheck" checked style="accent-color: var(--green-primary); transform: scale(1.3);">
+              <input type="checkbox" id="cfgGaleCheck" style="accent-color: var(--green-primary); transform: scale(1.3);">
             </div>
             <div class="config-stepper-row">
               <span style="font-size: 13px; color: var(--text-secondary);">Níveis de Gale:</span>
-              <input type="number" id="cfgGaleSteps" class="cfg-number-input" value="1" min="1" max="2" style="max-width: 80px;">
+              <input type="number" id="cfgGaleSteps" class="cfg-number-input" value="0" min="0" max="2" style="max-width: 80px;">
               <span style="font-size: 13px; color: var(--text-secondary); margin-left: 10px;">Multiplicador:</span>
               <input type="number" id="cfgGaleFactor" class="cfg-number-input" value="2.0" step="0.1" style="max-width: 80px;">
             </div>
@@ -2330,80 +2312,49 @@
         </section>
       </div>
 
-    </main>
-  </div>
-
-  <!-- ========================================================
-       MODAL DE LOGIN BULLEX (NÃO BLOQUEIA A TELA INICIAL)
-  ======================================================== -->
-  <div class="modal-backdrop" id="loginModal" onclick="handleLoginModalBackdrop(event)">
-    <div class="login-modal-card">
-      <div class="login-modal-header">
-        <div style="display:flex; align-items:center; gap:8px;">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" style="color:var(--green-primary)">
-            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
-            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
-          </svg>
-          <h3 style="font-size: 16px; font-weight: 800; color: #fff;">Autenticação BullEx</h3>
+      <!-- ABA 5: TRADE ROOM BULLEX -->
+      <div id="viewTradeRoom" class="tab-view-content" style="height:calc(100dvh - 165px); overflow:hidden;">
+        <div class="an-chart-card" style="padding:10px 12px; gap:8px; height:100%; display:flex; flex-direction:column; box-sizing:border-box;">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-shrink:0;">
+            <h3 style="font-size:14px; font-weight:800; color:#fff; margin:0;">Trade Room BullEx</h3>
+            <button type="button" onclick="document.getElementById('bullexTradeRoomFrame').src='https://trade.bull-ex.com/traderoom'" style="background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.14); color:#e2e8f0; border-radius:9999px; padding:6px 14px; font-size:12px; font-weight:700; cursor:pointer;">Recarregar</button>
+          </div>
+          <div style="flex:1; min-height:0; width:100%; border-radius:14px; overflow:auto; -webkit-overflow-scrolling:touch; border:1px solid rgba(255,255,255,0.1); background:#0b0f17;">
+            <iframe id="bullexTradeRoomFrame" src="https://trade.bull-ex.com/traderoom" scrolling="yes" style="width:100%; height:100%; border:none; display:block;" allow="fullscreen; clipboard-read; clipboard-write"></iframe>
+          </div>
         </div>
-        <button style="background:transparent; border:none; color:#94a3b8; font-size:18px; cursor:pointer;" onclick="closeLoginModal()">✕</button>
       </div>
 
-      <p style="font-size: 12px; color: var(--text-secondary); line-height: 1.4;">
-        Informe seu e-mail e senha da plataforma BullEx. As operações serão executadas diretamente em <strong>CONTA REAL</strong>.
-      </p>
+    </main>
 
-            <form id="modalLoginForm" onsubmit="handleModalLoginSubmit(event)" style="display:flex; flex-direction:column; gap:14px;">
-        <div class="field-block">
-          <div class="field-label-wrap">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path>
-              <polyline points="22,6 12,13 2,6"></polyline>
-            </svg>
-            <label class="field-label-text">E-MAIL DA PLATAFORMA BULLEX</label>
-          </div>
-          <input type="email" id="modalLoginEmail" class="field-input-box" placeholder="seu_email@provedor.com" required>
-        </div>
-
-        <div class="field-block">
-          <div class="field-label-wrap">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
-              <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
-            </svg>
-            <label class="field-label-text">SENHA REAL DA PLATAFORMA</label>
-          </div>
-          <div class="pwd-input-wrap">
-            <input type="password" id="modalLoginPassword" class="field-input-box" placeholder="••••••••••••" required>
-            <button type="button" class="btn-toggle-eye-pwd" onclick="toggleModalPassword()" title="Mostrar/Ocultar Senha">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
-                <circle cx="12" cy="12" r="3"></circle>
-              </svg>
-            </button>
-          </div>
-        </div>
-
-        <div id="modalLoginErrorMsg" class="login-error-msg"></div>
-
-        <button type="submit" class="btn-login-action" id="modalBtnLoginSubmit">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>
-            <polyline points="10 17 15 12 10 7"></polyline>
-            <line x1="15" y1="12" x2="3" y2="12"></line>
-          </svg>
-          <span id="modalTxtBtnLogin">Entrar na BullEx</span>
-        </button>
-
-        <div class="login-footer-security">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-            <path d="m9 12 2 2 4-4"></path>
-          </svg>
-          <span>Acesso seguro e protegido</span>
-        </div>
-      </form>
-    </div>
+    <!-- BARRA DE NAVEGAÇÃO INFERIOR FLUTUANTE (EXIBIDA APENAS APÓS LOGIN) -->
+    <nav class="mobile-bottom-dock">
+      <button class="mobile-dock-btn active" id="mobBtnOperacoes" onclick="switchNavTab('operacoes')" title="Operações">
+        <span class="mobile-dock-indicator" id="mobIndOperacoes"></span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+        <span>Operações</span>
+      </button>
+      <button class="mobile-dock-btn" id="mobBtnResultados" onclick="switchNavTab('resultados')" title="Resultados">
+        <span class="mobile-dock-indicator" id="mobIndResultados" style="display:none;"></span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+        <span>Resultados</span>
+      </button>
+      <button class="mobile-dock-btn" id="mobBtnConfiguracoes" onclick="switchNavTab('configuracoes')" title="Ajustes">
+        <span class="mobile-dock-indicator" id="mobIndConfiguracoes" style="display:none;"></span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        <span>Ajustes</span>
+      </button>
+      <button class="mobile-dock-btn" id="mobBtnHistorico" onclick="switchNavTab('historico')" title="Histórico">
+        <span class="mobile-dock-indicator" id="mobIndHistorico" style="display:none;"></span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+        <span>Histórico</span>
+      </button>
+      <button class="mobile-dock-btn" id="mobBtnTradeRoom" onclick="switchNavTab('traderoom')" title="Trade Room">
+        <span class="mobile-dock-indicator" id="mobIndTradeRoom" style="display:none;"></span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"></polyline><polyline points="16 7 22 7 22 13"></polyline></svg>
+        <span>Trade Room</span>
+      </button>
+    </nav>
   </div>
 
   <!-- ========================================================
@@ -2460,18 +2411,10 @@
       } else if (tabName === 'historico') {
         document.getElementById('tabBtnHistorico').classList.add('active');
         document.getElementById('viewHistorico').classList.add('active');
+      } else if (tabName === 'traderoom') {
+        document.getElementById('tabBtnTradeRoom').classList.add('active');
+        document.getElementById('viewTradeRoom').classList.add('active');
       }
-    }
-
-    // Modal de Login
-    function openLoginModal() {
-      document.getElementById('loginModal').classList.add('open');
-    }
-    function closeLoginModal() {
-      document.getElementById('loginModal').classList.remove('open');
-    }
-    function handleLoginModalBackdrop(e) {
-      if (e.target.id === 'loginModal') closeLoginModal();
     }
 
     async function handleLoginSubmit(e) {
@@ -2549,60 +2492,6 @@
       }
     }
 
-    async function handleModalLoginSubmit(e) {
-      if (e && e.preventDefault) e.preventDefault();
-      const email = document.getElementById('modalLoginEmail').value.trim();
-      const pass = document.getElementById('modalLoginPassword').value.trim();
-      const errorEl = document.getElementById('modalLoginErrorMsg');
-      const btn = document.getElementById('modalBtnLoginSubmit');
-      const btnTxt = document.getElementById('modalTxtBtnLogin');
-
-      errorEl.textContent = '';
-      errorEl.classList.remove('visible');
-      btn.disabled = true;
-      btnTxt.textContent = 'Autenticando...';
-
-      try {
-        const res = await fetch('/api/connect', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: email, password: pass, mode: appState.mode })
-        });
-        const data = await res.json();
-        if (data.success) {
-          appState.connected = true;
-          closeLoginModal();
-          fetchStatus();
-        } else {
-          errorEl.textContent = data.message || 'Falha ao conectar.';
-          errorEl.classList.add('visible');
-        }
-      } catch (err) {
-        errorEl.textContent = 'Erro de comunicação com o servidor.';
-        errorEl.classList.add('visible');
-      } finally {
-        btn.disabled = false;
-        btnTxt.textContent = 'Entrar na BullEx';
-      }
-    }
-
-    async function entrarModoSimulacao() {
-      try {
-        const res = await fetch('/api/demo_bypass', { method: 'POST' });
-        const data = await res.json();
-        appState.connected = true;
-        appState.mode = 'REAL';
-        document.getElementById('loginView').style.display = 'none';
-        document.getElementById('mainAppView').style.display = 'flex';
-        fetchStatus();
-      } catch (e) {
-        appState.connected = true;
-        document.getElementById('loginView').style.display = 'none';
-        document.getElementById('mainAppView').style.display = 'flex';
-        fetchStatus();
-      }
-    }
-
     async function executarTradeManual(direcao) {
       const stake = parseFloat(document.getElementById('quickStakeInput').value) || 5.0;
       const badge = document.getElementById('tradeStatusBadge');
@@ -2649,6 +2538,15 @@
       const ss = remSec < 10 ? '0' + remSec : remSec;
       const elClock = document.getElementById('txtCandleClock');
       if (elClock) elClock.textContent = `00:${ss}`;
+
+      const obsEl = document.getElementById('obsText');
+      if (obsEl && obsEl.textContent && obsEl.textContent.includes('[Gemini AI ')) {
+        const hh = String(now.getHours()).padStart(2, '0');
+        const mm = String(now.getMinutes()).padStart(2, '0');
+        const secStr = String(now.getSeconds()).padStart(2, '0');
+        const updated = obsEl.textContent.replace(/\[Gemini AI \d{2}:\d{2}:\d{2}\]/, `[Gemini AI ${hh}:${mm}:${secStr}]`);
+        if (obsEl.textContent !== updated) obsEl.textContent = updated;
+      }
     }
     setInterval(tickSmoothCandleClock, 100);
 
@@ -2870,7 +2768,7 @@
       e.preventDefault();
       const stake = parseFloat(document.getElementById('cfgStakeInput').value) || 5.0;
       const useGale = document.getElementById('cfgGaleCheck').checked;
-      const galeSteps = parseInt(document.getElementById('cfgGaleSteps').value) || 1;
+      const galeSteps = useGale ? (parseInt(document.getElementById('cfgGaleSteps').value) || 1) : 0;
       const galeFactor = parseFloat(document.getElementById('cfgGaleFactor').value) || 2.0;
       const stopWin = parseFloat(document.getElementById('cfgStopWin').value) || 50.0;
       const stopLoss = parseFloat(document.getElementById('cfgStopLoss').value) || 30.0;
@@ -2957,7 +2855,10 @@
     }
 
     // Polling de Status
+    let isFetchingStatus = false;
     async function fetchStatus() {
+      if (isFetchingStatus) return;
+      isFetchingStatus = true;
       try {
         const res = await fetch('/api/status');
         const data = await res.json();
@@ -3071,6 +2972,18 @@
         } else {
           txtPause.textContent = 'Pausar';
           btnPause.style.color = '#e2e8f0';
+        }
+
+        // Créditos reais da API (exibido como Gemini AI)
+        const gcBadge = document.getElementById('geminiCreditsBadge');
+        if (gcBadge && data.gemini_credits && data.gemini_credits.total_credits !== null && data.gemini_credits.total_credits !== undefined) {
+          const tc = data.gemini_credits.total_credits;
+          const mr = data.gemini_credits.max_refresh_credits;
+          gcBadge.style.display = 'inline-block';
+          gcBadge.textContent = mr ? `Créditos Gemini AI: ${tc} / ${mr}` : `Créditos Gemini AI: ${tc}`;
+          gcBadge.style.color = tc > 0 ? '#00e676' : '#ff4d4f';
+          gcBadge.style.borderColor = tc > 0 ? 'rgba(0,230,118,0.35)' : 'rgba(255,77,79,0.4)';
+          gcBadge.style.background = tc > 0 ? 'rgba(0,230,118,0.12)' : 'rgba(255,77,79,0.12)';
         }
 
         // Observação do Gemini e progresso de carregamento dos 60 candles
@@ -3281,6 +3194,17 @@
           if (gTag) {
             gTag.textContent = data.config.use_martingale ? `MARTINGALE G${data.config.max_gales} ATIVO` : 'SEM MARTINGALE';
           }
+          if (!window._configFormInitialized) {
+            window._configFormInitialized = true;
+            const chk = document.getElementById('cfgGaleCheck');
+            if (chk) chk.checked = !!data.config.use_martingale;
+            const stp = document.getElementById('cfgGaleSteps');
+            if (stp) stp.value = data.config.max_gales !== undefined ? data.config.max_gales : 0;
+            const fac = document.getElementById('cfgGaleFactor');
+            if (fac && data.config.gale_factor) fac.value = data.config.gale_factor;
+            const stk = document.getElementById('cfgStakeInput');
+            if (stk && data.config.stake) stk.value = data.config.stake;
+          }
         }
 
         // Placar
@@ -3298,13 +3222,7 @@
 
           const resSub = document.getElementById('scoreResultSub');
           if (resSub) {
-            if (sc.resultado_bruto !== undefined && Math.abs(sc.resultado_bruto - sc.resultado) > 0.01) {
-              const bSign = sc.resultado_bruto >= 0 ? `+` : `-`;
-              resSub.textContent = `Ganho Real: ${bSign}${currSym} ${Math.abs(sc.resultado_bruto).toFixed(2)}`;
-              resSub.style.display = 'block';
-            } else {
-              resSub.style.display = 'none';
-            }
+            resSub.style.display = 'none';
           }
 
           // Analytics diário e mensal por e-mail
@@ -3335,26 +3253,9 @@
             const dirClass = item.direction.toLowerCase().includes('call') ? 'call' : 'put';
             const resClass = item.result.toLowerCase() === 'win' ? 'win' : 'loss';
             
-            // Valor Ganho Real (BullEx) e Lucro Líquido
-            const grossVal = (item.profit_gross !== undefined) ? item.profit_gross : item.profit;
-            const netVal = (item.profit_net !== undefined) ? item.profit_net : item.profit;
-            
-            let displayPill = '';
-            if (item.result.toLowerCase() === 'win') {
-              const grossSign = grossVal >= 0 ? '+' : '-';
-              const grossFmt = `${grossSign}${currSym} ${Math.abs(grossVal).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-              if (item.direction.includes('G') && Math.abs(grossVal - netVal) > 0.01) {
-                const netSign = netVal >= 0 ? '+' : '-';
-                const netFmt = `${netSign}${currSym} ${Math.abs(netVal).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-                displayPill = `${item.result} (${grossFmt} Real | ${netFmt} Líq)`;
-              } else {
-                displayPill = `${item.result} (${grossFmt})`;
-              }
-            } else {
-              const sign = item.profit >= 0 ? '+' : '-';
-              const profitFmt = `${sign}${currSym} ${Math.abs(item.profit).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-              displayPill = `${item.result} (${profitFmt})`;
-            }
+            const sign = item.profit >= 0 ? '+' : '-';
+            const profitFmt = `${sign}${currSym} ${Math.abs(item.profit).toLocaleString(numLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+            const displayPill = `${item.result} (${profitFmt})`;
 
             out += `
               <div class="hist-trade-item-wrap">
@@ -3392,6 +3293,9 @@
         }
 
       } catch {}
+      finally {
+        isFetchingStatus = false;
+      }
     }
 
     window.analyticsScope = 'day';
@@ -3461,6 +3365,9 @@
         const an = await res.json();
         renderAnalyticsCharts(an, window.lastCurrencySym || '$', window.lastNumLocale || 'en-US', window.lastScoreboard || { assertividade: 0 });
       } catch {}
+      finally {
+        isFetchingStatus = false;
+      }
     }
 
     function renderAnalyticsCharts(an, currSym, numLocale, sc) {
@@ -3670,32 +3577,6 @@
     };
 
   </script>
-
-  <!-- ========================================================
-       BARRA DE NAVEGAÇÃO INFERIOR FLUTUANTE (NATIVE MOBILE APP)
-       ======================================================== -->
-  <nav class="mobile-bottom-dock">
-    <button class="mobile-dock-btn active" id="mobBtnOperacoes" onclick="switchNavTab('operacoes')" title="Operações">
-      <span class="mobile-dock-indicator" id="mobIndOperacoes"></span>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
-      <span>Operações</span>
-    </button>
-    <button class="mobile-dock-btn" id="mobBtnResultados" onclick="switchNavTab('resultados')" title="Resultados">
-      <span class="mobile-dock-indicator" id="mobIndResultados" style="display:none;"></span>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
-      <span>Resultados</span>
-    </button>
-    <button class="mobile-dock-btn" id="mobBtnConfiguracoes" onclick="switchNavTab('configuracoes')" title="Ajustes">
-      <span class="mobile-dock-indicator" id="mobIndConfiguracoes" style="display:none;"></span>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-      <span>Ajustes</span>
-    </button>
-    <button class="mobile-dock-btn" id="mobBtnHistorico" onclick="switchNavTab('historico')" title="Histórico">
-      <span class="mobile-dock-indicator" id="mobIndHistorico" style="display:none;"></span>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-      <span>Histórico</span>
-    </button>
-  </nav>
 
 </body>
 </html>

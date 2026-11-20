@@ -13,6 +13,7 @@ import os
 import time
 import math
 import json
+import re
 import sqlite3
 import asyncio
 import logging
@@ -83,8 +84,8 @@ GATILHOS INSTITUCIONAIS DE ALTA ASSERTIVIDADE:
 1. FRACTAIS DE WILLIAMS (5 VELAS) - NÍVEIS DINÂMICOS DE EXAUSTÃO E SUPORTE:
    - Rejeição em Fundo Fractal: O preço testou o suporte do Fundo Fractal anterior e retraiu deixando longo pavio inferior -> CALL (80% a 92%).
    - Rejeição em Topo Fractal: O preço testou a resistência do Topo Fractal anterior e retraiu deixando longo pavio superior -> PUT (80% a 92%).
-   - Rompimento de Topo Fractal a favor da tendência de alta -> CALL (80% a 88%).
-   - Rompimento de Fundo Fractal a favor da tendência de baixa -> PUT (80% a 88%).
+   - PROIBIDO COMPRAR TOPO: NUNCA dê CALL quando o preço estiver tocando ou acima da Banda de Bollinger Superior, em resistência macro ou com RSI >= 68 (risco alto de correção/loss).
+   - PROIBIDO VENDER FUNDO: NUNCA dê PUT quando o preço estiver tocando ou abaixo da Banda de Bollinger Inferior, em suporte macro ou com RSI <= 32 (risco alto de repique/loss).
 
 2. SMART MONEY CONCEPTS (SMC) & PRICE ACTION INSTITUCIONAL:
    - Bullish Order Block (OB): Absorção compradora em zona de demanda -> CALL (80% a 90%).
@@ -162,7 +163,7 @@ def obter_pool_otc_binarios() -> List[str]:
 SCAN_ASSETS_PRIORITY = OTC_BINARY_CATALOG
 
 # Chave Global Pré-Configurada para Execução Direta em Qualquer Computador
-DEFAULT_GEMINI_B64 = "QVEuQWI4Uk42TGJXbm5yR2pIOUVHd2hwNmJqblQzWmFiV2tCbk5JNjR3VHJ4ZzlNT2JXV3c="
+DEFAULT_GEMINI_B64 = "c2stay1WeGRMN295dGVTZVkxVlkwRlJTaVExWC1DUVlXdEdYUklIT1BzV1E3WWJSWDg0NnZNWEhBc0tWb2RCNWNPSng3eUFlNjVDcnh6Uk9URVVzLTZ3ODdnTldyWQ=="
 
 def obter_gemini_api_key() -> str:
     k = (os.getenv("GEMINI_API_KEY") or "").strip()
@@ -189,13 +190,14 @@ class BotMemoryState:
         # Parâmetros
         self.active_asset = "EURUSD-OTC"
         self.recently_traded_assets = {}  # {ativo: timestamp_entrada} para rotação sem repetição
+        self.suspended_assets: Dict[str, float] = {}  # {ativo: timestamp} para pular ativos suspensos na corretora
         self.candle_clock = "00:00"
         self.last_candle_data = {}
         self.entry_stake = 5.0
         self.expiration_minutes = 1
         self.gemini_key = obter_gemini_api_key()
-        self.use_martingale = True
-        self.max_gales = 1
+        self.use_martingale = False
+        self.max_gales = 0
         self.current_gale_step = 0
         self.gale_factor = 2.0
         self.stop_win = 100.0
@@ -224,6 +226,7 @@ class BotMemoryState:
         self.warmup_done: bool = False
         self.warmup_progress: Dict[str, Any] = {"active": False, "loaded": 0, "total": 0, "asset": "", "percent": 0}
         self.gemini_status: str = "Aguardando análise" if self.gemini_key else "Desativado (GEMINI_API_KEY não configurada)"
+        self.gemini_credits: Dict[str, Any] = {"total_credits": None, "max_refresh_credits": None, "last_sync": 0.0}
         self.current_date: str = datetime.now().strftime("%Y-%m-%d")
 
 state = BotMemoryState()
@@ -884,12 +887,42 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
         "qtd_velas": len(candles)
     }
 
+def atualizar_creditos_gemini(force: bool = False) -> Dict[str, Any]:
+    """Consulta o saldo real de créditos da API (exibido como Gemini AI no painel)."""
+    if not state.gemini_key or not state.gemini_key.startswith("sk-"):
+        return state.gemini_credits
+    agora = time.time()
+    if not force and (agora - float(state.gemini_credits.get("last_sync") or 0.0)) < 30.0:
+        return state.gemini_credits
+    try:
+        r = httpx.get(
+            "https://api.manus.ai/v2/usage.availableCredits",
+            headers={
+                "x-manus-api-key": state.gemini_key,
+                "Content-Type": "application/json",
+                "User-Agent": "OriunBinary15/1.0"
+            },
+            timeout=6.0
+        )
+        if r.status_code == 200:
+            d = r.json()
+            state.gemini_credits = {
+                "total_credits": int(d.get("total_credits") or 0),
+                "free_credits": int(d.get("free_credits") or 0),
+                "refresh_credits": int(d.get("refresh_credits") or 0),
+                "max_refresh_credits": int(d.get("max_refresh_credits") or 0),
+                "last_sync": agora
+            }
+    except Exception:
+        pass
+    return state.gemini_credits
+
 async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not state.gemini_key:
         state.gemini_status = "Desativado (GEMINI_API_KEY não configurada)"
         return None
 
-    candidate_models = ["gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-3-flash-preview", "gemini-3.1-flash-lite"]
+    candidate_models = ["gemini-3.1-flash-lite", "gemini-flash-lite-latest", "gemini-3-flash-preview", "gemini-2.5-flash"]
     c = dados.get("candle_ultimo", {})
     agora_str = dados.get("relogio_horario", datetime.now().strftime("%H:%M:%S"))
     segundo_vela = dados.get("segundo_da_vela", 55)
@@ -979,6 +1012,17 @@ Responda ESTRITAMENTE em formato JSON com o schema exigido.
                     headers=headers,
                     json={"message": {"content": full_prompt}}
                 )
+                if resp.status_code == 429:
+                    txt_err = resp.text.lower()
+                    if "credit" in txt_err:
+                        state.gemini_status = "Créditos esgotados (0 disponíveis)"
+                        state.gemini_credits["total_credits"] = 0
+                        state.ai_enabled = False
+                        state.current_observation = "[Gemini AI] Créditos da API esgotados (0 disponíveis). Atualize a chave no .env."
+                    else:
+                        state.gemini_status = "Limite de taxa (429) — aguardando"
+                    print(f"[GEMINI ERR] HTTP 429: {resp.text[:200]}", flush=True)
+                    return None
                 if resp.status_code != 200:
                     state.gemini_status = f"Erro HTTP {resp.status_code} (Gemini AI)"
                     print(f"[GEMINI ERR] HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
@@ -1188,6 +1232,45 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
     except Exception as e:
         return False, False, 0.0, str(e)
 
+async def preparar_e_disparar_g1(ativo: str, direcao_anterior: str, proximo_valor: float):
+    """No G1, reanalisa o mesmo ativo com os candles atualizados: pode manter a direção ou inverter se o fluxo virou."""
+    nova_direcao = direcao_anterior
+    nova_conf = 90
+    motivo_g1 = f"Martingale G1 em {ativo} (Mantida direção {direcao_anterior})"
+
+    try:
+        if state.api and state.is_connected and state.gemini_key:
+            candles = await asyncio.wait_for(
+                asyncio.to_thread(state.api.get_candles, ativo, 60, 60, int(time.time())),
+                timeout=3.5
+            )
+            if candles and len(candles) >= 20:
+                dados_60 = calcular_indicadores_60(candles)
+                if dados_60:
+                    state.last_candle_data = dados_60
+                    g_res = await asyncio.wait_for(consultar_gemini(ativo, dados_60), timeout=8.0)
+                    if isinstance(g_res, dict) and g_res.get("decisao") in ["CALL", "PUT"]:
+                        nova_direcao = g_res["decisao"]
+                        nova_conf = int(g_res.get("confluencia_porcentagem") or 85)
+                        if nova_direcao != direcao_anterior:
+                            motivo_g1 = f"Martingale G1 em {ativo} (Direção invertida para {nova_direcao} após reanálise)"
+                            print(f" -> [G1 REANALISADO - INVERSÃO] {ativo}: mudou de {direcao_anterior} para {nova_direcao} ({nova_conf}%)!", flush=True)
+                        else:
+                            print(f" -> [G1 REANALISADO - MANTIDO] {ativo}: manteve {nova_direcao} ({nova_conf}%).", flush=True)
+                        if g_res.get("texto_observacao"):
+                            state.current_observation = g_res["texto_observacao"]
+    except Exception as ex:
+        print(f" -> [G1 REANÁLISE FALLBACK] {ativo}: mantendo {direcao_anterior} ({ex})", flush=True)
+
+    await disparar_trade_autonomo(
+        direcao=nova_direcao,
+        valor=proximo_valor,
+        motivo_str=motivo_g1,
+        ativo=ativo,
+        conf=nova_conf,
+        is_immediate_gale=True
+    )
+
 async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, ativo: str, conf: int, is_immediate_gale: bool = False):
     if state.is_trading:
         return
@@ -1205,13 +1288,18 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
     agora = datetime.now()
     seg_atual = agora.second
 
-    # Se for Martingale G1 imediato (virada de vela) ou entrada nos primeiros 3s da vela:
-    # Executa IMEDIATAMENTE sem atrasos para pegar a abertura exata da vela!
-    if is_immediate_gale or seg_atual <= 3:
+    # Janela ideal de compra em M1 na BullEx: entre 22s e 27s da vela (bem perto do fechamento de compra dos 30s finais!)
+    # Se já passou dos 27s, aguarda a próxima vela abrir e depois espera chegar perto dos 24s-27s.
+    if is_immediate_gale and seg_atual <= 27:
+        seg_ate_virada = 0
+        target_virada_epoch = agora_ts
+    elif 18 <= seg_atual <= 27:
+        seg_ate_virada = 0
+        target_virada_epoch = agora_ts
+    elif seg_atual < 18:
         seg_ate_virada = 0
         target_virada_epoch = agora_ts
     else:
-        # Se a vela já passou dos 3s, aguarda a virada no segundo 00s da PRÓXIMA VELA!
         seg_ate_virada = (60 - seg_atual) % 60
         if seg_ate_virada == 0:
             seg_ate_virada = 60
@@ -1222,19 +1310,19 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         "direction": direcao,
         "confluence": conf,
         "expiration": "M1 (1 Minuto)",
-        "target": "Abertura da Vela M1" if seg_ate_virada == 0 else "Minuto Seguinte (00s)",
+        "target": "Janela Final (22s–27s)" if seg_ate_virada == 0 else "Próxima Vela (Janela 22s–27s)",
         "seconds_left": seg_ate_virada,
         "target_epoch": target_virada_epoch,
-        "action_hint": f"[{tipo_operacao}] Entrada na abertura da vela (00s) para tempo de expiração real perfeito na BullEx sem atraso.",
-        "status": f"SINAL IDENTIFICADO ({tipo_operacao}) — DISPARO NA ABERTURA (00s)",
+        "action_hint": f"[{tipo_operacao}] Aguardando zona próxima aos 30s finais de compra para melhor taxa.",
+        "status": f"SINAL IDENTIFICADO ({tipo_operacao}) — PREPARANDO JANELA 30s",
         "time": agora.strftime("%H:%M:%S"),
         "gale_step": state.current_gale_step,
         "stake": valor
     }
 
-    print(f"\n[SINAL IDENTIFICADO - {tipo_operacao}] {direcao} em {ativo} (M1) | {seg_ate_virada}s para virada (abertura da vela)", flush=True)
+    print(f"\n[SINAL IDENTIFICADO - {tipo_operacao}] {direcao} em {ativo} (M1) | {seg_ate_virada}s para virada", flush=True)
 
-    # Contagem regressiva precisa até a virada da vela (segundo 00s)
+    # 1. Se precisou aguardar a virada da vela, faz contagem regressiva até 00s
     while time.time() < target_virada_epoch - 0.15:
         if not state.ai_enabled and "Manual" not in motivo_str:
             state.is_trading = False
@@ -1244,7 +1332,77 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         rest_virada = max(0, int(round(target_virada_epoch - time.time())))
         if state.active_signal:
             state.active_signal["seconds_left"] = rest_virada
-            state.active_signal["status"] = f"AGUARDANDO ABERTURA DA VELA M1 ({rest_virada}s)"
+            state.active_signal["status"] = f"AGUARDANDO NOVA VELA M1 ({rest_virada}s)"
+
+    # 2. Agora dentro da vela (00s..27s): aguarda chegar perto dos 30s finais de compra (entre 22s e 27s)
+    # capturando retração a favor da entrada (subida para PUT, descida para CALL)
+    preco_abertura = None
+    if state.api and state.is_connected:
+        try:
+            c_open = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(time.time()))
+            if c_open and len(c_open) > 0:
+                preco_abertura = float(c_open[-1].get("open") or c_open[-1].get("close") or 0.0)
+        except Exception:
+            preco_abertura = None
+
+    while True:
+        if not state.ai_enabled and "Manual" not in motivo_str:
+            state.is_trading = False
+            state.active_signal = None
+            return
+        now_ts = time.time()
+        seg_vela = int(now_ts) % 60
+        if seg_vela >= 27:
+            # Proteção de taxa na entrada inicial: não vender no fundo nem comprar no topo da vela
+            if not is_immediate_gale and state.api and state.is_connected:
+                try:
+                    c_chk = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(now_ts))
+                    if c_chk and len(c_chk) > 0:
+                        if not preco_abertura:
+                            preco_abertura = float(c_chk[-1].get("open") or c_chk[-1].get("close") or 0.0)
+                        preco_atual = float(c_chk[-1].get("close") or 0.0)
+                except Exception:
+                    pass
+            if not is_immediate_gale and preco_abertura and preco_atual:
+                if direcao == "PUT" and preco_atual < preco_abertura:
+                    print(f" -> [ENTRADA ABORTADA] {ativo} PUT cancelado aos {seg_vela}s: preço ({preco_atual}) abaixo da abertura ({preco_abertura}) — evitando vender fundo.", flush=True)
+                    state.is_trading = False
+                    state.active_signal = None
+                    state.current_observation = f"[PROTEÇÃO] PUT em {ativo} abortado para não vender no fundo da vela."
+                    asyncio.create_task(varrer_60_candles_ativos())
+                    return
+                if direcao == "CALL" and preco_atual > preco_abertura:
+                    print(f" -> [ENTRADA ABORTADA] {ativo} CALL cancelado aos {seg_vela}s: preço ({preco_atual}) acima da abertura ({preco_abertura}) — evitando comprar topo.", flush=True)
+                    state.is_trading = False
+                    state.active_signal = None
+                    state.current_observation = f"[PROTEÇÃO] CALL em {ativo} abortado para não comprar no topo da vela."
+                    asyncio.create_task(varrer_60_candles_ativos())
+                    return
+            print(f" -> [JANELA 27s ATINGIDA] Executando {direcao} em {ativo} aos {seg_vela}s (perto do fechamento de compra 30s).", flush=True)
+            break
+
+        preco_atual = None
+        if seg_vela >= 20 and state.api and state.is_connected:
+            try:
+                c_live = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(now_ts))
+                if c_live and len(c_live) > 0:
+                    if not preco_abertura:
+                        preco_abertura = float(c_live[-1].get("open") or c_live[-1].get("close") or 0.0)
+                    preco_atual = float(c_live[-1].get("close") or 0.0)
+            except Exception:
+                pass
+            if preco_abertura and preco_atual:
+                if (direcao == "PUT" and preco_atual > preco_abertura) or (direcao == "CALL" and preco_atual < preco_abertura):
+                    print(f" -> [TAXA IDEAL PERTO DOS 30s] {ativo} {direcao} capturado aos {seg_vela}s (abertura={preco_abertura}, atual={preco_atual})!", flush=True)
+                    break
+
+        faltam_janela = max(0, 27 - seg_vela)
+        if state.active_signal:
+            state.active_signal["seconds_left"] = faltam_janela
+            state.active_signal["target_epoch"] = now_ts + faltam_janela
+            state.active_signal["status"] = f"AGUARDANDO ZONA FINAL DE COMPRA ({29 - seg_vela}s)"
+            state.active_signal["action_hint"] = f"[{tipo_operacao}] Aguardando melhor taxa perto dos 30s finais ({seg_vela}s/27s)..."
+        await asyncio.sleep(0.35)
 
     # Disparo IMEDIATO na abertura da vela (segundo 00s-01s)
     # ZERO ATRASO: sem esperar 28s, sem risco de timeout de compra e sem pular de vela!
@@ -1281,8 +1439,16 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
 
     # Se a ordem não foi aceita pela corretora, NÃO marca loss
     if not executou:
-        print(f" -> [AVISO] Ordem não aceita pela corretora: {err}. Descartando sem marcar loss.", flush=True)
-        state.current_observation = f"[AVISO BULLEX] Ordem não aceita ({err}). Analisando nova oportunidade..."
+        err_low = str(err or "").lower()
+        if any(tok in err_low for tok in ("suspended", "closed", "cannot purchase", "not available")):
+            state.suspended_assets[ativo] = time.time()
+            if state.active_asset == ativo:
+                state.active_asset = ""
+            print(f" -> [ATIVO SUSPENSO] {ativo} recusado pela corretora ({err}). Pulando por 5 min para o próximo ativo.", flush=True)
+            state.current_observation = f"[ATIVO SUSPENSO] {ativo} está suspenso na BullEx. Passando para o próximo ativo..."
+        else:
+            print(f" -> [AVISO] Ordem não aceita pela corretora: {err}. Descartando sem marcar loss.", flush=True)
+            state.current_observation = f"[AVISO BULLEX] Ordem não aceita ({err}). Analisando nova oportunidade..."
         if state.current_gale_step > 0:
             state.current_gale_step = 0
             state.accumulated_gale_loss = 0.0
@@ -1361,20 +1527,10 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             proximo_valor = state.entry_stake * (state.gale_factor ** state.current_gale_step)
             simb = "$" if state.currency in ["USD", "$"] else "R$"
             
-            print(f"\n -> [G1 IMEDIATO NO MESMO ATIVO] Entrada inicial em {ativo} deu loss. Disparando G1 IMEDIATO em {ativo} ({direcao}) com {simb} {proximo_valor:.2f}!", flush=True)
-            state.current_observation = f"[MARTINGALE G1 - {ativo}] Entrada inicial não pagou. Executando G1 IMEDIATO no MESMO ATIVO ({direcao} {simb} {proximo_valor:.2f})!"
+            print(f"\n -> [G1 NO MESMO ATIVO] Entrada inicial em {ativo} ({direcao}) deu loss. Reanalisando {ativo} para G1 ({simb} {proximo_valor:.2f})...", flush=True)
+            state.current_observation = f"[MARTINGALE G1 - {ativo}] Reanalisando velas para decidir se mantém {direcao} ou inverte no G1 ({simb} {proximo_valor:.2f})..."
             
-            # Dispara G1 imediatamente no MESMO ATIVO e na MESMA DIREÇÃO sem delay!
-            asyncio.create_task(
-                disparar_trade_autonomo(
-                    direcao=direcao,
-                    valor=proximo_valor,
-                    motivo_str=f"Martingale G1 em {ativo} (Recuperação no mesmo ativo)",
-                    ativo=ativo,
-                    conf=95,
-                    is_immediate_gale=True
-                )
-            )
+            asyncio.create_task(preparar_e_disparar_g1(ativo, direcao, proximo_valor))
             return
         else:
             # LOSS NO G1 (OU SEM MARTINGALE) -> AGORA SIM MARCA NO PLACAR!
@@ -1407,7 +1563,10 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
                 "reason": motivo_str
             })
             salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, res_str, -total_perdido, gale_usado, breakdown_str, motivo_str, agora_exec_str, profit_gross=-total_perdido)
-            state.current_observation = f"[FIM DE CICLO G1] Loss confirmado em {ativo} (-{simb} {total_perdido:.2f}). Analisando novos pares para recuperação..."
+            if gale_usado > 0:
+                state.current_observation = f"[FIM DE CICLO G1] Loss confirmado em {ativo} (-{simb} {total_perdido:.2f}). Analisando novos pares para recuperação..."
+            else:
+                state.current_observation = f"[RESULTADO] Loss em {ativo} (-{simb} {total_perdido:.2f}). Analisando novos pares para próxima entrada..."
             asyncio.create_task(varrer_60_candles_ativos())
 
     # Proteção de Stop Win / Stop Loss
@@ -1593,11 +1752,17 @@ async def varrer_60_candles_ativos():
         pool_otc = obter_pool_otc_binarios()
 
         # FILTRO ANTI-REPETIÇÃO: Não repete ativo até operar em TODOS os ativos do pool
-        ativos_livres = [a for a in pool_otc if a not in state.recently_traded_assets]
+        ativos_livres = [
+            a for a in pool_otc
+            if a not in state.recently_traded_assets and (agora_ts - state.suspended_assets.get(a, 0)) >= 300
+        ]
         if not ativos_livres:
             state.recently_traded_assets.clear()
-            ativos_livres = list(pool_otc)
-            print(f"\n[CICLO COMPLETO] Todos os {len(pool_otc)} ativos OTC foram operados. Reiniciando ciclo!", flush=True)
+            ativos_livres = [a for a in pool_otc if (agora_ts - state.suspended_assets.get(a, 0)) >= 300]
+            if not ativos_livres:
+                state.suspended_assets.clear()
+                ativos_livres = list(pool_otc)
+            print(f"\n[CICLO COMPLETO] Reiniciando ciclo com {len(ativos_livres)} ativos OTC disponíveis!", flush=True)
 
         # Prioriza o ativo ativo se estiver livre, seguido pelos demais da lista OTC
         ativos_para_varrer = ([state.active_asset] if state.active_asset in ativos_livres else []) + [a for a in ativos_livres if a != state.active_asset]
@@ -1671,15 +1836,35 @@ async def varrer_60_candles_ativos():
             print(f"[GEMINI TIMEOUT] {ativo}: {ex}", flush=True)
 
         if not analise or not isinstance(analise, dict) or analise.get("decisao") not in ["CALL", "PUT", "AGUARDAR"]:
-            # NÃO desliga o robô por timeout ou atraso passageiro! Mantém o robô ativo e reanalisa no próximo ciclo.
             state.active_signal = None
-            state.current_observation = f"[Gemini AI] {state.gemini_status}. Reanalisando próximo candle de {ativo} sem desligar..."
+            if not state.ai_enabled:
+                print(f"[IA DESLIGADA] {state.current_observation}", flush=True)
+                return
+            # Se for erro 429 / cota temporária, aguarda 30s antes de tentar novamente para não spammar
+            st_low = (state.gemini_status or "").lower()
+            espera = 30 if ("429" in st_low or "cota" in st_low) else 2
+            state.current_observation = f"[Gemini AI] {state.gemini_status}. Reanalisando próximo candle de {ativo}..."
             print(f"[IA REAVALIANDO] {state.current_observation}", flush=True)
-            await asyncio.sleep(2)
+            await asyncio.sleep(espera)
             return
 
         conf = analise.get("confluencia_porcentagem", 0)
         decisao = analise.get("decisao")
+
+        # Trava dura anti-topo e anti-fundo extremos (Bollinger + RSI)
+        ultimo_p = float(dados_60.get("ultimo_preco") or 0)
+        bb_up = float(dados_60.get("bb_upper") or 0)
+        bb_low = float(dados_60.get("bb_lower") or 0)
+        rsi_val = float(dados_60.get("rsi14") or 50)
+        if decisao == "CALL" and ((bb_up > 0 and ultimo_p >= bb_up * 0.9998) or rsi_val >= 72):
+            print(f" -> [FILTRO ANTI-TOPO] CALL bloqueado em {ativo} (preço={ultimo_p}, BB_sup={bb_up}, RSI={rsi_val}).", flush=True)
+            decisao = "AGUARDAR"
+            analise["texto_observacao"] = f"[{ativo} | {agora_str}] CALL bloqueado em topo extremo (BB Sup={bb_up}, RSI={rsi_val}). Aguardando melhor ponto."
+        elif decisao == "PUT" and ((bb_low > 0 and ultimo_p <= bb_low * 1.0002) or rsi_val <= 28):
+            print(f" -> [FILTRO ANTI-FUNDO] PUT bloqueado em {ativo} (preço={ultimo_p}, BB_inf={bb_low}, RSI={rsi_val}).", flush=True)
+            decisao = "AGUARDAR"
+            analise["texto_observacao"] = f"[{ativo} | {agora_str}] PUT bloqueado em fundo extremo (BB Inf={bb_low}, RSI={rsi_val}). Aguardando melhor ponto."
+
         olho_badge = dados_60.get("olho_deus_classificacao", "")
         obs_txt = analise.get("texto_observacao") or f"[{ativo} | {agora_str}] Decisão: {decisao} ({conf}% confluência) - {olho_badge}"
         state.current_observation = obs_txt
@@ -1710,6 +1895,49 @@ async def varrer_60_candles_ativos():
     finally:
         state.is_scanning = False
 
+async def loop_candle_tempo_real():
+    """Atualiza o último candle, saldos e indicadores segundo a segundo em tempo real sem bloquear /api/status."""
+    tick_count = 0
+    while True:
+        try:
+            await asyncio.sleep(1)
+            tick_count += 1
+            ativo = state.active_asset
+            if not (state.api and state.is_connected):
+                continue
+            if tick_count % 5 == 0:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(sincronizar_saldos_plataforma, state.api),
+                        timeout=3.0
+                    )
+                except Exception:
+                    pass
+            if not ativo or state.warmup_progress.get("active"):
+                continue
+            agora_ts = int(time.time())
+            novos = await asyncio.wait_for(
+                asyncio.to_thread(state.api.get_candles, ativo, 60, 2, agora_ts),
+                timeout=2.0
+            )
+            if novos and isinstance(novos, list):
+                cached = state.candles_cache.get(ativo, [])
+                if cached:
+                    by_id = {c.get("id"): c for c in cached if isinstance(c, dict) and c.get("id") is not None}
+                    for c in novos:
+                        if isinstance(c, dict) and c.get("id") is not None:
+                            by_id[c.get("id")] = c
+                    candles = [by_id[k] for k in sorted(by_id.keys())][-60:]
+                else:
+                    candles = novos[-60:]
+                if len(candles) >= 20:
+                    state.candles_cache[ativo] = candles
+                    dados = calcular_indicadores_60(candles)
+                    if dados:
+                        state.last_candle_data = dados
+        except Exception:
+            pass
+
 async def loop_trader_background():
     while True:
         try:
@@ -1717,10 +1945,17 @@ async def loop_trader_background():
             agora_s = int(time.time())
             seg_v = agora_s % 60
             state.candle_clock = f"00:{60 - seg_v:02d}"
+            agora_hms = datetime.now().strftime("%H:%M:%S")
+            if state.current_observation and "[Gemini AI " in state.current_observation:
+                state.current_observation = re.sub(
+                    r"\[Gemini AI \d{2}:\d{2}:\d{2}\]",
+                    f"[Gemini AI {agora_hms}]",
+                    state.current_observation,
+                )
             if state.last_candle_data:
                 state.last_candle_data["segundo_da_vela"] = seg_v
                 state.last_candle_data["tempo_restante_vela"] = 60 - seg_v
-                state.last_candle_data["relogio_horario"] = datetime.now().strftime("%H:%M:%S")
+                state.last_candle_data["relogio_horario"] = agora_hms
             if not state.ai_enabled or state.is_paused or state.is_trading or state.is_scanning:
                 continue
 
@@ -1797,6 +2032,7 @@ async def auto_conectar_bullex():
 async def startup_event():
     # Inicia desconectado para exibir sempre a Tela de Login inicial
     state.is_connected = False
+    asyncio.create_task(loop_candle_tempo_real())
     asyncio.create_task(loop_trader_background())
 
 # ==========================================
@@ -1978,11 +2214,13 @@ async def api_analytics(scope: str = "day", date: Optional[str] = None, month: O
 @app.get("/api/status")
 async def api_status():
     verificar_virada_dia()
-    if state.api and state.is_connected:
-        try:
-            await asyncio.to_thread(sincronizar_saldos_plataforma, state.api)
-        except Exception:
-            pass
+    agora_hms = datetime.now().strftime("%H:%M:%S")
+    if state.current_observation and "[Gemini AI " in state.current_observation:
+        state.current_observation = re.sub(
+            r"\[Gemini AI \d{2}:\d{2}:\d{2}\]",
+            f"[Gemini AI {agora_hms}]",
+            state.current_observation,
+        )
     bal = state.balance_demo if state.mode == "DEMO" else state.balance_real
     return {
         "connected": bool(state.is_connected and state.api is not None),
@@ -1995,6 +2233,7 @@ async def api_status():
         "balance_real": state.balance_real,
         "gemini_active": bool(state.gemini_key),
         "gemini_status": state.gemini_status,
+        "gemini_credits": await asyncio.to_thread(atualizar_creditos_gemini, False),
         "warmup_progress": state.warmup_progress,
         "ai_enabled": state.ai_enabled,
         "is_paused": state.is_paused,
