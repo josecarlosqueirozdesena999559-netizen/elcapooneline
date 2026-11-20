@@ -164,18 +164,65 @@ def obter_pool_otc_binarios() -> List[str]:
 
 SCAN_ASSETS_PRIORITY = OTC_BINARY_CATALOG
 
-# Chave Global Pré-Configurada para Execução Direta em Qualquer Computador
-DEFAULT_GEMINI_B64 = "c2stay1WeGRMN295dGVTZVkxVlkwRlJTaVExWC1DUVlXdEdYUklIT1BzV1E3WWJSWDg0NnZNWEhBc0tWb2RCNWNPSng3eUFlNjVDcnh6Uk9URVVzLTZ3ODdnTldyWQ=="
+# Pool de Chaves com Rotação Automática (3 Chaves / 757 Créditos Somados)
+API_KEY_POOL = [
+    {
+        "id": 1,
+        "label": "Chave 5 (Principal)",
+        "key": "sk-eWO12W1x-flzVPOkm_hcVFhU3JTbKShmdjvt52p6gfZKP-rYbCyCzWz0qlQc4TyqQoybsxe20jeoO25AlgmIKO-qrPOF",
+        "credits": 300,
+        "max_credits": 300,
+        "exhausted": False
+    },
+    {
+        "id": 2,
+        "label": "Chave 3 (Reserva 1)",
+        "key": "sk-fwbSvlXpSOxJCvb8LkKSDvcdPBwtFmuxs1-AObo4ghwynYcJBOr4JaXzLOpD8MawjaWegeakdA9n-9re5_ENRkWtf2I4",
+        "credits": 298,
+        "max_credits": 300,
+        "exhausted": False
+    },
+    {
+        "id": 3,
+        "label": "Chave 4 (Reserva 2)",
+        "key": "sk-25iVyLYJOlutOOKU-yN3hgENMN3uHzDmgSVavczWte2hAdQyPfA7AIuRbjAhvkvWNX-VS1huuo2-d8t62_4jB14mGPZV",
+        "credits": 159,
+        "max_credits": 300,
+        "exhausted": False
+    }
+]
 
 def obter_gemini_api_key() -> str:
     k = (os.getenv("GEMINI_API_KEY") or "").strip()
-    if not k:
-        try:
-            import base64
-            k = base64.b64decode(DEFAULT_GEMINI_B64.encode("utf-8")).decode("utf-8").strip()
-        except Exception:
-            k = ""
-    return k
+    if k:
+        return k
+    return API_KEY_POOL[0]["key"]
+
+def rotacionar_proxima_chave(motivo: str = "") -> Optional[str]:
+    """Rotaciona automaticamente para a próxima chave com créditos no pool quando a anterior esgota."""
+    atual_idx = getattr(state, "current_key_idx", 0)
+    antiga = API_KEY_POOL[atual_idx]["label"] if 0 <= atual_idx < len(API_KEY_POOL) else "Chave Atual"
+    if 0 <= atual_idx < len(API_KEY_POOL):
+        API_KEY_POOL[atual_idx]["exhausted"] = True
+        API_KEY_POOL[atual_idx]["credits"] = 0
+
+    for idx, item in enumerate(API_KEY_POOL):
+        if not item["exhausted"] and item["credits"] > 0:
+            state.current_key_idx = idx
+            state.gemini_key = item["key"]
+            cred_total = sum(k["credits"] for k in API_KEY_POOL if not k["exhausted"])
+            state.gemini_status = f"Ativo ({item['label']})"
+            state.current_observation = f"[Gemini AI] 🔄 {antiga} esgotada ({motivo})! Alternando automaticamente para {item['label']} ({item['credits']} cr). Pool total: {cred_total} cr."
+            print(f"\n[KEY POOL ROTATION] {antiga} esgotada ({motivo}). Nova chave ativa: {item['label']} com {item['credits']} créditos (Total Pool: {cred_total})", flush=True)
+            return item["key"]
+
+    state.gemini_status = "Créditos esgotados em todas as 3 chaves (0 disponíveis)"
+    if isinstance(state.gemini_credits, dict):
+        state.gemini_credits["total_credits"] = 0
+    state.ai_enabled = False
+    state.current_observation = "[Gemini AI] Todas as 3 chaves do pool esgotaram seus créditos (757 créditos consumidos)."
+    print("[KEY POOL ALERT] Todas as 3 chaves do pool foram esgotadas!", flush=True)
+    return None
 
 class BotMemoryState:
     def __init__(self):
@@ -197,7 +244,8 @@ class BotMemoryState:
         self.last_candle_data = {}
         self.entry_stake = 5.0
         self.expiration_minutes = 1
-        self.gemini_key = obter_gemini_api_key()
+        self.current_key_idx = 0
+        self.gemini_key = API_KEY_POOL[0]["key"]
         self.use_martingale = False
         self.max_gales = 0
         self.current_gale_step = 0
@@ -890,12 +938,14 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 def atualizar_creditos_gemini(force: bool = False) -> Dict[str, Any]:
-    """Consulta o saldo real de créditos da API (exibido como Gemini AI no painel)."""
+    """Consulta o saldo real de créditos da chave ativa e sincroniza o total do pool (3 chaves somadas)."""
     if not state.gemini_key or not state.gemini_key.startswith("sk-"):
         return state.gemini_credits
     agora = time.time()
     if not force and (agora - float(state.gemini_credits.get("last_sync") or 0.0)) < 30.0:
         return state.gemini_credits
+    atual_idx = getattr(state, "current_key_idx", 0)
+    chave_info = API_KEY_POOL[atual_idx] if 0 <= atual_idx < len(API_KEY_POOL) else None
     try:
         r = httpx.get(
             "https://api.manus.ai/v2/usage.availableCredits",
@@ -908,13 +958,29 @@ def atualizar_creditos_gemini(force: bool = False) -> Dict[str, Any]:
         )
         if r.status_code == 200:
             d = r.json()
+            tc = int(d.get("total_credits") or 0)
+            if chave_info:
+                chave_info["credits"] = tc
+                if tc <= 0:
+                    chave_info["exhausted"] = True
+                    rotacionar_proxima_chave("Créditos zerados na consulta")
+
+            pool_total = sum(k["credits"] for k in API_KEY_POOL if not k.get("exhausted", False))
+            max_pool = sum(k.get("max_credits", 300) for k in API_KEY_POOL)
             state.gemini_credits = {
-                "total_credits": int(d.get("total_credits") or 0),
+                "total_credits": pool_total,
                 "free_credits": int(d.get("free_credits") or 0),
-                "refresh_credits": int(d.get("refresh_credits") or 0),
-                "max_refresh_credits": int(d.get("max_refresh_credits") or 0),
+                "refresh_credits": pool_total,
+                "max_refresh_credits": max_pool,
+                "active_key_credits": tc,
+                "active_key_name": chave_info["label"] if chave_info else "Chave Ativa",
                 "last_sync": agora
             }
+        elif r.status_code in [401, 403, 429]:
+            if chave_info:
+                chave_info["exhausted"] = True
+                chave_info["credits"] = 0
+            rotacionar_proxima_chave(f"HTTP {r.status_code}")
     except Exception:
         pass
     return state.gemini_credits
@@ -1012,90 +1078,91 @@ IMPORTANTE: O 'Olho de Deus' é apenas mais um prompt de força extra (A+), NÃO
 Responda ESTRITAMENTE em formato JSON com o schema exigido.
 """
     if state.gemini_key.startswith("sk-"):
-        headers = {
-            "x-manus-api-key": state.gemini_key,
-            "Content-Type": "application/json",
-            "User-Agent": "OriunBinary15/1.0"
-        }
-        full_prompt = f"{SYSTEM_PROMPT_TRADER}\n\n{prompt_usuario}"
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            try:
-                resp = await client.post(
-                    "https://api.manus.ai/v2/task.create",
-                    headers=headers,
-                    json={"message": {"content": full_prompt}}
-                )
-                if resp.status_code == 429:
-                    txt_err = resp.text.lower()
-                    if "credit" in txt_err:
-                        state.gemini_status = "Créditos esgotados (0 disponíveis)"
-                        state.gemini_credits["total_credits"] = 0
-                        state.ai_enabled = False
-                        state.current_observation = "[Gemini AI] Créditos da API esgotados (0 disponíveis). Atualize a chave no .env."
-                    else:
-                        state.gemini_status = "Limite de taxa (429) — aguardando"
-                    print(f"[GEMINI ERR] HTTP 429: {resp.text[:200]}", flush=True)
-                    return None
-                if resp.status_code != 200:
-                    state.gemini_status = f"Erro HTTP {resp.status_code} (Gemini AI)"
-                    print(f"[GEMINI ERR] HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
-                    return None
-                task_id = resp.json().get("task_id")
-                if not task_id:
-                    state.gemini_status = "Erro: task_id ausente (Gemini AI)"
-                    return None
-
-                await asyncio.sleep(1.5)
-                for _ in range(75):
-                    poll = await client.get(
-                        f"https://api.manus.ai/v2/task.listMessages?task_id={task_id}",
-                        headers=headers
+        for tentativa in range(len(API_KEY_POOL)):
+            headers = {
+                "x-manus-api-key": state.gemini_key,
+                "Content-Type": "application/json",
+                "User-Agent": "OriunBinary15/1.0"
+            }
+            full_prompt = f"{SYSTEM_PROMPT_TRADER}\n\n{prompt_usuario}"
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                try:
+                    resp = await client.post(
+                        "https://api.manus.ai/v2/task.create",
+                        headers=headers,
+                        json={"message": {"content": full_prompt}}
                     )
-                    if poll.status_code == 200:
-                        pdata = poll.json()
-                        messages = pdata.get("messages") or []
-                        for m in reversed(messages):
-                            if isinstance(m, dict) and m.get("type") == "assistant_message":
-                                am = m.get("assistant_message") or {}
-                                content = am.get("content") if isinstance(am, dict) else ""
-                                if not isinstance(content, str) or not content.strip():
-                                    continue
-                                candidate = content.strip()
-                                if candidate.startswith("```"):
-                                    candidate = candidate.strip("`")
-                                    if candidate.lower().startswith("json"):
-                                        candidate = candidate[4:].strip()
-                                start_idx = candidate.find("{")
-                                end_idx = candidate.rfind("}")
-                                if start_idx == -1 or end_idx == -1:
-                                    continue
-                                try:
-                                    parsed = json.loads(candidate[start_idx:end_idx + 1])
-                                    if isinstance(parsed, dict) and parsed.get("decisao") in ["CALL", "PUT", "AGUARDAR"]:
-                                        if parsed.get("decisao") == "AGUARDAR" and dec_quant in ["CALL", "PUT"] and conf_quant >= 85:
-                                            parsed["decisao"] = dec_quant
-                                            parsed["confluencia_porcentagem"] = conf_quant
-                                            parsed["texto_observacao"] = f"[Gemini AI {agora_str}] {conf_quant}% -- {dec_quant}: {parsed.get('texto_observacao') or motivo_quant}"
-                                        state.gemini_status = "Ativo e pensando (Gemini AI)"
-                                        print(f"[GEMINI OK] Gemini AI respondeu para {ativo}: {parsed.get('decisao')} ({parsed.get('confluencia_porcentagem')}%)", flush=True)
-                                        return parsed
-                                except Exception:
-                                    continue
-                    await asyncio.sleep(1.0)
-                if dec_quant in ["CALL", "PUT"] and conf_quant >= 80:
-                    q_quant["texto_observacao"] = f"[Gemini AI {agora_str}] {conf_quant}% -- {dec_quant}: {motivo_quant} | {padrao_quant}"
-                    state.gemini_status = "Ativo e pensando (Gemini AI)"
-                    print(f"[GEMINI QUANT] Gemini AI análise tempo real para {ativo}: {dec_quant} ({conf_quant}%)", flush=True)
-                    return q_quant
-                state.gemini_status = "Ativo e pensando (Gemini AI)"
-                return None
-            except Exception as ex:
-                if dec_quant in ["CALL", "PUT"] and conf_quant >= 80:
-                    q_quant["texto_observacao"] = f"[Gemini AI {agora_str}] {conf_quant}% -- {dec_quant}: {motivo_quant} | {padrao_quant}"
-                    state.gemini_status = "Ativo e pensando (Gemini AI)"
-                    return q_quant
-                state.gemini_status = "Ativo e pensando (Gemini AI)"
-                return None
+                    if resp.status_code in [401, 403, 429]:
+                        txt_err = resp.text.lower()
+                        print(f"[API POOL] Resposta {resp.status_code} ({txt_err[:120]}). Rotacionando para próxima chave...", flush=True)
+                        nova = rotacionar_proxima_chave(f"HTTP {resp.status_code}")
+                        if nova:
+                            continue
+                        return None
+                    if resp.status_code != 200:
+                        state.gemini_status = f"Erro HTTP {resp.status_code} (Gemini AI)"
+                        print(f"[GEMINI ERR] HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
+                        return None
+                    task_id = resp.json().get("task_id")
+                    if not task_id:
+                        state.gemini_status = "Erro: task_id ausente (Gemini AI)"
+                        return None
+
+                    await asyncio.sleep(1.5)
+                    for _ in range(75):
+                        poll = await client.get(
+                            f"https://api.manus.ai/v2/task.listMessages?task_id={task_id}",
+                            headers=headers
+                        )
+                        if poll.status_code == 200:
+                            pdata = poll.json()
+                            messages = pdata.get("messages") or []
+                            for m in reversed(messages):
+                                if isinstance(m, dict) and m.get("type") == "assistant_message":
+                                    am = m.get("assistant_message") or {}
+                                    content = am.get("content") if isinstance(am, dict) else ""
+                                    if not isinstance(content, str) or not content.strip():
+                                        continue
+                                    candidate = content.strip()
+                                    if candidate.startswith("```"):
+                                        candidate = candidate.strip("`")
+                                        if candidate.lower().startswith("json"):
+                                            candidate = candidate[4:].strip()
+                                    start_idx = candidate.find("{")
+                                    end_idx = candidate.rfind("}")
+                                    if start_idx == -1 or end_idx == -1:
+                                        continue
+                                    try:
+                                        parsed = json.loads(candidate[start_idx:end_idx + 1])
+                                        if isinstance(parsed, dict) and parsed.get("decisao") in ["CALL", "PUT", "AGUARDAR"]:
+                                            if parsed.get("decisao") == "AGUARDAR" and dec_quant in ["CALL", "PUT"] and conf_quant >= 85:
+                                                parsed["decisao"] = dec_quant
+                                                parsed["confluencia_porcentagem"] = conf_quant
+                                                parsed["texto_observacao"] = f"[Gemini AI {agora_str}] {conf_quant}% -- {dec_quant}: {parsed.get('texto_observacao') or motivo_quant}"
+                                            cur_lbl = API_KEY_POOL[getattr(state, 'current_key_idx', 0)]['label']
+                                            state.gemini_status = f"Ativo e pensando ({cur_lbl})"
+                                            print(f"[GEMINI OK] {cur_lbl} respondeu para {ativo}: {parsed.get('decisao')} ({parsed.get('confluencia_porcentagem')}%)", flush=True)
+                                            return parsed
+                                    except Exception:
+                                        continue
+                        await asyncio.sleep(1.0)
+                    cur_lbl = API_KEY_POOL[getattr(state, 'current_key_idx', 0)]['label']
+                    if dec_quant in ["CALL", "PUT"] and conf_quant >= 85:
+                        q_quant["texto_observacao"] = f"[Gemini AI {agora_str}] {conf_quant}% -- {dec_quant}: {motivo_quant} | {padrao_quant}"
+                        state.gemini_status = f"Ativo e pensando ({cur_lbl})"
+                        print(f"[GEMINI QUANT] Gemini AI análise tempo real para {ativo}: {dec_quant} ({conf_quant}%)", flush=True)
+                        return q_quant
+                    state.gemini_status = f"Ativo e pensando ({cur_lbl})"
+                    return None
+                except Exception as ex:
+                    cur_lbl = API_KEY_POOL[getattr(state, 'current_key_idx', 0)]['label']
+                    if dec_quant in ["CALL", "PUT"] and conf_quant >= 85:
+                        q_quant["texto_observacao"] = f"[Gemini AI {agora_str}] {conf_quant}% -- {dec_quant}: {motivo_quant} | {padrao_quant}"
+                        state.gemini_status = f"Ativo e pensando ({cur_lbl})"
+                        return q_quant
+                    state.gemini_status = f"Ativo e pensando ({cur_lbl})"
+                    return None
+            break
 
     payload = {
         "contents": [
@@ -1662,23 +1729,15 @@ def analisar_quant_smc(ativo: str, dados: Dict[str, Any]) -> Dict[str, Any]:
             "texto_observacao": f"[{ativo}] Compra (CALL) confluência {conf}%: {' | '.join(motivos[:3])}"
         }
 
-    # Fluxo Tendencial EMA
-    if "ALTA" in tendencia:
-        return {
-            "decisao": "CALL",
-            "confluencia_porcentagem": 84,
-            "padrao_vela": "Tendência",
-            "psicologia_mercado": "Alinhamento das médias EMA 9 > 21",
-            "texto_observacao": f"[{ativo}] Compra (CALL) confluência 84%: Fluxo a favor da tendência institucional"
-        }
-    else:
-        return {
-            "decisao": "PUT",
-            "confluencia_porcentagem": 84,
-            "padrao_vela": "Tendência",
-            "psicologia_mercado": "Alinhamento das médias EMA 9 < 21",
-            "texto_observacao": f"[{ativo}] Venda (PUT) confluência 84%: Fluxo a favor da tendência institucional"
-        }
+    # SEM SINAL SUFICIENTE — aguardar próximo candle
+    # (removido fallback EMA que gerava 84% falso em qualquer tendência)
+    return {
+        "decisao": "AGUARDAR",
+        "confluencia_porcentagem": 0,
+        "padrao_vela": "Sem sinal",
+        "psicologia_mercado": "Sem confluência técnica identificada",
+        "texto_observacao": f"[{ativo}] AGUARDAR: sem confluência técnica suficiente"
+    }
 
 # ========================================================
 # LOOP DE VARREDURA DOS ÚLTIMOS 60 CANDLES DE TODOS OS ATIVOS
@@ -2436,4 +2495,4 @@ async def serve_index():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8085, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=8085)
