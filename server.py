@@ -71,55 +71,39 @@ app.add_middleware(
 )
 
 SYSTEM_PROMPT_TRADER = """Você é um Trader Quantitativo Sênior e Especialista em Price Action Institucional (Smart Money Concepts), Opções Binárias M1 e Mercado OTC.
-Sua missão é analisar uma série temporal de 60 velas, indicadores matemáticos avançados, FRACTAIS DE WILLIAMS e estratégias institucionais de alta assertividade.
+Sua missão é operar com assertividade, identificando as melhores oportunidades de entrada (CALL ou PUT) a favor do fluxo institucional.
 
-REGRAS DE PROTEÇÃO ANTI-LOSS (CRUCIAIS PARA MERCADO OTC):
-1. RESPEITE A TENDÊNCIA ESTRUTURAL (NUNCA VÁ CONTRA O FLUXO OTC SEM REVERSÃO EXTREMA):
-   - Se a tendência for de ALTA (EMA9 > EMA21 > EMA50) e ADX >= 20: DÊ PRIORIDADE TOTAL PARA CALL! Opere pullbacks nas médias, fundos fractais ou rompimento de topos fractais. NÃO venda PUT contra tendência de alta a menos que haja rejeição extrema em topo macro com RSI > 75 e divergência MACD.
-   - Se a tendência for de BAIXA (EMA9 < EMA21 < EMA50) and ADX >= 20: DÊ PRIORIDADE TOTAL PARA PUT! Opere pullbacks nas médias, topos fractais ou rompimento de fundos fractais. NÃO compre CALL contra tendência de baixa a menos que haja rejeição extrema em fundo macro com RSI < 25 e divergência MACD.
-2. O 'OLHO DE DEUS' É APENAS UM PROMPT EXTRA: NÃO trave o robô esperando por ele. Se houver Fractal + Price Action ou Rompimento + MACD, emita CALL ou PUT com confluência >= 75%!
-3. VELAS DE INDECISÃO / DOJI: Se o corpo da vela for insignificante (baixo volume), retorne AGUARDAR.
+POSTURA OPERACIONAL ASSERTIVA:
+1. O mercado OTC é movido por fluxo contínuo. NÃO fique paralisado em AGUARDAR:
+   - Se a tendência for de ALTA (EMA9 > EMA21) e o MACD estiver favorável: EMITA CALL com confluência de 80% a 95%!
+   - Se a tendência for de BAIXA (EMA9 < EMA21) e o MACD estiver favorável: EMITA PUT com confluência de 80% a 95%!
+   - Opere pullbacks nas médias, rejeição em suportes/resistências e rompimentos de fluxo.
+2. Só retorne AGUARDAR em casos extremos: quando a vela for um Doji absoluto milimétrico sem volume, ou mercado completamente sem tendência com médias travadas.
+3. Se houver tendência definida e candle direcional, DECIDA entre CALL ou PUT com confluência >= 78%!
 
 GATILHOS INSTITUCIONAIS DE ALTA ASSERTIVIDADE:
-1. FRACTAIS DE WILLIAMS (5 VELAS) - NÍVEIS DINÂMICOS DE EXAUSTÃO E SUPORTE:
-   - Rejeição em Fundo Fractal: O preço testou o suporte do Fundo Fractal anterior e retraiu deixando longo pavio inferior -> CALL (80% a 92%).
-   - Rejeição em Topo Fractal: O preço testou a resistência do Topo Fractal anterior e retraiu deixando longo pavio superior -> PUT (80% a 92%).
-   - PROIBIDO COMPRAR TOPO: NUNCA dê CALL quando o preço estiver tocando ou acima da Banda de Bollinger Superior, em resistência macro ou com RSI >= 68 (risco alto de correção/loss).
-   - PROIBIDO VENDER FUNDO: NUNCA dê PUT quando o preço estiver tocando ou abaixo da Banda de Bollinger Inferior, em suporte macro ou com RSI <= 32 (risco alto de repique/loss).
-
-2. SMART MONEY CONCEPTS (SMC) & PRICE ACTION INSTITUCIONAL:
-   - Bullish Order Block (OB): Absorção compradora em zona de demanda -> CALL (80% a 90%).
-   - Bearish Order Block (OB): Absorção vendedora em zona de oferta -> PUT (80% a 90%).
-   - Martelo / Pin Bar de Alta em suporte ou fundo fractal -> CALL (80% a 92%).
-   - Estrela Cadente / Pin Bar de Baixa em resistência ou topo fractal -> PUT (80% a 92%).
-   - Rompimento Marubozu com Volume > SMA 5 na direção da tendência -> Seguir o fluxo (CALL verde / PUT vermelha) (80% a 88%).
-
-3. CONFLUÊNCIA COM BANDAS DE BOLLINGER, RSI E MACD:
-   - Compra (CALL): Preço tocando Banda Inferior de Bollinger com retração + RSI sobrevendido (< 38) + MACD favorável.
-   - Venda (PUT): Preço tocando Banda Superior de Bollinger com retração + RSI sobrecomprado (> 62) + MACD favorável.
-
-4. OLHO DE DEUS A+ (ENGULFING):
-   - Quando ocorrer Engolfo Puro A+ alinhado à tendência e MACD, atribua confluência máxima A+ (90% a 98%).
-
-5. FILTRO DE MOMENTUM MACD (12, 26, 9):
-   - CALL: Linha MACD > Sinal E/OU Histograma crescendo.
-   - PUT: Linha MACD < Sinal E/OU Histograma decrescendo.
-
-6. ESCALA DE CONFLUÊNCIA E ANÁLISE EM TEMPO REAL:
-   - 88% a 98%: Olho de Deus A+, Rejeição em Fractal/Order Block ou Rompimento com MACD forte e alinhamento de médias.
-   - 78% a 87%: Gatilho técnico de Price Action, Pin Bar, Martelo, Marubozu ou Bollinger com MACD favorável.
+1. FRACTAIS DE WILLIAMS (5 VELAS) & ORDER BLOCKS (SMC):
+   - Fundo Fractal / Bullish Order Block em teste com retração -> CALL (82% a 94%).
+   - Topo Fractal / Bearish Order Block em teste com retração -> PUT (82% a 94%).
+   - Padrões de Reversão / Força (Martelo, Pin Bar, Engolfo, Marubozu na tendência) -> 82% a 95%.
+2. CONFLUÊNCIA COM RSI E MACD:
+   - Compra (CALL): Tendência de alta + MACD positivo ou RSI sobrevendido com repique.
+   - Venda (PUT): Tendência de baixa + MACD negativo ou RSI sobrecomprado com rejeição.
+3. ESCALA DE CONFLUÊNCIA:
+   - 88% a 98%: Fluxo institucional forte, Order Block, Engolfo A+ ou rompimento com MACD forte.
+   - 78% a 87%: Gatilho técnico de Price Action na direção da tendência com indicadores alinhados.
    - Abaixo de 75%: Apenas se o mercado for doji sem qualquer movimento direcional.
-   - IMPORTANTE: No campo 'texto_observacao', gere sempre uma análise detalhada em tempo real:
-     Formato: "[Gemini AI HH:MM:SS] X% -- DECISÃO: Análise técnica viva detalhando o padrão de vela, nível de suporte/resistência fractal, RSI e momentum do MACD."
+4. FORMATO DO CAMPO 'texto_observacao':
+   - "[Gemini AI HH:MM:SS] X% -- DECISÃO: Detalhe o padrão, médias, RSI e momentum do MACD."
 
 Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
 {
   "decisao": "CALL" | "PUT" | "AGUARDAR",
   "confluencia_porcentagem": number (0 a 100),
-  "padrao_vela": "string com o padrão (ex: 'Rejeição em Fundo Fractal', 'Bullish Order Block SMC', 'Pin Bar de Alta', 'Olho de Deus A+')",
+  "padrao_vela": "string com o padrão (ex: 'Fluxo Institucional de Alta', 'Rejeição em Fundo Fractal', 'Bullish Order Block SMC', 'Olho de Deus A+')",
   "suporte_resistencia": "string com os níveis de Fractal e suporte/resistência",
-  "psicologia_mercado": "string detalhada explicando o fluxo e por que o trade tem alta probabilidade",
-  "texto_observacao": "string no formato [Gemini AI HH:MM:SS] X% -- Explicação técnica completa destacando os Fractais e indicadores..."
+  "psicologia_mercado": "string detalhada explicando o fluxo institucional",
+  "texto_observacao": "string no formato [Gemini AI HH:MM:SS] X% -- Explicação técnica viva destacando o fluxo..."
 }"""
 
 def carregar_ativos():
@@ -1073,8 +1057,11 @@ async def consultar_gemini(ativo: str, dados: Dict[str, Any]) -> Optional[Dict[s
 - Para PUT: A vela deve esticar para cima para vender no topo.
 - Para CALL: A vela deve retrair para baixo para comprar no fundo.
 
-Decida se a melhor oportunidade é CALL, PUT ou AGUARDAR avaliando TODOS OS GATILHOS INSTITUCIONAIS (Smart Money Concepts / Order Blocks, Price Action / Pin Bar / Reversões / Rompimento Marubozu, Bandas de Bollinger com RSI, Olho de Deus A+ e o filtro de momentum do MACD).
-IMPORTANTE: O 'Olho de Deus' é apenas mais um prompt de força extra (A+), NÃO espere por ele! Se qualquer outro padrão institucional de Price Action, Order Block ou Bollinger/RSI estiver presente com MACD favorável, emita CALL ou PUT com confluência >= 75%!
+ORDEM DE DECISÃO ASSERTIVA:
+- Analise o fluxo e tome uma decisão direcional (CALL ou PUT) a favor da tendência com confluência >= 78%!
+- Se a tendência for de ALTA e o MACD estiver positivo: emita CALL (80% a 95%).
+- Se a tendência for de BAIXA e o MACD estiver negativo: emita PUT (80% a 95%).
+- NÃO retorne AGUARDAR a menos que seja um doji milimétrico sem volume. Seja assertivo a favor do fluxo institucional!
 Responda ESTRITAMENTE em formato JSON com o schema exigido.
 """
     if state.gemini_key.startswith("sk-"):
@@ -1652,6 +1639,23 @@ def analisar_quant_smc(ativo: str, dados: Dict[str, Any]) -> Dict[str, Any]:
     score_call = 0
     motivos = []
 
+    # 0. Alinhamento de Tendência Institucional (Fluxo OTC)
+    if "ALTA" in tendencia:
+        score_call += 25
+        motivos.append("Tendência estrutural de ALTA (EMA9 > EMA21)")
+    elif "BAIXA" in tendencia:
+        score_put += 25
+        motivos.append("Tendência estrutural de BAIXA (EMA9 < EMA21)")
+
+    # Filtro de Momentum MACD
+    macd_hist = float(dados.get("macd_hist") or 0.0)
+    if dados.get("macd_expanding_bull") or macd_hist > 0:
+        score_call += 15
+        motivos.append("MACD favorável à Alta")
+    elif dados.get("macd_expanding_bear") or macd_hist < 0:
+        score_put += 15
+        motivos.append("MACD favorável à Baixa")
+
     # 1. RSI Sobrecompra / Sobrevenda
     if rsi >= 65:
         score_put += 35
@@ -1659,11 +1663,11 @@ def analisar_quant_smc(ativo: str, dados: Dict[str, Any]) -> Dict[str, Any]:
     elif rsi <= 35:
         score_call += 35
         motivos.append(f"RSI {rsi} em exaustão de fundo")
-    elif rsi >= 53 and "ALTA" in tendencia:
-        score_call += 25
+    elif rsi >= 52 and "ALTA" in tendencia:
+        score_call += 20
         motivos.append(f"RSI {rsi} em fluxo de alta")
-    elif rsi <= 47 and "BAIXA" in tendencia:
-        score_put += 25
+    elif rsi <= 48 and "BAIXA" in tendencia:
+        score_put += 20
         motivos.append(f"RSI {rsi} em fluxo de baixa")
 
     # 2. SMC Order Block
