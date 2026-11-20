@@ -1135,10 +1135,7 @@ Responda ESTRITAMENTE em formato JSON com o schema exigido.
                                     try:
                                         parsed = json.loads(candidate[start_idx:end_idx + 1])
                                         if isinstance(parsed, dict) and parsed.get("decisao") in ["CALL", "PUT", "AGUARDAR"]:
-                                            if parsed.get("decisao") == "AGUARDAR" and dec_quant in ["CALL", "PUT"] and conf_quant >= 85:
-                                                parsed["decisao"] = dec_quant
-                                                parsed["confluencia_porcentagem"] = conf_quant
-                                                parsed["texto_observacao"] = f"[Gemini AI {agora_str}] {conf_quant}% -- {dec_quant}: {parsed.get('texto_observacao') or motivo_quant}"
+                                            # Respeita estritamente a decisão da IA (sem override falso quando a IA decide AGUARDAR)
                                             cur_lbl = API_KEY_POOL[getattr(state, 'current_key_idx', 0)]['label']
                                             state.gemini_status = f"Ativo e pensando ({cur_lbl})"
                                             print(f"[GEMINI OK] {cur_lbl} respondeu para {ativo}: {parsed.get('decisao')} ({parsed.get('confluencia_porcentagem')}%)", flush=True)
@@ -1147,19 +1144,10 @@ Responda ESTRITAMENTE em formato JSON com o schema exigido.
                                         continue
                         await asyncio.sleep(1.0)
                     cur_lbl = API_KEY_POOL[getattr(state, 'current_key_idx', 0)]['label']
-                    if dec_quant in ["CALL", "PUT"] and conf_quant >= 85:
-                        q_quant["texto_observacao"] = f"[Gemini AI {agora_str}] {conf_quant}% -- {dec_quant}: {motivo_quant} | {padrao_quant}"
-                        state.gemini_status = f"Ativo e pensando ({cur_lbl})"
-                        print(f"[GEMINI QUANT] Gemini AI análise tempo real para {ativo}: {dec_quant} ({conf_quant}%)", flush=True)
-                        return q_quant
                     state.gemini_status = f"Ativo e pensando ({cur_lbl})"
                     return None
                 except Exception as ex:
                     cur_lbl = API_KEY_POOL[getattr(state, 'current_key_idx', 0)]['label']
-                    if dec_quant in ["CALL", "PUT"] and conf_quant >= 85:
-                        q_quant["texto_observacao"] = f"[Gemini AI {agora_str}] {conf_quant}% -- {dec_quant}: {motivo_quant} | {padrao_quant}"
-                        state.gemini_status = f"Ativo e pensando ({cur_lbl})"
-                        return q_quant
                     state.gemini_status = f"Ativo e pensando ({cur_lbl})"
                     return None
             break
