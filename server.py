@@ -1801,6 +1801,8 @@ async def varrer_60_candles_ativos():
         state.candle_clock = f"00:{60 - segundo_vela:02d}"
 
         print(f"\n[ANÁLISE FOCADA NO ATIVO - {agora_str} (Vela {segundo_vela}s/60s)] {ativo} | Restantes no ciclo: {len(ativos_livres)}/{len(pool_otc)}", flush=True)
+        state.active_asset = ativo
+        state.current_observation = f"[Gemini AI {agora_str}] Analisando {ativo} em tempo real (Vela {segundo_vela}s/60s)..."
 
         candles = []
         if state.api and state.is_connected:
@@ -1980,16 +1982,28 @@ async def loop_trader_background():
             seg_v = agora_s % 60
             state.candle_clock = f"00:{60 - seg_v:02d}"
             agora_hms = datetime.now().strftime("%H:%M:%S")
-            if state.current_observation and "[Gemini AI " in state.current_observation:
-                state.current_observation = re.sub(
-                    r"\[Gemini AI \d{2}:\d{2}:\d{2}\]",
-                    f"[Gemini AI {agora_hms}]",
-                    state.current_observation,
-                )
             if state.last_candle_data:
                 state.last_candle_data["segundo_da_vela"] = seg_v
                 state.last_candle_data["tempo_restante_vela"] = 60 - seg_v
                 state.last_candle_data["relogio_horario"] = agora_hms
+
+            # Transição imediata: se não está em trade e a observação tem mensagem de pós-operação (WIN/LOSS/SUSPENSO),
+            # vai direto para a análise técnica viva do ativo atual sem ficar parado na mensagem antiga
+            if state.ai_enabled and not state.is_trading:
+                obs = state.current_observation or ""
+                if any(tag in obs for tag in ["[VITÓRIA", "[RESULTADO", "[ATIVO SUSPENSO", "[EMPATE", "[AVISO BULLEX"]):
+                    d = state.last_candle_data or {}
+                    rsi_val = d.get("rsi14", 50)
+                    tend = d.get("tendencia_emas", "LATERAL")
+                    padrao = d.get("padrao_detectado", "Fluxo Institucional")
+                    ativo_show = state.active_asset or "EURUSD-OTC"
+                    state.current_observation = f"[Gemini AI {agora_hms}] Analisando {ativo_show} em tempo real (Vela {seg_v}s/60s) | {padrao} | RSI {rsi_val} | Tendência: {tend}"
+                elif "[Gemini AI " in obs:
+                    state.current_observation = re.sub(
+                        r"\[Gemini AI \d{2}:\d{2}:\d{2}\]",
+                        f"[Gemini AI {agora_hms}]",
+                        obs,
+                    )
             if not state.ai_enabled or state.is_paused or state.is_trading or state.is_scanning:
                 continue
 
