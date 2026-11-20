@@ -1353,31 +1353,6 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         now_ts = time.time()
         seg_vela = int(now_ts) % 60
         if seg_vela >= 27:
-            # Proteção de taxa na entrada inicial: não vender no fundo nem comprar no topo da vela
-            if not is_immediate_gale and state.api and state.is_connected:
-                try:
-                    c_chk = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(now_ts))
-                    if c_chk and len(c_chk) > 0:
-                        if not preco_abertura:
-                            preco_abertura = float(c_chk[-1].get("open") or c_chk[-1].get("close") or 0.0)
-                        preco_atual = float(c_chk[-1].get("close") or 0.0)
-                except Exception:
-                    pass
-            if not is_immediate_gale and preco_abertura and preco_atual:
-                if direcao == "PUT" and preco_atual < preco_abertura:
-                    print(f" -> [ENTRADA ABORTADA] {ativo} PUT cancelado aos {seg_vela}s: preço ({preco_atual}) abaixo da abertura ({preco_abertura}) — evitando vender fundo.", flush=True)
-                    state.is_trading = False
-                    state.active_signal = None
-                    state.current_observation = f"[PROTEÇÃO] PUT em {ativo} abortado para não vender no fundo da vela."
-                    asyncio.create_task(varrer_60_candles_ativos())
-                    return
-                if direcao == "CALL" and preco_atual > preco_abertura:
-                    print(f" -> [ENTRADA ABORTADA] {ativo} CALL cancelado aos {seg_vela}s: preço ({preco_atual}) acima da abertura ({preco_abertura}) — evitando comprar topo.", flush=True)
-                    state.is_trading = False
-                    state.active_signal = None
-                    state.current_observation = f"[PROTEÇÃO] CALL em {ativo} abortado para não comprar no topo da vela."
-                    asyncio.create_task(varrer_60_candles_ativos())
-                    return
             print(f" -> [JANELA 27s ATINGIDA] Executando {direcao} em {ativo} aos {seg_vela}s (perto do fechamento de compra 30s).", flush=True)
             break
 
@@ -1764,11 +1739,34 @@ async def varrer_60_candles_ativos():
                 ativos_livres = list(pool_otc)
             print(f"\n[CICLO COMPLETO] Reiniciando ciclo com {len(ativos_livres)} ativos OTC disponíveis!", flush=True)
 
-        # Prioriza o ativo ativo se estiver livre, seguido pelos demais da lista OTC
-        ativos_para_varrer = ([state.active_asset] if state.active_asset in ativos_livres else []) + [a for a in ativos_livres if a != state.active_asset]
+        # 1. Ranquear ativos livres por oportunidade técnica real (Order Blocks, Pin Bars, Rompimentos, RSI)
+        candidatos_com_setup = []
+        for a in ativos_livres:
+            c_cached = state.candles_cache.get(a, [])
+            if len(c_cached) >= 20:
+                ind = calcular_indicadores_60(c_cached)
+                if ind:
+                    q = analisar_quant_smc(a, ind)
+                    dec_q = q.get("decisao")
+                    conf_q = q.get("confluencia_porcentagem", 0)
+                    if dec_q in ["CALL", "PUT"] and conf_q >= 80:
+                        candidatos_com_setup.append((a, dec_q, conf_q))
 
-        # Fica no ativo atual até encontrar uma entrada válida baseada no histórico de 60 velas
-        ativo = ativos_para_varrer[0]
+        # Ordena por maior confluência técnica
+        candidatos_com_setup.sort(key=lambda x: x[2], reverse=True)
+
+        if candidatos_com_setup:
+            cands_nomes = [x[0] for x in candidatos_com_setup]
+            if state.active_asset in cands_nomes:
+                ativo = state.active_asset
+            else:
+                ativo = cands_nomes[0]
+        else:
+            if state.active_asset in ativos_livres:
+                ativo = state.active_asset
+            else:
+                ativo = ativos_livres[0]
+
         limite_confluencia = 70 if state.current_gale_step > 0 else 75
 
         agora_ts = int(time.time())
@@ -1777,7 +1775,7 @@ async def varrer_60_candles_ativos():
         minuto_inicio_analise = agora_ts // 60
         state.candle_clock = f"00:{60 - segundo_vela:02d}"
 
-        print(f"\n[ANÁLISE FOCADA NO ATIVO - {agora_str} (Vela {segundo_vela}s/60s)] {ativo} | Restantes no ciclo: {len(ativos_para_varrer)}/{len(pool_otc)}", flush=True)
+        print(f"\n[ANÁLISE FOCADA NO ATIVO - {agora_str} (Vela {segundo_vela}s/60s)] {ativo} | Restantes no ciclo: {len(ativos_livres)}/{len(pool_otc)}", flush=True)
 
         candles = []
         if state.api and state.is_connected:
@@ -1889,9 +1887,20 @@ async def varrer_60_candles_ativos():
                 decisao, valor, motivo, ativo, conf
             ))
         else:
-            # Permanece no mesmo ativo e aguarda atualização da vela antes de reavaliar
-            print(f" -> [PERMANECENDO EM {ativo}] {decisao} ({conf}% < {limite_confluencia}%). Aguardando melhor formação sem pular de ativo.", flush=True)
-            await asyncio.sleep(6)
+            # Não houve confluência suficiente neste ativo: rotaciona para o próximo ativo com oportunidade
+            proximo_ativo = None
+            if candidatos_com_setup:
+                outros = [x[0] for x in candidatos_com_setup if x[0] != ativo]
+                if outros:
+                    proximo_ativo = outros[0]
+            if not proximo_ativo:
+                idx_atual = ativos_livres.index(ativo) if ativo in ativos_livres else -1
+                proximo_idx = (idx_atual + 1) % len(ativos_livres)
+                proximo_ativo = ativos_livres[proximo_idx]
+
+            state.active_asset = proximo_ativo
+            print(f" -> [ROTAÇÃO OTC] {ativo} em {decisao} ({conf}% < {limite_confluencia}%). Rotacionando para próximo ativo: {proximo_ativo}...", flush=True)
+            await asyncio.sleep(1.5)
     finally:
         state.is_scanning = False
 
@@ -2321,9 +2330,12 @@ async def api_reset_score():
     state.history_trades = []
     state.current_observation = "Métricas e histórico limpos. Robô pronto para novas oportunidades institucionais."
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(RESULTS_DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM trade_results")
+        if state.email:
+            cursor.execute("DELETE FROM trade_results WHERE email = ?", (state.email,))
+        else:
+            cursor.execute("DELETE FROM trade_results")
         conn.commit()
         cursor.execute("VACUUM")
         conn.close()
