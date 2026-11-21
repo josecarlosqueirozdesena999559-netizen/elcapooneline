@@ -3,24 +3,23 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BullEx Trader — Painel Autônomo</title>
+  <title>BullEx Trader — Painel Autônomo Institucional</title>
   <style>
     :root {
       --bg-darkest: #0b0e14;
       --bg-header: #131722;
       --bg-tab-active: #171d2b;
-      --bg-tab-hover: #1c2333;
       --bg-card: #111622;
       --bg-card-sub: #171d2b;
       --border-subtle: #1e2638;
       --border-hover: #2a344d;
       --bullex-green: #00c26f;
-      --bullex-green-bg: rgba(0, 194, 111, 0.12);
+      --bullex-green-bg: rgba(0, 194, 111, 0.10);
       --bullex-red: #ff3b69;
-      --bullex-red-bg: rgba(255, 59, 105, 0.12);
+      --bullex-red-bg: rgba(255, 59, 105, 0.10);
       --bullex-orange: #f97316;
       --bullex-purple: #8b5cf6;
-      --bullex-yellow: #f59e0b;
+      --bullex-blue: #3b82f6;
       --text-main: #f1f5f9;
       --text-muted: #94a3b8;
       --text-dim: #64748b;
@@ -51,11 +50,12 @@
     .txt-green { color: var(--bullex-green) !important; }
     .txt-red { color: var(--bullex-red) !important; }
     .txt-orange { color: var(--bullex-orange) !important; }
+    .txt-blue { color: var(--bullex-blue) !important; }
     .txt-muted { color: var(--text-muted) !important; }
     .txt-dim { color: var(--text-dim) !important; }
 
     /* =========================================================================
-       TOPBAR ESTILO BULLEX (IDÊNTICO AO PRINT)
+       TOPBAR ESTILO BULLEX (COM ABA ÚNICA AUTOMÁTICA E BOTÃO LIGAR IA)
        ========================================================================= */
     .bullex-topbar {
       height: 52px;
@@ -64,7 +64,7 @@
       display: flex;
       align-items: center;
       padding: 0 14px;
-      gap: 8px;
+      gap: 10px;
       user-select: none;
       position: sticky;
       top: 0;
@@ -102,18 +102,13 @@
       cursor: pointer;
       color: #94a3b8;
       flex-shrink: 0;
-      transition: background 0.15s, color 0.15s;
-    }
-    .bx-grid-btn:hover {
-      background: #20283b;
-      color: #fff;
     }
     .bx-grid-btn svg {
       width: 14px;
       height: 14px;
     }
 
-    /* Aba Única do Ativo Analisado (Print Fiel) */
+    /* Aba Única do Ativo Analisado (Muda Automaticamente Conforme a IA Analisa) */
     .bx-asset-tab {
       height: 40px;
       background: var(--bg-tab-active);
@@ -122,15 +117,12 @@
       border-radius: 6px 6px 2px 2px;
       display: inline-flex;
       align-items: center;
-      gap: 9px;
-      padding: 0 10px 0 8px;
-      cursor: pointer;
+      gap: 10px;
+      padding: 0 14px 0 10px;
+      cursor: default;
       position: relative;
       flex-shrink: 0;
       box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-    }
-    .bx-asset-tab:hover {
-      background: var(--bg-tab-hover);
     }
 
     /* Ícone dos Ativos com Bandeiras Reais e Badge OTC */
@@ -152,16 +144,8 @@
       border: 1.5px solid #111622;
       box-shadow: 0 1px 3px rgba(0,0,0,0.5);
     }
-    .bx-flag-1 {
-      top: 1px;
-      left: 0;
-      z-index: 2;
-    }
-    .bx-flag-2 {
-      bottom: 1px;
-      right: 0;
-      z-index: 1;
-    }
+    .bx-flag-1 { top: 1px; left: 0; z-index: 2; }
+    .bx-flag-2 { bottom: 1px; right: 0; z-index: 1; }
     .bx-single-logo {
       width: 24px;
       height: 24px;
@@ -207,49 +191,159 @@
       line-height: 1;
       white-space: nowrap;
     }
-    .bx-tab-close {
-      width: 14px;
-      height: 14px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: #64748b;
-      font-size: 11px;
-      margin-left: 2px;
-      border-radius: 3px;
-      transition: color 0.15s, background 0.15s;
-    }
-    .bx-tab-close:hover {
-      color: #fff;
-      background: rgba(255,255,255,0.1);
-    }
-
-    /* Botão Mais '+' */
-    .bx-plus-btn {
-      width: 28px;
-      height: 28px;
-      border-radius: 5px;
-      background: #171d2b;
-      border: 1px solid var(--border-subtle);
-      color: #94a3b8;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 15px;
-      cursor: pointer;
-      transition: background 0.15s, color 0.15s;
-    }
-    .bx-plus-btn:hover {
-      background: #20283b;
-      color: #fff;
-    }
 
     /* Lado Direito do Topbar */
     .bx-topbar-right {
       margin-left: auto;
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
+    }
+
+    /* BOTÃO LIGAR/DESLIGAR IA NA BARRA SUPERIOR */
+    .bx-header-ai-btn {
+      height: 34px;
+      padding: 0 14px;
+      border-radius: 6px;
+      border: 1px solid var(--bullex-green);
+      background: var(--bullex-green);
+      color: #0b0e14;
+      font-size: 12px !important;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+    .bx-header-ai-btn.is-active {
+      background: rgba(255, 59, 105, 0.15);
+      border-color: var(--bullex-red);
+      color: var(--bullex-red);
+    }
+    .bx-header-ai-btn:hover {
+      opacity: 0.9;
+    }
+
+    /* Mão de Entrada no Header */
+    .bx-header-stake {
+      display: flex;
+      align-items: center;
+      height: 34px;
+      background: #171d2b;
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 0 8px;
+      gap: 4px;
+    }
+    .bx-header-stake span {
+      font-size: 11px !important;
+      color: var(--text-dim);
+    }
+    .bx-header-stake input {
+      width: 48px;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: #fff;
+      font-size: 12px !important;
+      text-align: right;
+    }
+
+    /* PLACAR DE WIN E LOSS (NO LUGAR DE "DEPOSITAR") */
+    .bx-scoreboard-pill {
+      height: 34px;
+      border: 1px solid var(--bullex-green);
+      background: rgba(0, 194, 111, 0.08);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      gap: 9px;
+      cursor: default;
+    }
+    .sc-item-win {
+      color: var(--bullex-green);
+      font-size: 12px !important;
+    }
+    .sc-divider {
+      color: #334155;
+      font-size: 11px;
+    }
+    .sc-item-loss {
+      color: var(--bullex-red);
+      font-size: 12px !important;
+    }
+    .sc-item-rate {
+      background: rgba(255, 255, 255, 0.06);
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 11px !important;
+      color: #cbd5e1;
+    }
+    .sc-item-profit {
+      font-size: 12px !important;
+      color: var(--bullex-green);
+    }
+
+    /* Saldo com Seta Dropdown */
+    .bx-balance-box {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border-radius: 5px;
+      cursor: pointer;
+      position: relative;
+    }
+    .bx-balance-box:hover {
+      background: #171d2b;
+    }
+    .bx-balance-amount {
+      font-size: 13px !important;
+      color: #a855f7;
+    }
+    .bx-balance-amount.is-real {
+      color: var(--bullex-green);
+    }
+    .bx-balance-caret {
+      font-size: 9px;
+      color: #94a3b8;
+    }
+
+    /* Menu Dropdown de Seleção de Conta (DEMO / REAL) */
+    .bx-account-menu {
+      position: absolute;
+      top: 48px;
+      right: 50px;
+      width: 220px;
+      background: #141a29;
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+      padding: 8px;
+      display: none;
+      flex-direction: column;
+      gap: 6px;
+      z-index: 200;
+    }
+    .bx-account-menu.show {
+      display: flex;
+    }
+    .bx-acc-option {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 10px;
+      border-radius: 6px;
+      background: #192133;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    .bx-acc-option.active {
+      border-color: var(--bullex-green);
+    }
+    .bx-acc-option:hover {
+      background: #202a42;
     }
 
     /* Avatar do Usuário com Badge Verificado */
@@ -288,418 +382,186 @@
       color: #fff;
     }
 
-    /* Saldo com Seta Dropdown */
-    .bx-balance-box {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 8px;
-      border-radius: 5px;
-      cursor: pointer;
-      transition: background 0.15s;
-      position: relative;
-    }
-    .bx-balance-box:hover {
-      background: #171d2b;
-    }
-    .bx-balance-amount {
-      font-size: 14px !important;
-      color: #a855f7;
-      letter-spacing: -0.2px;
-    }
-    .bx-balance-amount.is-real {
-      color: var(--bullex-green);
-    }
-    .bx-balance-caret {
-      font-size: 9px;
-      color: #94a3b8;
-      transition: transform 0.2s;
-    }
-
-    /* Menu Dropdown de Saldo / Conta */
-    .bx-account-menu {
-      position: absolute;
-      top: 48px;
-      right: 170px;
-      width: 230px;
-      background: #141a29;
-      border: 1px solid var(--border-subtle);
-      border-radius: 8px;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-      padding: 8px;
-      display: none;
-      flex-direction: column;
-      gap: 6px;
-      z-index: 200;
-    }
-    .bx-account-menu.show {
-      display: flex;
-    }
-    .bx-acc-option {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 8px 10px;
-      border-radius: 6px;
-      background: #192133;
-      cursor: pointer;
-      border: 1px solid transparent;
-      transition: border 0.15s;
-    }
-    .bx-acc-option.active {
-      border-color: var(--bullex-green);
-    }
-    .bx-acc-option:hover {
-      background: #202a42;
-    }
-
-    /* PLACAR DE WIN E LOSS (NO LUGAR DE "DEPOSITAR") */
-    .bx-scoreboard-pill {
-      height: 34px;
-      border: 1px solid var(--bullex-green);
-      background: rgba(0, 194, 111, 0.08);
-      border-radius: 6px;
-      display: flex;
-      align-items: center;
-      padding: 0 12px;
-      gap: 10px;
-      cursor: default;
-      transition: background 0.15s, border-color 0.15s;
-    }
-    .bx-scoreboard-pill:hover {
-      background: rgba(0, 194, 111, 0.14);
-    }
-    .sc-item-win {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      color: var(--bullex-green);
-      font-size: 13px !important;
-    }
-    .sc-divider {
-      color: #334155;
-      font-size: 12px;
-    }
-    .sc-item-loss {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      color: var(--bullex-red);
-      font-size: 13px !important;
-    }
-    .sc-item-rate {
-      background: rgba(255, 255, 255, 0.06);
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-size: 11px !important;
-      color: #cbd5e1;
-    }
-    .sc-item-profit {
-      font-size: 12px !important;
-      color: var(--bullex-green);
-      margin-left: 2px;
-    }
-
     /* =========================================================================
-       CONTEÚDO PRINCIPAL: CÁLCULO DOS DADOS EM TEMPO REAL PARA ENTRADA
+       CONTEÚDO PRINCIPAL: MEDIDORES DOS PROMPTS E ANÁLISE SEGUNDO A SEGUNDO
        ========================================================================= */
     .bullex-main-content {
       flex: 1;
-      padding: 16px 18px 30px;
+      padding: 14px 18px 24px;
       max-width: 1440px;
       width: 100%;
       margin: 0 auto;
       display: flex;
       flex-direction: column;
-      gap: 16px;
+      gap: 14px;
     }
 
-    /* Card Superior de Status & Decisão da Entrada */
-    .entry-decision-card {
+    /* SEÇÃO 1: MEDIDORES DOS PROMPTS PARA CÁLCULO E CONFLUÊNCIA */
+    .prompt-meters-card {
       background: var(--bg-card);
       border: 1px solid var(--border-subtle);
       border-radius: 8px;
       padding: 16px 20px;
-      display: grid;
-      grid-template-columns: auto 1fr auto;
-      gap: 20px;
-      align-items: center;
-    }
-
-    .asset-hero-box {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding-right: 20px;
-      border-right: 1px solid var(--border-subtle);
-    }
-    .hero-icon-wrap {
-      width: 44px;
-      height: 44px;
-      position: relative;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-    }
-    .hero-flag {
-      width: 28px;
-      height: 28px;
-      border-radius: 50%;
-      object-fit: cover;
-      position: absolute;
-      border: 2px solid var(--bg-card);
-      box-shadow: 0 2px 5px rgba(0,0,0,0.4);
-    }
-    .hero-flag-1 { top: 0; left: 0; z-index: 2; }
-    .hero-flag-2 { bottom: 0; right: 0; z-index: 1; }
-    .hero-otc-badge {
-      position: absolute;
-      bottom: -2px;
-      right: -3px;
-      background: #f97316;
-      color: #fff;
-      font-size: 9px !important;
-      padding: 1px 4px;
-      border-radius: 3px;
-      z-index: 3;
-      border: 1.5px solid var(--bg-card);
-    }
-
-    .hero-text-details {
       display: flex;
       flex-direction: column;
-      gap: 2px;
-    }
-    .hero-asset-name {
-      font-size: 18px !important;
-      color: #fff;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .hero-payout-pill {
-      background: rgba(0, 194, 111, 0.15);
-      color: var(--bullex-green);
-      font-size: 11px !important;
-      padding: 2px 6px;
-      border-radius: 4px;
-      border: 1px solid rgba(0, 194, 111, 0.25);
-    }
-    .hero-price-live {
-      font-size: 14px !important;
-      color: #cbd5e1;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .price-tick {
-      transition: color 0.2s;
+      gap: 14px;
     }
 
-    /* Centro: Relógio do Candle e Decisão Calculada para Entrada */
-    .decision-center-box {
+    .prompt-meters-topbar {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 24px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .prompt-meters-title {
+      font-size: 13px !important;
+      color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .prompt-live-tag {
+      background: rgba(0, 194, 111, 0.12);
+      border: 1px solid rgba(0, 194, 111, 0.25);
+      color: var(--bullex-green);
+      font-size: 11px !important;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+
+    /* Grid dos 4 Medidores de Prompt + Disparador Central */
+    .prompt-grid-meters {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr) 220px;
+      gap: 14px;
+      align-items: stretch;
+    }
+    @media (max-width: 1200px) {
+      .prompt-grid-meters { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 768px) {
+      .prompt-grid-meters { grid-template-columns: 1fr; }
+    }
+
+    /* Caixa Individual de Critério do Prompt */
+    .meter-criterion-box {
       background: var(--bg-card-sub);
       border: 1px solid var(--border-subtle);
       border-radius: 6px;
-      padding: 12px 18px;
-    }
-
-    .candle-clock-group {
+      padding: 10px 12px;
       display: flex;
       flex-direction: column;
-      gap: 3px;
+      justify-content: space-between;
+      gap: 8px;
     }
-    .clock-title {
-      font-size: 11px !important;
-      color: var(--text-dim);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .clock-digits {
-      font-size: 22px !important;
-      color: #f8fafc;
-      letter-spacing: -0.5px;
+    .meter-crit-header {
       display: flex;
       align-items: center;
-      gap: 6px;
-    }
-    .clock-sub {
+      justify-content: space-between;
       font-size: 11px !important;
       color: var(--text-muted);
     }
+    .meter-crit-name {
+      color: #cbd5e1;
+      font-size: 12px !important;
+    }
+    .meter-crit-score {
+      font-size: 12px !important;
+    }
+    .meter-bar-track {
+      width: 100%;
+      height: 6px;
+      background: #1f2738;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .meter-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      background: var(--bullex-green);
+      transition: width 0.25s, background 0.25s;
+    }
+    .meter-crit-desc {
+      font-size: 10px !important;
+      color: var(--text-dim);
+      line-height: 1.2;
+    }
 
-    .signal-direction-group {
+    /* Caixa Central do Gatilho do Sinal */
+    .meter-trigger-box {
+      background: #141a29;
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 12px;
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 4px;
+      justify-content: center;
+      text-align: center;
+      gap: 6px;
     }
-    .signal-label {
-      font-size: 11px !important;
-      color: var(--text-dim);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .signal-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 16px;
+    .trigger-badge-status {
+      padding: 6px 14px;
       border-radius: 6px;
-      font-size: 14px !important;
+      font-size: 13px !important;
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border-subtle);
       color: #94a3b8;
+      width: 100%;
+      text-align: center;
       transition: all 0.2s;
     }
-    .signal-badge.call {
+    .trigger-badge-status.call {
       background: rgba(0, 194, 111, 0.16);
       border-color: var(--bullex-green);
       color: var(--bullex-green);
     }
-    .signal-badge.put {
+    .trigger-badge-status.put {
       background: rgba(255, 59, 105, 0.16);
       border-color: var(--bullex-red);
       color: var(--bullex-red);
     }
-    .signal-timing-hint {
+    .trigger-clock-text {
       font-size: 11px !important;
       color: #cbd5e1;
     }
 
-    .confluence-meter-group {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      min-width: 140px;
-    }
-    .confluence-header {
-      display: flex;
-      justify-content: space-between;
-      font-size: 11px !important;
-      color: var(--text-muted);
-    }
-    .confluence-bar-bg {
-      width: 100%;
-      height: 6px;
-      background: #252e42;
-      border-radius: 3px;
-      overflow: hidden;
-    }
-    .confluence-bar-fill {
-      height: 100%;
-      width: 0%;
-      background: var(--bullex-green);
-      border-radius: 3px;
-      transition: width 0.3s;
-    }
-
-    /* Direita: Botões Operacionais */
-    .controls-right-box {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      padding-left: 14px;
-      border-left: 1px solid var(--border-subtle);
-      min-width: 180px;
-    }
-    .bot-toggle-btn {
-      height: 36px;
-      border-radius: 6px;
-      border: 1px solid var(--bullex-green);
-      background: var(--bullex-green);
-      color: #0b0e14;
-      font-size: 13px !important;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      transition: opacity 0.15s, background 0.15s;
-    }
-    .bot-toggle-btn.is-active {
-      background: rgba(255, 59, 105, 0.15);
-      border-color: var(--bullex-red);
-      color: var(--bullex-red);
-    }
-    .bot-toggle-btn:hover {
-      opacity: 0.9;
-    }
-    .stake-input-box {
-      display: flex;
-      align-items: center;
-      background: var(--bg-card-sub);
-      border: 1px solid var(--border-subtle);
-      border-radius: 6px;
-      padding: 0 8px;
-      height: 32px;
-      justify-content: space-between;
-    }
-    .stake-label {
-      font-size: 11px !important;
-      color: var(--text-dim);
-    }
-    .stake-field {
-      width: 65px;
-      background: transparent;
-      border: none;
-      outline: none;
-      color: #fff;
-      font-size: 13px !important;
-      text-align: right;
-    }
-
-    /* GRID DOS DADOS CALCULADOS EM TEMPO REAL */
+    /* SEÇÃO 2: DADOS TÉCNICOS CALCULADOS DO ATIVO */
     .data-grid-layout {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      gap: 16px;
+      gap: 14px;
     }
     @media (max-width: 1100px) {
       .data-grid-layout { grid-template-columns: 1fr; }
-      .entry-decision-card { grid-template-columns: 1fr; }
     }
 
-    /* Card Padrão de Métricas */
     .metric-section-card {
       background: var(--bg-card);
       border: 1px solid var(--border-subtle);
       border-radius: 8px;
-      padding: 16px;
+      padding: 14px 16px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 10px;
     }
     .section-card-title {
-      font-size: 12px !important;
+      font-size: 11px !important;
       text-transform: uppercase;
       letter-spacing: 0.5px;
       color: var(--text-dim);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding-bottom: 8px;
+      padding-bottom: 6px;
       border-bottom: 1px solid var(--border-subtle);
     }
-    .section-badge-tag {
-      font-size: 10px !important;
-      background: rgba(255, 255, 255, 0.05);
-      color: var(--text-muted);
-      padding: 1px 6px;
-      border-radius: 3px;
-    }
-
-    /* Linhas de Dados com Dois Valores */
     .data-row-item {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 6px 0;
+      padding: 5px 0;
       border-bottom: 1px solid rgba(255, 255, 255, 0.03);
     }
     .data-row-item:last-child {
@@ -708,42 +570,14 @@
     .data-param-name {
       font-size: 12px !important;
       color: var(--text-muted);
-      display: flex;
-      align-items: center;
-      gap: 6px;
     }
     .data-param-value {
-      font-size: 13px !important;
+      font-size: 12px !important;
       color: #e2e8f0;
     }
 
-    /* Medidor Visual do RSI */
-    .rsi-meter-wrap {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      margin-top: 4px;
-    }
-    .rsi-scale-bar {
-      height: 4px;
-      background: linear-gradient(to right, #00c26f 0%, #334155 30%, #334155 70%, #ff3b69 100%);
-      border-radius: 2px;
-      position: relative;
-    }
-    .rsi-indicator-dot {
-      width: 8px;
-      height: 8px;
-      background: #fff;
-      border: 1px solid #000;
-      border-radius: 50%;
-      position: absolute;
-      top: -2px;
-      transform: translateX(-50%);
-      transition: left 0.3s;
-    }
-
-    /* Card Inferior: Leitura da IA & Log em Tempo Real */
-    .ai-observation-card {
+    /* SEÇÃO 3: ANÁLISE TÉCNICA EM BASE DE TEXTOS PROFISSIONAIS (SEM EMOJIS) */
+    .ai-terminal-card {
       background: var(--bg-card);
       border: 1px solid var(--border-subtle);
       border-radius: 8px;
@@ -752,7 +586,7 @@
       flex-direction: column;
       gap: 8px;
     }
-    .ai-obs-header {
+    .terminal-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -761,18 +595,19 @@
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
-    .ai-credits-badge {
+    .terminal-credits-pill {
       color: var(--bullex-green);
       font-size: 11px !important;
     }
-    .ai-obs-body {
-      font-size: 13px !important;
-      color: #cbd5e1;
-      line-height: 1.45;
-      background: #0e121a;
+    .terminal-text-box {
+      background: #090c12;
       border: 1px solid #1a2233;
       border-radius: 6px;
-      padding: 10px 14px;
+      padding: 12px 14px;
+      font-size: 12px !important;
+      line-height: 1.5;
+      color: #cbd5e1;
+      white-space: pre-wrap;
       font-family: var(--font-family) !important;
     }
 
@@ -824,17 +659,13 @@
       color: #0b0e14;
       font-size: 13px !important;
       cursor: pointer;
-      transition: opacity 0.15s;
-    }
-    .bx-submit-btn:hover {
-      opacity: 0.9;
     }
   </style>
 </head>
 <body>
 
   <!-- =========================================================================
-       TOPBAR ESTILO BULLEX (IDÊNTICO AO PRINT)
+       TOPBAR ESTILO BULLEX (COM ABA ÚNICA AUTOMÁTICA E BOTÃO LIGAR IA)
        ========================================================================= -->
   <header class="bullex-topbar">
     
@@ -857,7 +688,7 @@
       </svg>
     </div>
 
-    <!-- Aba Única do Ativo Analisado (Só abre o ativo analisado!) -->
+    <!-- Aba Única do Ativo Analisado (Muda Automaticamente Conforme a IA Analisa) -->
     <div class="bx-asset-tab" id="singleAssetTab">
       <div class="bx-asset-icon-box" id="tabIconBox">
         <img class="bx-flag-circle bx-flag-1" id="tabFlag1" src="https://flagcdn.com/w40/us.png" alt="">
@@ -868,28 +699,31 @@
 
       <div class="bx-tab-info">
         <span class="bx-tab-name" id="tabAssetName">USD/BRL OTC</span>
-        <span class="bx-tab-sub" id="tabAssetSub">Binária • 87%</span>
+        <span class="bx-tab-sub" id="tabAssetSub">Binária • Payout 87%</span>
       </div>
-
-      <div class="bx-tab-close">✕</div>
     </div>
-
-    <!-- Botão Mais '+' -->
-    <div class="bx-plus-btn" title="Ativo em análise automática">+</div>
 
     <!-- Lado Direito do Topbar -->
     <div class="bx-topbar-right">
       
-      <!-- Avatar com Verificado Verde -->
-      <div class="bx-user-avatar" id="avatarBtn" title="Conta Conectada" onclick="toggleAccountMenu()">
-        <svg viewBox="0 0 24 24" fill="currentColor">
-          <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
-        </svg>
-        <div class="bx-verified-dot">
-          <svg viewBox="0 0 10 10" fill="currentColor">
-            <path d="M3.8 7L1.5 4.7l.9-.9 1.4 1.4 3.8-3.8.9.9z"/>
-          </svg>
-        </div>
+      <!-- BOTÃO LIGAR/DESLIGAR IA NA BARRA SUPERIOR -->
+      <button class="bx-header-ai-btn" id="headerAiBtn" onclick="toggleAiEngine()">
+        <span id="headerAiBtnText">LIGAR IA</span>
+      </button>
+
+      <!-- Mão de Entrada Rápida -->
+      <div class="bx-header-stake">
+        <span>Mão: $</span>
+        <input type="number" id="headerStakeInput" value="5.0" step="1" min="1" onchange="saveConfigStake()">
+      </div>
+
+      <!-- PLACAR DE WIN E LOSS (NO LUGAR DE "DEPOSITAR") -->
+      <div class="bx-scoreboard-pill" title="Placar de Operações da Sessão">
+        <div class="sc-item-win">WIN <span id="scWins" class="med">0</span></div>
+        <div class="sc-divider">|</div>
+        <div class="sc-item-loss"><span id="scLosses" class="med">0</span> LOSS</div>
+        <div class="sc-item-rate" id="scRate">100%</div>
+        <div class="sc-item-profit" id="scProfit">+$0.00</div>
       </div>
 
       <!-- Saldo com Seta Dropdown -->
@@ -917,132 +751,134 @@
         </div>
       </div>
 
-      <!-- PLACAR DE WIN E LOSS (NO LUGAR EXATO DO BOTÃO "DEPOSITAR") -->
-      <div class="bx-scoreboard-pill" title="Placar de Operações da Sessão">
-        <div class="sc-item-win">WIN <span id="scWins" class="med">0</span></div>
-        <div class="sc-divider">|</div>
-        <div class="sc-item-loss"><span id="scLosses" class="med">0</span> LOSS</div>
-        <div class="sc-item-rate" id="scRate">100%</div>
-        <div class="sc-item-profit" id="scProfit">+$0.00</div>
+      <!-- Avatar com Verificado Verde -->
+      <div class="bx-user-avatar" id="avatarBtn" title="Conta Conectada" onclick="toggleAccountMenu()">
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
+        </svg>
+        <div class="bx-verified-dot">
+          <svg viewBox="0 0 10 10" fill="currentColor">
+            <path d="M3.8 7L1.5 4.7l.9-.9 1.4 1.4 3.8-3.8.9.9z"/>
+          </svg>
+        </div>
       </div>
 
     </div>
   </header>
 
   <!-- =========================================================================
-       CONTEÚDO PRINCIPAL: CÁLCULO DOS DADOS EM TEMPO REAL PARA ENTRADA
+       CONTEÚDO PRINCIPAL: MEDIDORES DOS PROMPTS E ANÁLISE SEGUNDO A SEGUNDO
        ========================================================================= -->
   <main class="bullex-main-content">
     
-    <!-- CARD SUPERIOR: STATUS DO ATIVO E DECISÃO DE ENTRADA -->
-    <section class="entry-decision-card">
-      
-      <!-- Detalhes do Ativo em Tempo Real -->
-      <div class="asset-hero-box">
-        <div class="hero-icon-wrap" id="heroIconWrap">
-          <img class="hero-flag hero-flag-1" id="heroFlag1" src="https://flagcdn.com/w40/us.png" alt="">
-          <img class="hero-flag hero-flag-2" id="heroFlag2" src="https://flagcdn.com/w40/br.png" alt="">
-          <div class="bx-single-logo" id="heroSingleLogo" style="display:none; width:34px; height:34px;"></div>
-          <span class="hero-otc-badge" id="heroOtcBadge">otc</span>
+    <!-- SEÇÃO 1: MEDIDORES DOS PROMPTS PARA CÁLCULO E CONFLUÊNCIA EM TEMPO REAL -->
+    <section class="prompt-meters-card">
+      <div class="prompt-meters-topbar">
+        <div class="prompt-meters-title">
+          <span>Medidores de Confluência do Prompt</span>
+          <span class="prompt-live-tag" id="activeAssetLabel">USDBRL-OTC</span>
         </div>
-        <div class="hero-text-details">
-          <div class="hero-asset-name">
-            <span id="heroAssetName">USD/BRL OTC</span>
-            <span class="hero-payout-pill" id="heroPayoutBadge">87%</span>
+        <div style="display:flex; align-items:center; gap:16px;">
+          <div style="font-size:12px; color:var(--text-muted);">
+            Preço: <span class="med" id="heroPriceVal" style="color:#fff;">5.42150</span>
           </div>
-          <div class="hero-price-live">
-            <span class="txt-muted" style="font-size: 12px;">Preço:</span>
-            <span class="price-tick med" id="heroPriceVal">5.42150</span>
+          <div style="font-size:12px; color:var(--text-muted);">
+            Relógio Vela M1: <span class="med txt-green" id="candleClockDigits">00:45</span>
           </div>
         </div>
       </div>
 
-      <!-- Centro: Relógio M1 e Decisão Calculada para Entrada -->
-      <div class="decision-center-box">
+      <!-- Grid dos 4 Medidores Técnicos + Gatilho Central -->
+      <div class="prompt-grid-meters">
         
-        <!-- Relógio da Vela M1 -->
-        <div class="candle-clock-group">
-          <span class="clock-title">Relógio Vela M1</span>
-          <div class="clock-digits">
-            <span id="candleClockDigits">00:45</span>
+        <!-- Medidor 1: Alinhamento de Tendência -->
+        <div class="meter-criterion-box">
+          <div class="meter-crit-header">
+            <span class="meter-crit-name">1. Tendência & Médias</span>
+            <span class="meter-crit-score med txt-green" id="scoreTrend">90%</span>
           </div>
-          <span class="clock-sub" id="candleClockSub">Vela 15s / 60s</span>
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" id="barTrend" style="width: 90%;"></div>
+          </div>
+          <div class="meter-crit-desc" id="descTrend">EMA9 > EMA21 > EMA50 acima da MA Trend 200.</div>
         </div>
 
-        <!-- Decisão Calculada para a Entrada -->
-        <div class="signal-direction-group">
-          <span class="signal-label">Decisão Técnica para Entrada</span>
-          <div class="signal-badge" id="entryDecisionBadge">
-            <span id="entryDecisionText">AGUARDANDO CONFLUÊNCIA</span>
+        <!-- Medidor 2: Momentum & Osciladores -->
+        <div class="meter-criterion-box">
+          <div class="meter-crit-header">
+            <span class="meter-crit-name">2. Momentum & RSI</span>
+            <span class="meter-crit-score med txt-green" id="scoreMomentum">85%</span>
           </div>
-          <span class="signal-timing-hint" id="entryTimingHint">Entrada programada no segundo 00s</span>
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" id="barMomentum" style="width: 85%;"></div>
+          </div>
+          <div class="meter-crit-desc" id="descMomentum">RSI 14 em zona favorável sem exaustão.</div>
         </div>
 
-        <!-- Barra de Confluência Técnica -->
-        <div class="confluence-meter-group">
-          <div class="confluence-header">
-            <span>Confluência</span>
-            <span class="med txt-green" id="confluenceVal">85%</span>
+        <!-- Medidor 3: Expansão MACD & Força -->
+        <div class="meter-criterion-box">
+          <div class="meter-crit-header">
+            <span class="meter-crit-name">3. Expansão MACD</span>
+            <span class="meter-crit-score med txt-green" id="scoreMacd">88%</span>
           </div>
-          <div class="confluence-bar-bg">
-            <div class="confluence-bar-fill" id="confluenceBar" style="width: 85%;"></div>
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" id="barMacd" style="width: 88%;"></div>
           </div>
-          <div style="font-size: 10px; color: var(--text-dim);" id="confluenceStatus">Filtro de Médias Confirmado</div>
+          <div class="meter-crit-desc" id="descMacd">Histograma em expansão e fluxo comprador.</div>
+        </div>
+
+        <!-- Medidor 4: Price Action & Fractais -->
+        <div class="meter-criterion-box">
+          <div class="meter-crit-header">
+            <span class="meter-crit-name">4. Fractais & Zonas</span>
+            <span class="meter-crit-score med txt-green" id="scoreFractal">82%</span>
+          </div>
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" id="barFractal" style="width: 82%;"></div>
+          </div>
+          <div class="meter-crit-desc" id="descFractal">Rejeição e confirmação em zonas fractais.</div>
+        </div>
+
+        <!-- Disparador Central do Sinal -->
+        <div class="meter-trigger-box">
+          <div style="font-size:10px; color:var(--text-dim); text-transform:uppercase;">Confluência Total</div>
+          <div class="med txt-green" style="font-size:18px;" id="totalConfluenceScore">86%</div>
+          <div class="trigger-badge-status" id="triggerBadge">AGUARDANDO</div>
+          <div class="trigger-clock-text" id="triggerTiming">Disparo no 00s</div>
         </div>
 
       </div>
-
-      <!-- Controles Operacionais -->
-      <div class="controls-right-box">
-        <button class="bot-toggle-btn" id="toggleAiBtn" onclick="toggleAiEngine()">
-          <span id="toggleAiBtnText">LIGAR IA</span>
-        </button>
-        <div class="stake-input-box">
-          <span class="stake-label">Mão ($):</span>
-          <input type="number" class="stake-field" id="stakeInput" value="5.0" step="1" min="1" onchange="saveConfigStake()">
-        </div>
-      </div>
-
     </section>
 
-    <!-- GRID DOS DADOS TÉCNICOS CALCULADOS EM TEMPO REAL -->
+    <!-- SEÇÃO 2: DADOS TÉCNICOS CALCULADOS DO ATIVO EM TEMPO REAL -->
     <div class="data-grid-layout">
       
       <!-- CARD 1: TENDÊNCIA ESTRUTURAL & MÉDIAS MÓVEIS -->
       <div class="metric-section-card">
         <div class="section-card-title">
-          <span>Tendência & Médias Móveis</span>
-          <span class="section-badge-tag" id="trendMacroTag">Tendência</span>
+          <span>Médias Móveis & Estrutura</span>
+          <span id="tagTrend">Tendência</span>
         </div>
 
         <div class="data-row-item">
-          <span class="data-param-name">Diagnóstico Estrutural</span>
-          <span class="data-param-value med" id="diagTrend">ALTA ESTRUTURAL</span>
+          <span class="data-param-name">Diagnóstico</span>
+          <span class="data-param-value med" id="valDiagTrend">ALTA ESTRUTURAL</span>
         </div>
-
         <div class="data-row-item">
-          <span class="data-param-name">MA Trend 200 (Macro)</span>
+          <span class="data-param-name">MA Trend 200</span>
           <span class="data-param-value" id="valMa200">5.41900</span>
         </div>
-
         <div class="data-row-item">
-          <span class="data-param-name">EMA 9 (Curto Prazo)</span>
+          <span class="data-param-name">EMA 9</span>
           <span class="data-param-value" id="valEma9">5.42110</span>
         </div>
-
         <div class="data-row-item">
-          <span class="data-param-name">EMA 21 (Médio Prazo)</span>
+          <span class="data-param-name">EMA 21</span>
           <span class="data-param-value" id="valEma21">5.42050</span>
         </div>
-
         <div class="data-row-item">
-          <span class="data-param-name">EMA 50 (Longo Prazo)</span>
+          <span class="data-param-name">EMA 50</span>
           <span class="data-param-value" id="valEma50">5.41980</span>
-        </div>
-
-        <div class="data-row-item">
-          <span class="data-param-name">Alinhamento das EMAs</span>
-          <span class="data-param-value txt-green med" id="valEmaAlign">EMA9 &gt; EMA21 &gt; EMA50</span>
         </div>
       </div>
 
@@ -1050,96 +886,69 @@
       <div class="metric-section-card">
         <div class="section-card-title">
           <span>Osciladores & Momentum</span>
-          <span class="section-badge-tag">Confluência</span>
+          <span>Filtros</span>
         </div>
 
         <div class="data-row-item">
-          <span class="data-param-name">RSI (14 Períodos)</span>
+          <span class="data-param-name">RSI 14</span>
           <span class="data-param-value med" id="valRsi14">54.2</span>
         </div>
-
-        <!-- Barra Visual do RSI -->
-        <div class="rsi-meter-wrap">
-          <div class="rsi-scale-bar">
-            <div class="rsi-indicator-dot" id="rsiDot" style="left: 54%;"></div>
-          </div>
-          <div style="display: flex; justify-content: space-between; font-size: 10px; color: var(--text-dim);">
-            <span>Sobrevenda (30)</span>
-            <span>Neutro (50)</span>
-            <span>Sobrecompra (70)</span>
-          </div>
+        <div class="data-row-item">
+          <span class="data-param-name">RSI 7 (Momento)</span>
+          <span class="data-param-value" id="valRsi7">58.0</span>
         </div>
-
-        <div class="data-row-item" style="margin-top: 6px;">
+        <div class="data-row-item">
           <span class="data-param-name">MACD (12, 26, 9)</span>
           <span class="data-param-value" id="valMacd">0.000150</span>
         </div>
-
         <div class="data-row-item">
-          <span class="data-param-name">Expansão do Histograma MACD</span>
-          <span class="data-param-value txt-green med" id="valMacdExp">Bullish (Comprador)</span>
+          <span class="data-param-name">Histograma MACD</span>
+          <span class="data-param-value" id="valMacdHist">0.000045</span>
         </div>
-
         <div class="data-row-item">
           <span class="data-param-name">Estocástico (%K / %D)</span>
           <span class="data-param-value" id="valStoch">62.4 / 58.1</span>
         </div>
-
-        <div class="data-row-item">
-          <span class="data-param-name">Força da Tendência (ADX 14)</span>
-          <span class="data-param-value" id="valAdx">28.5 (Tendência Forte)</span>
-        </div>
       </div>
 
-      <!-- CARD 3: PRICE ACTION, VELAS M1 & SMC -->
+      <!-- CARD 3: PRICE ACTION, VELAS M1 & FRACTAIS -->
       <div class="metric-section-card">
         <div class="section-card-title">
           <span>Price Action, Velas M1 & Zonas</span>
-          <span class="section-badge-tag">SMC / Fractais</span>
+          <span>SMC / Zonas</span>
         </div>
 
         <div class="data-row-item">
-          <span class="data-param-name">Padrão da Vela Detectado</span>
+          <span class="data-param-name">Padrão da Vela</span>
           <span class="data-param-value med" id="valPadraoVela">Fluxo Institucional</span>
         </div>
-
         <div class="data-row-item">
-          <span class="data-param-name">Corpo / Pavios da Vela Atual</span>
+          <span class="data-param-name">Corpo / Pavio Vela Atual</span>
           <span class="data-param-value" id="valVelaDims">Corpo: 14 pts | Pavio: 3 pts</span>
         </div>
-
         <div class="data-row-item">
-          <span class="data-param-name">Fractais de Williams (5 Velas)</span>
+          <span class="data-param-name">Fractais de Williams</span>
           <span class="data-param-value txt-green" id="valFractal">Suporte Dinâmico Ativo</span>
         </div>
-
         <div class="data-row-item">
           <span class="data-param-name">Resistência Macro (60 Velas)</span>
           <span class="data-param-value" id="valResistencia">5.42480</span>
         </div>
-
         <div class="data-row-item">
           <span class="data-param-name">Suporte Macro (60 Velas)</span>
           <span class="data-param-value" id="valSuporte">5.41720</span>
-        </div>
-
-        <div class="data-row-item">
-          <span class="data-param-name">Bandas de Bollinger (20, 2)</span>
-          <span class="data-param-value" id="valBollinger">Mid: 5.42080</span>
         </div>
       </div>
 
     </div>
 
-    <!-- CARD INFERIOR: LEITURA TÉCNICA DA IA EM TEMPO REAL -->
-    <section class="ai-observation-card">
-      <div class="ai-obs-header">
-        <span>Leitura Técnica da Inteligência Artificial em Tempo Real</span>
-        <span class="ai-credits-badge" id="aiCreditsDisplay">Gemini AI • 300 Créditos Ativos</span>
+    <!-- SEÇÃO 3: ANÁLISE TÉCNICA EM BASE DE TEXTOS PROFISSIONAIS (SEM EMOJIS, SEGUNDO A SEGUNDO) -->
+    <section class="ai-terminal-card">
+      <div class="terminal-header">
+        <span>Auditoria Técnica Institucional em Tempo Real (Atualização Contínua)</span>
+        <span class="terminal-credits-pill" id="terminalCredits">Gemini AI • 300 Créditos Disponíveis</span>
       </div>
-      <div class="ai-obs-body" id="aiObservationText">
-        Aguardando início das análises... Clique no botão "Ligar IA" para iniciar o rastreamento e cálculo dos dados do ativo.
-      </div>
+      <div class="terminal-text-box" id="terminalText">Aguardando inicialização da análise...</div>
     </section>
 
   </main>
@@ -1185,7 +994,6 @@
        SCRIPTS JAVASCRIPT: LÓGICA EM TEMPO REAL E MAPA DE BANDEIRAS
        ========================================================================= -->
   <script>
-    // Mapeamento de Moedas para Códigos de Bandeira ISO
     const CURRENCY_FLAGS = {
       'EUR': 'eu',
       'USD': 'us',
@@ -1213,7 +1021,7 @@
       lastPrice: 0.0
     };
 
-    // Função para extrair moedas ou logos reais do nome do ativo
+    // Extrair moedas e imagens reais do nome do ativo
     function parseAssetVisuals(assetName) {
       if (!assetName) return { type: 'pair', f1: 'us', f2: 'eu', label: 'EUR/USD OTC', otc: true };
       
@@ -1221,7 +1029,6 @@
       const isOtc = clean.includes('OTC');
       const base = clean.replace('-OTC', '').replace('OTC', '').replace('/', '');
 
-      // Pares de Moedas com 6 letras (ex: EURUSD, USDJPY, AUDCAD)
       if (base.length === 6) {
         const c1 = base.substring(0, 3);
         const c2 = base.substring(3, 6);
@@ -1236,7 +1043,6 @@
         };
       }
 
-      // Ativos de Ações / Cripto conhecidos
       return {
         type: 'single',
         symbol: base.substring(0, 4),
@@ -1245,8 +1051,8 @@
       };
     }
 
-    // Atualiza visual do ativo na aba única e no hero card
-    function renderAssetTabAndHero(assetName, payout) {
+    // Renderiza a aba única automaticamente para o ativo sendo analisado
+    function renderAssetTab(assetName, payout) {
       if (!assetName) return;
       const vis = parseAssetVisuals(assetName);
 
@@ -1256,23 +1062,14 @@
       const tabOtc = document.getElementById('tabOtcBadge');
       const tabName = document.getElementById('tabAssetName');
       const tabSub = document.getElementById('tabAssetSub');
-
-      const heroFlag1 = document.getElementById('heroFlag1');
-      const heroFlag2 = document.getElementById('heroFlag2');
-      const heroSingle = document.getElementById('heroSingleLogo');
-      const heroOtc = document.getElementById('heroOtcBadge');
-      const heroName = document.getElementById('heroAssetName');
-      const heroPayout = document.getElementById('heroPayoutBadge');
+      const activeLabel = document.getElementById('activeAssetLabel');
 
       tabName.textContent = vis.label;
-      heroName.textContent = vis.label;
+      if (activeLabel) activeLabel.textContent = assetName;
 
       const payoutTxt = payout ? `${Math.round(payout)}%` : '87%';
-      tabSub.textContent = `Binária • ${payoutTxt}`;
-      heroPayout.textContent = payoutTxt;
-
+      tabSub.textContent = `Binária • Payout ${payoutTxt}`;
       tabOtc.style.display = vis.otc ? 'block' : 'none';
-      heroOtc.style.display = vis.otc ? 'block' : 'none';
 
       if (vis.type === 'pair') {
         tabFlag1.style.display = 'block';
@@ -1280,32 +1077,112 @@
         tabSingle.style.display = 'none';
         tabFlag1.src = `https://flagcdn.com/w40/${vis.f1}.png`;
         tabFlag2.src = `https://flagcdn.com/w40/${vis.f2}.png`;
-
-        heroFlag1.style.display = 'block';
-        heroFlag2.style.display = 'block';
-        heroSingle.style.display = 'none';
-        heroFlag1.src = `https://flagcdn.com/w40/${vis.f1}.png`;
-        heroFlag2.src = `https://flagcdn.com/w40/${vis.f2}.png`;
       } else {
         tabFlag1.style.display = 'none';
         tabFlag2.style.display = 'none';
         tabSingle.style.display = 'flex';
         tabSingle.textContent = vis.symbol;
-
-        heroFlag1.style.display = 'none';
-        heroFlag2.style.display = 'none';
-        heroSingle.style.display = 'flex';
-        heroSingle.textContent = vis.symbol;
       }
+    }
+
+    // Cálculo dos Medidores do Prompt para Confluência e Gatilho do Sinal
+    function calcularMedidoresPrompt(dt) {
+      if (!dt || !dt.ultimo_preco) {
+        return {
+          c1_trend: 50,
+          c2_momentum: 50,
+          c3_macd: 50,
+          c4_fractal: 50,
+          confluencia_total: 50,
+          direcao_sugerida: 'AGUARDAR'
+        };
+      }
+
+      // 1. Tendência & Médias
+      let score_trend = 50;
+      const is_bull_trend = (dt.ema9 > dt.ema21 && dt.ema21 > dt.ema50);
+      const is_bear_trend = (dt.ema9 < dt.ema21 && dt.ema21 < dt.ema50);
+      const above_ma200 = dt.ma_trend_200 ? (dt.ultimo_preco > dt.ma_trend_200) : true;
+
+      if (is_bull_trend && above_ma200) score_trend = 95;
+      else if (is_bear_trend && !above_ma200) score_trend = 95;
+      else if (is_bull_trend || is_bear_trend) score_trend = 75;
+      else score_trend = 45;
+
+      // 2. Momentum & RSI
+      let score_momentum = 50;
+      const rsi = dt.rsi14 || 50;
+      if ((is_bull_trend && rsi >= 45 && rsi <= 72) || (is_bear_trend && rsi <= 55 && rsi >= 28)) {
+        score_momentum = 90;
+      } else if (rsi >= 75 || rsi <= 25) {
+        score_momentum = 25;
+      } else {
+        score_momentum = 65;
+      }
+
+      // 3. MACD & Força Institucional
+      let score_macd = 50;
+      if (is_bull_trend && dt.macd_expanding_bull) score_macd = 95;
+      else if (is_bear_trend && dt.macd_expanding_bear) score_macd = 95;
+      else if (dt.macd_expanding_bull || dt.macd_expanding_bear) score_macd = 70;
+      else score_macd = 45;
+
+      // 4. Price Action & Fractais
+      let score_fractal = 50;
+      const fr = String(dt.fractal_status || '');
+      if (fr.includes('REJEICAO') || fr.includes('ROMPIMENTO')) score_fractal = 92;
+      else if (dt.force_now) score_fractal = 85;
+      else score_fractal = 60;
+
+      const total = Math.round((score_trend * 0.30) + (score_momentum * 0.25) + (score_macd * 0.25) + (score_fractal * 0.20));
+
+      let direcao = 'AGUARDAR';
+      if (total >= 80) {
+        if (is_bull_trend && !dt.macd_expanding_bear && rsi < 75) direcao = 'CALL';
+        else if (is_bear_trend && !dt.macd_expanding_bull && rsi > 25) direcao = 'PUT';
+      }
+
+      return {
+        c1_trend: score_trend,
+        c2_momentum: score_momentum,
+        c3_macd: score_macd,
+        c4_fractal: score_fractal,
+        confluencia_total: total,
+        direcao_sugerida: direcao
+      };
+    }
+
+    // Geração da Análise Técnica Profissional em Base de Textos (SEM EMOJIS)
+    function gerarTextoAnaliseProfissional(ativo, dt, med, clockStr, seg, sig) {
+      const agora = new Date().toLocaleTimeString('pt-BR');
+      const decisao = sig?.direction || med.direcao_sugerida;
+      const conf = sig?.confluence || med.confluencia_total;
+      
+      let gatilhoTxt = "Aguardando confluencia tecnica dos 4 criterios de prompt.";
+      if (decisao === 'CALL') {
+        gatilhoTxt = `Confluencia compradora atingida (${conf}%). Disparo de CALL programado para a abertura do proximo candle (00s). Restam ${60 - seg} segundos.`;
+      } else if (decisao === 'PUT') {
+        gatilhoTxt = `Confluencia vendedora atingida (${conf}%). Disparo de PUT programado para a abertura do proximo candle (00s). Restam ${60 - seg} segundos.`;
+      } else {
+        gatilhoTxt = `Rastreamento institucional no candle ${seg}s/60s. Calculando confluencias segundo a segundo.`;
+      }
+
+      const macdExpStr = dt.macd_expanding_bull ? 'Compradora (Bullish)' : (dt.macd_expanding_bear ? 'Vendedora (Bearish)' : 'Neutra');
+
+      return `[AUDITORIA TECNICA QUANTITATIVA ${agora}] ATIVO: ${ativo} | PRECO: ${(dt.ultimo_preco || 0).toFixed(5)} | VELA M1: ${seg}s/60s (Relogio: ${clockStr})
+TENDENCIA E ESTRUTURA: ${dt.tendencia_emas || 'ALTA ESTRUTURAL'} | EMA9: ${(dt.ema9||0).toFixed(5)} | EMA21: ${(dt.ema21||0).toFixed(5)} | EMA50: ${(dt.ema50||0).toFixed(5)} | MA200: ${(dt.ma_trend_200||0).toFixed(5)}
+OSCILADORES E MOMENTUM: RSI 14 em ${(dt.rsi14||50).toFixed(2)} | RSI 7 em ${(dt.rsi7||50).toFixed(2)} | Estocastico: ${(dt.stoch_k||50).toFixed(2)} | ADX 14: ${(dt.adx14||25).toFixed(2)}
+VOLUME E EXPANSÃO MACD: MACD: ${(dt.macd||0).toFixed(6)} | Histograma: ${(dt.macd_hist||0).toFixed(6)} | Expansao: ${macdExpStr}
+PRICE ACTION E ZONAS: Padrao: ${dt.padrao_detectado || 'Fluxo Institucional'} | Fractais Williams: ${dt.fractal_status || 'Neutro'} | Resistencia 60: ${(dt.resistencia_macro_60||0).toFixed(5)} | Suporte 60: ${(dt.suporte_macro_60||0).toFixed(5)}
+AVALIACAO DOS CRITERIOS DO PROMPT: 1.Tendencia: ${med.c1_trend}% | 2.Momentum: ${med.c2_momentum}% | 3.MACD: ${med.c3_macd}% | 4.Fractais: ${med.c4_fractal}% | Confluencia Total: ${conf}%
+STATUS DO GATILHO: ${decisao} | ${gatilhoTxt}`;
     }
 
     // Alternar dropdown de contas
     function toggleAccountMenu() {
-      const menu = document.getElementById('accountMenu');
-      menu.classList.toggle('show');
+      document.getElementById('accountMenu').classList.toggle('show');
     }
 
-    // Fechar menu ao clicar fora
     document.addEventListener('click', (e) => {
       const menu = document.getElementById('accountMenu');
       const btn1 = document.getElementById('balanceBtn');
@@ -1315,7 +1192,7 @@
       }
     });
 
-    // Alternar Modo de Conta (DEMO / REAL)
+    // Alternar Modo de Conta
     async function switchAccountMode(mode) {
       try {
         const res = await fetch('/api/config', {
@@ -1330,15 +1207,14 @@
           fetchStatus();
         }
       } catch (err) {
-        console.error("Erro ao trocar modo de conta:", err);
+        console.error("Erro ao alternar modo:", err);
       }
     }
 
     // Ligar / Desligar IA
     async function toggleAiEngine() {
       try {
-        const res = await fetch('/api/toggle_ai', { method: 'POST' });
-        const data = await res.json();
+        await fetch('/api/toggle_ai', { method: 'POST' });
         fetchStatus();
       } catch (err) {
         console.error("Erro ao alternar IA:", err);
@@ -1347,7 +1223,7 @@
 
     // Salvar Stake
     async function saveConfigStake() {
-      const val = parseFloat(document.getElementById('stakeInput').value) || 5.0;
+      const val = parseFloat(document.getElementById('headerStakeInput').value) || 5.0;
       try {
         await fetch('/api/config', {
           method: 'POST',
@@ -1378,21 +1254,20 @@
           document.getElementById('loginModal').classList.remove('open');
           fetchStatus();
         } else {
-          fb.textContent = d.message || 'Falha ao autenticar na BullEx.';
+          fb.textContent = d.message || 'Falha na autenticação BullEx.';
         }
       } catch (e) {
         fb.textContent = 'Erro de conexão com o servidor local.';
       }
     }
 
-    // Loop Principal de Atualização de Status em Tempo Real
+    // Loop de Status Segundo a Segundo
     async function fetchStatus() {
       try {
         const res = await fetch('/api/status');
         const d = await res.json();
         if (!d) return;
 
-        // Controle de Conexão
         if (!d.connected) {
           document.getElementById('loginModal').classList.add('open');
           return;
@@ -1400,7 +1275,7 @@
           document.getElementById('loginModal').classList.remove('open');
         }
 
-        // Saldo e Modo de Conta
+        // Modo e Saldos
         const isDemo = (d.mode === 'DEMO');
         appState.mode = d.mode;
         const balAmount = document.getElementById('balanceDisplay');
@@ -1422,7 +1297,7 @@
         document.getElementById('demoBalanceVal').textContent = `$${(d.balance_demo || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
         document.getElementById('realBalanceVal').textContent = `$${(d.balance_real || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-        // Placar WIN / LOSS (No lugar de Depositar)
+        // Placar WIN / LOSS
         const sb = d.scoreboard || {};
         document.getElementById('scWins').textContent = sb.wins || 0;
         document.getElementById('scLosses').textContent = sb.losses || 0;
@@ -1433,118 +1308,112 @@
         profitElem.textContent = `${resLiq >= 0 ? '+' : ''}$${resLiq.toFixed(2)}`;
         profitElem.className = resLiq >= 0 ? 'sc-item-profit txt-green' : 'sc-item-profit txt-red';
 
-        // Ativo Analisado (Aba Única e Hero Card)
-        const activeAsset = d.active_asset || 'EURUSD-OTC';
-        renderAssetTabAndHero(activeAsset, d.last_candle_data?.payout || 87);
+        // Botão Ligar/Desligar IA no Header
+        const btnHeaderAi = document.getElementById('headerAiBtn');
+        const btnHeaderAiText = document.getElementById('headerAiBtnText');
+        if (d.ai_enabled) {
+          btnHeaderAi.className = 'bx-header-ai-btn is-active';
+          btnHeaderAiText.textContent = 'DESLIGAR IA';
+        } else {
+          btnHeaderAi.className = 'bx-header-ai-btn';
+          btnHeaderAiText.textContent = 'LIGAR IA';
+        }
 
-        // Preço em Tempo Real com Efeito de Tick
-        const priceVal = d.last_candle_data?.ultimo_preco || 0.0;
+        // Stake Input
+        if (document.activeElement !== document.getElementById('headerStakeInput') && d.config?.stake) {
+          document.getElementById('headerStakeInput').value = d.config.stake;
+        }
+
+        // Ativo em Análise (Aba Única que Muda Sozinha)
+        const activeAsset = d.active_asset || 'EURUSD-OTC';
+        renderAssetTab(activeAsset, d.last_candle_data?.payout || 87);
+
+        // Preço em Tempo Real
+        const dt = d.last_candle_data || {};
+        const priceVal = dt.ultimo_preco || 0.0;
         const priceElem = document.getElementById('heroPriceVal');
         priceElem.textContent = priceVal.toFixed(5);
         if (appState.lastPrice && priceVal !== appState.lastPrice) {
           priceElem.style.color = priceVal > appState.lastPrice ? 'var(--bullex-green)' : 'var(--bullex-red)';
-          setTimeout(() => { priceElem.style.color = '#cbd5e1'; }, 400);
+          setTimeout(() => { priceElem.style.color = '#fff'; }, 300);
         }
         appState.lastPrice = priceVal;
 
-        // Relógio M1 e Segundos
+        // Relógio M1
         const clockStr = d.candle_clock || '00:00';
         document.getElementById('candleClockDigits').textContent = clockStr;
-        const seg = d.last_candle_data?.segundo_da_vela ?? (60 - parseInt(clockStr.replace('00:', '')));
-        document.getElementById('candleClockSub').textContent = `Vela ${seg}s / 60s (${60 - seg}s para o 00s)`;
+        const seg = dt.segundo_da_vela ?? (60 - parseInt(clockStr.replace('00:', '')));
 
-        // Decisão Calculada da Entrada
-        const decBadge = document.getElementById('entryDecisionBadge');
-        const decText = document.getElementById('entryDecisionText');
-        const timingHint = document.getElementById('entryTimingHint');
+        // Medidores dos Prompts
+        const med = calcularMedidoresPrompt(dt);
+        document.getElementById('scoreTrend').textContent = `${med.c1_trend}%`;
+        document.getElementById('barTrend').style.width = `${med.c1_trend}%`;
 
+        document.getElementById('scoreMomentum').textContent = `${med.c2_momentum}%`;
+        document.getElementById('barMomentum').style.width = `${med.c2_momentum}%`;
+
+        document.getElementById('scoreMacd').textContent = `${med.c3_macd}%`;
+        document.getElementById('barMacd').style.width = `${med.c3_macd}%`;
+
+        document.getElementById('scoreFractal').textContent = `${med.c4_fractal}%`;
+        document.getElementById('barFractal').style.width = `${med.c4_fractal}%`;
+
+        const finalConf = d.active_signal?.confluence || med.confluencia_total;
+        document.getElementById('totalConfluenceScore').textContent = `${finalConf}%`;
+
+        // Gatilho do Sinal
+        const trigBadge = document.getElementById('triggerBadge');
+        const trigTiming = document.getElementById('triggerTiming');
         const sig = d.active_signal;
-        if (sig && (sig.direction === 'CALL' || sig.direction === 'PUT')) {
-          decBadge.className = sig.direction === 'CALL' ? 'signal-badge call' : 'signal-badge put';
-          decText.textContent = `${sig.direction === 'CALL' ? '🟢 CALL (COMPRA)' : '🔴 PUT (VENDA)'}`;
-          timingHint.textContent = `Sinal Confirmado • Disparo no 00s (${60 - seg}s)`;
+        const decFinal = sig?.direction || med.direcao_sugerida;
+
+        if (decFinal === 'CALL') {
+          trigBadge.className = 'trigger-badge-status call';
+          trigBadge.textContent = 'CALL (COMPRA)';
+          trigTiming.textContent = `Disparo no 00s (${60 - seg}s)`;
+        } else if (decFinal === 'PUT') {
+          trigBadge.className = 'trigger-badge-status put';
+          trigBadge.textContent = 'PUT (VENDA)';
+          trigTiming.textContent = `Disparo no 00s (${60 - seg}s)`;
         } else {
-          decBadge.className = 'signal-badge';
-          decText.textContent = 'AGUARDANDO CONFLUÊNCIA';
-          timingHint.textContent = 'Calculando confluências técnicas em tempo real';
+          trigBadge.className = 'trigger-badge-status';
+          trigBadge.textContent = 'AGUARDANDO';
+          trigTiming.textContent = `Calculando confluências (${seg}s/60s)`;
         }
 
-        // Confluência
-        const confNum = sig?.confluence || (d.last_candle_data?.force_now ? 90 : 80);
-        document.getElementById('confluenceVal').textContent = `${confNum}%`;
-        document.getElementById('confluenceBar').style.width = `${confNum}%`;
-
-        // Botão Ligar/Desligar Robô
-        const btnToggle = document.getElementById('toggleAiBtn');
-        const btnToggleText = document.getElementById('toggleAiBtnText');
-        if (d.ai_enabled) {
-          btnToggle.className = 'bot-toggle-btn is-active';
-          btnToggleText.textContent = 'DESLIGAR IA';
-        } else {
-          btnToggle.className = 'bot-toggle-btn';
-          btnToggleText.textContent = 'LIGAR IA';
-        }
-
-        // Stake Input (atualiza apenas se não estiver focado)
-        if (document.activeElement !== document.getElementById('stakeInput') && d.config?.stake) {
-          document.getElementById('stakeInput').value = d.config.stake;
-        }
-
-        // DADOS TÉCNICOS DETALHADOS (GRID EM TEMPO REAL)
-        const dt = d.last_candle_data || {};
-
-        // 1. Tendência & Médias
-        const tendStr = dt.tendencia_emas || 'ALTA ESTRUTURAL';
-        const diagElem = document.getElementById('diagTrend');
-        diagElem.textContent = tendStr;
-        if (tendStr.includes('ALTA')) {
-          diagElem.className = 'data-param-value med txt-green';
-        } else if (tendStr.includes('BAIXA')) {
-          diagElem.className = 'data-param-value med txt-red';
-        } else {
-          diagElem.className = 'data-param-value med txt-orange';
-        }
-
+        // Preenchimento dos Cards Técnicos
+        document.getElementById('valDiagTrend').textContent = dt.tendencia_emas || 'ALTA ESTRUTURAL';
         document.getElementById('valMa200').textContent = (dt.ma_trend_200 || 0).toFixed(5);
         document.getElementById('valEma9').textContent = (dt.ema9 || 0).toFixed(5);
         document.getElementById('valEma21').textContent = (dt.ema21 || 0).toFixed(5);
         document.getElementById('valEma50').textContent = (dt.ema50 || 0).toFixed(5);
-        document.getElementById('valEmaAlign').textContent = dt.ema9 > dt.ema21 ? 'EMA9 > EMA21 > EMA50 (Alta)' : 'EMA9 < EMA21 < EMA50 (Baixa)';
 
-        // 2. Osciladores & Momentum
-        const rsi14 = dt.rsi14 || 50;
-        document.getElementById('valRsi14').textContent = rsi14.toFixed(1);
-        document.getElementById('rsiDot').style.left = `${Math.min(95, Math.max(5, rsi14))}%`;
-
+        document.getElementById('valRsi14').textContent = (dt.rsi14 || 50).toFixed(1);
+        document.getElementById('valRsi7').textContent = (dt.rsi7 || 50).toFixed(1);
         document.getElementById('valMacd').textContent = (dt.macd || 0).toFixed(6);
-        const macdExp = dt.macd_expanding_bull ? 'Bullish (Comprador)' : (dt.macd_expanding_bear ? 'Bearish (Vendedor)' : 'Neutro');
-        const expElem = document.getElementById('valMacdExp');
-        expElem.textContent = macdExp;
-        expElem.className = dt.macd_expanding_bull ? 'data-param-value txt-green med' : (dt.macd_expanding_bear ? 'data-param-value txt-red med' : 'data-param-value med');
-
+        document.getElementById('valMacdHist').textContent = (dt.macd_hist || 0).toFixed(6);
         document.getElementById('valStoch').textContent = `${(dt.stoch_k || 50).toFixed(1)} / ${(dt.stoch_d || 50).toFixed(1)}`;
-        document.getElementById('valAdx').textContent = `${(dt.adx14 || 25).toFixed(1)} (${dt.adx_forte ? 'Forte' : 'Moderada'})`;
 
-        // 3. Price Action, Velas M1 & Zonas
-        document.getElementById('valPadraoVela').textContent = dt.padrao_detectado || dt.olho_deus_classificacao || 'Fluxo Institucional';
+        document.getElementById('valPadraoVela').textContent = dt.padrao_detectado || 'Fluxo Institucional';
         const cUlt = dt.candle_ultimo || {};
         document.getElementById('valVelaDims').textContent = `Corpo: ${(dt.body_now || 0).toFixed(5)} | Pavio: ${(cUlt.pavio_superior || 0).toFixed(5)}`;
         document.getElementById('valFractal').textContent = dt.fractal_status || 'Suporte Dinâmico Ativo';
         document.getElementById('valResistencia').textContent = (dt.resistencia_macro_60 || 0).toFixed(5);
         document.getElementById('valSuporte').textContent = (dt.suporte_macro_60 || 0).toFixed(5);
-        document.getElementById('valBollinger').textContent = `Mid: ${(dt.bb_middle || 0).toFixed(5)}`;
 
-        // Leitura da IA
-        document.getElementById('aiObservationText').textContent = d.observation || 'Análise técnica em execução contínua no ativo selecionado.';
+        // Terminal de Análise em Texto Profissional (Sem Emojis, Atualização Segundo a Segundo)
+        const txtAnalise = gerarTextoAnaliseProfissional(activeAsset, dt, med, clockStr, seg, sig);
+        document.getElementById('terminalText').textContent = txtAnalise;
+
         const creds = d.gemini_credits?.total_credits ?? 300;
-        document.getElementById('aiCreditsDisplay').textContent = `Gemini AI • ${creds} Créditos Ativos`;
+        document.getElementById('terminalCredits').textContent = `Gemini AI • ${creds} Créditos Disponíveis`;
 
       } catch (e) {
-        console.error("Erro no polling de status:", e);
+        console.error("Erro no polling:", e);
       }
     }
 
-    // Iniciar polling a cada 800ms para tempo real absoluto
+    // Atualização Segundo a Segundo
     setInterval(fetchStatus, 800);
     fetchStatus();
   </script>

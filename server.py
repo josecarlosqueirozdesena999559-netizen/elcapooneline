@@ -791,13 +791,13 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     # 13. Classificação Olho de Deus Institucional
     olho_deus_status = "AGUARDAR"
     if engulf_buy and (c_close > ma_trend or c_close > ema21) and macd_expanding_bull:
-        olho_deus_status = "⭐ OLHO DE DEUS A+ COMPRA (CALL) - ENGOLFO + TENDÊNCIA + MACD EXPANSIVO" if force_now else "🟢 OLHO DE DEUS COMPRA (CALL) - ENGOLFO CONFIRMADO COM MACD"
+        olho_deus_status = "OLHO DE DEUS A+ COMPRA (CALL) - ENGOLFO + TENDENCIA + MACD EXPANSIVO" if force_now else "OLHO DE DEUS COMPRA (CALL) - ENGOLFO CONFIRMADO COM MACD"
     elif engulf_sell and (c_close < ma_trend or c_close < ema21) and macd_expanding_bear:
-        olho_deus_status = "⭐ OLHO DE DEUS A+ VENDA (PUT) - ENGOLFO + TENDÊNCIA + MACD EXPANSIVO" if force_now else "🔴 OLHO DE DEUS VENDA (PUT) - ENGOLFO CONFIRMADO COM MACD"
+        olho_deus_status = "OLHO DE DEUS A+ VENDA (PUT) - ENGOLFO + TENDENCIA + MACD EXPANSIVO" if force_now else "OLHO DE DEUS VENDA (PUT) - ENGOLFO CONFIRMADO COM MACD"
     elif engulf_buy:
-        olho_deus_status = "ENGOLFO DE ALTA (AGUARDANDO CONFIRMAÇÃO MACD/TENDÊNCIA)"
+        olho_deus_status = "ENGOLFO DE ALTA (AGUARDANDO CONFIRMACAO MACD/TENDENCIA)"
     elif engulf_sell:
-        olho_deus_status = "ENGOLFO DE BAIXA (AGUARDANDO CONFIRMAÇÃO MACD/TENDÊNCIA)"
+        olho_deus_status = "ENGOLFO DE BAIXA (AGUARDANDO CONFIRMACAO MACD/TENDENCIA)"
 
     # 14. FRACTAIS DE WILLIAMS (5 VELAS) - NÍVEIS DINÂMICOS INSTITUCIONAIS
     fractais_topo = []
@@ -821,13 +821,13 @@ def calcular_indicadores_60(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     fractal_status = "Neutro"
     if rejeicao_fractal_fundo:
-        fractal_status = f"⭐ REJEIÇÃO EM FUNDO FRACTAL ({ultimo_fractal_fundo:.5f}) - Suporte Dinâmico Ativado (CALL)"
+        fractal_status = f"REJEICAO EM FUNDO FRACTAL ({ultimo_fractal_fundo:.5f}) - Suporte Dinamico Ativado (CALL)"
     elif rejeicao_fractal_topo:
-        fractal_status = f"⭐ REJEIÇÃO EM TOPO FRACTAL ({ultimo_fractal_topo:.5f}) - Resistência Dinâmica Ativada (PUT)"
+        fractal_status = f"REJEICAO EM TOPO FRACTAL ({ultimo_fractal_topo:.5f}) - Resistencia Dinamica Ativada (PUT)"
     elif rompimento_fractal_alta:
-        fractal_status = f"🟢 ROMPIMENTO DE TOPO FRACTAL ({ultimo_fractal_topo:.5f}) - Fluxo Comprador (CALL)"
+        fractal_status = f"ROMPIMENTO DE TOPO FRACTAL ({ultimo_fractal_topo:.5f}) - Fluxo Comprador (CALL)"
     elif rompimento_fractal_baixa:
-        fractal_status = f"🔴 ROMPIMENTO DE FUNDO FRACTAL ({ultimo_fractal_fundo:.5f}) - Fluxo Vendedor (PUT)"
+        fractal_status = f"ROMPIMENTO DE FUNDO FRACTAL ({ultimo_fractal_fundo:.5f}) - Fluxo Vendedor (PUT)"
 
     # Suporte e Resistência Macro (60 velas) e Micro (10 velas)
     resistencia_macro = max(highs)
@@ -1261,11 +1261,11 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     if gale_loss_ant > 0:
                         live_profit = payout_estimado
                         live_text = f"+{simb} {payout_estimado:.2f} (Líq: +{simb} {lucro_liquido_estimado:.2f})"
-                        status_banner = f"🟢 OPERAÇÃO DANDO VITÓRIA (+{simb} {payout_estimado:.2f} BullEx | Líquido G1: +{simb} {lucro_liquido_estimado:.2f}) — FECHAMENTO EM {remaining}s"
+                        status_banner = f"OPERACAO DANDO VITORIA (+{simb} {payout_estimado:.2f} BullEx | Liquido G1: +{simb} {lucro_liquido_estimado:.2f}) - FECHAMENTO EM {remaining}s"
                     else:
                         live_profit = payout_estimado
                         live_text = f"+{simb} {payout_estimado:.2f}"
-                        status_banner = f"🟢 OPERAÇÃO DANDO VITÓRIA ({live_text}) — FECHAMENTO EM {remaining}s"
+                        status_banner = f"OPERACAO DANDO VITORIA ({live_text}) - FECHAMENTO EM {remaining}s"
                     perc_recompra = min(0.85, 0.35 + (60 - remaining) / 100.0)
                     lp_pos_venda = round(payout_estimado * perc_recompra, 2)
                     lp_pos_venda_str = f"+{simb} {lp_pos_venda:.2f}"
@@ -1274,7 +1274,7 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     live_status = "LOSING"
                     live_profit = -total_perda_estimada if gale_loss_ant > 0 else -valor
                     live_text = f"-{simb} {total_perda_estimada:.2f}" if gale_loss_ant > 0 else f"-{simb} {valor:.2f}"
-                    status_banner = f"🔴 ENTRADA NEGATIVA ({live_text}) — FECHAMENTO EM {remaining}s"
+                    status_banner = f"ENTRADA NEGATIVA ({live_text}) - FECHAMENTO EM {remaining}s"
                     perc_perda = min(0.95, 0.45 + (60 - remaining) / 120.0)
                     lp_pos_venda = -round(valor * perc_perda, 2)
                     lp_pos_venda_str = f"-{simb} {abs(lp_pos_venda):.2f}"
@@ -2063,19 +2063,15 @@ async def loop_trader_background():
             # vai direto para a análise técnica viva do ativo atual sem ficar parado na mensagem antiga
             if state.ai_enabled and not state.is_trading:
                 obs = state.current_observation or ""
-                if any(tag in obs for tag in ["[VITÓRIA", "[RESULTADO", "[ATIVO SUSPENSO", "[EMPATE", "[AVISO BULLEX"]):
-                    d = state.last_candle_data or {}
-                    rsi_val = d.get("rsi14", 50)
-                    tend = d.get("tendencia_emas", "LATERAL")
-                    padrao = d.get("padrao_detectado", "Fluxo Institucional")
-                    ativo_show = state.active_asset or "EURUSD-OTC"
-                    state.current_observation = f"[Gemini AI {agora_hms}] Analisando {ativo_show} em tempo real (Vela {seg_v}s/60s) | {padrao} | RSI {rsi_val} | Tendência: {tend}"
-                elif "[Gemini AI " in obs:
-                    state.current_observation = re.sub(
-                        r"\[Gemini AI \d{2}:\d{2}:\d{2}\]",
-                        f"[Gemini AI {agora_hms}]",
-                        obs,
-                    )
+                d = state.last_candle_data or {}
+                rsi_val = d.get("rsi14", 50.0)
+                tend = d.get("tendencia_emas", "LATERAL")
+                padrao = d.get("padrao_detectado", "Fluxo Institucional")
+                ativo_show = state.active_asset or "EURUSD-OTC"
+                if any(tag in obs for tag in ["[VITORIA", "[RESULTADO", "[ATIVO SUSPENSO", "[EMPATE", "[AVISO BULLEX"]):
+                    state.current_observation = f"[ANALISE INSTITUCIONAL {agora_hms}] ATIVO: {ativo_show} | VELA: {seg_v}s/60s | PADRAO: {padrao} | RSI 14: {rsi_val} | TENDENCIA: {tend}"
+                elif "[ANALISE" in obs or "[Gemini" in obs:
+                    state.current_observation = f"[ANALISE INSTITUCIONAL {agora_hms}] ATIVO: {ativo_show} | VELA: {seg_v}s/60s | PADRAO: {padrao} | RSI 14: {rsi_val} | TENDENCIA: {tend}"
             if not state.ai_enabled or state.is_paused or state.is_trading or state.is_scanning:
                 continue
 
@@ -2335,10 +2331,10 @@ async def api_analytics(scope: str = "day", date: Optional[str] = None, month: O
 async def api_status():
     verificar_virada_dia()
     agora_hms = datetime.now().strftime("%H:%M:%S")
-    if state.current_observation and "[Gemini AI " in state.current_observation:
+    if state.current_observation:
         state.current_observation = re.sub(
-            r"\[Gemini AI \d{2}:\d{2}:\d{2}\]",
-            f"[Gemini AI {agora_hms}]",
+            r"\[(ANALISE INSTITUCIONAL|Gemini AI) \d{2}:\d{2}:\d{2}\]",
+            f"[ANALISE INSTITUCIONAL {agora_hms}]",
             state.current_observation,
         )
     bal = state.balance_demo if state.mode == "DEMO" else state.balance_real
