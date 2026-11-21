@@ -1203,8 +1203,8 @@
           </svg>
         </div>
 
-        <!-- Aba do Ativo Analisado (Idêntico ao da BullEx com linha roxa) -->
-        <div class="bx-active-tab" id="bxActiveTab">
+        <!-- Aba do Ativo Analisado (Só aparece quando iniciar as análises) -->
+        <div class="bx-active-tab" id="bxActiveTab" style="display: none;">
           <div class="tab-flags-box" id="tabIconBox">
             <img class="tab-flag tab-flag-1" id="tabFlag1" src="https://flagcdn.com/w40/eu.png" alt="">
             <img class="tab-flag tab-flag-2" id="tabFlag2" src="https://flagcdn.com/w40/us.png" alt="">
@@ -2071,15 +2071,14 @@
           document.getElementById('activeStakeDisplay').textContent = `$${d.config.stake.toFixed(2)}`;
         }
 
-        // A Moeda Analisada
+        // A Moeda Analisada (Só aparece lá em cima após iniciar as análises)
         const activeAsset = d.active_asset || 'EURUSD-OTC';
         const tabEl = document.getElementById('bxActiveTab');
         const wp = d.warmup_progress || {};
         if (!d.ai_enabled || !d.warmup_done) {
-          if (tabEl) tabEl.style.opacity = '0.4';
-          renderActiveAsset(wp.asset || activeAsset, 87);
+          if (tabEl) tabEl.style.display = 'none';
         } else {
-          if (tabEl) tabEl.style.opacity = '1';
+          if (tabEl) tabEl.style.display = 'flex';
           renderActiveAsset(activeAsset, d.last_candle_data?.payout || 87);
         }
 
