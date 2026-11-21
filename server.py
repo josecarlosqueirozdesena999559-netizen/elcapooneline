@@ -2427,30 +2427,32 @@ async def api_toggle_pause():
 
 @app.post("/api/reset_score")
 async def api_reset_score():
+    """Zera o placar da sessão (wins, losses, resultado, assertividade) SEM apagar o histórico de trades ou o banco."""
     state.wins = 0
     state.losses = 0
     state.resultado = 0.0
     state.operacoes = 0
     state.assertividade = 0.0
-    state.is_paused = False
     state.current_gale_step = 0
-    state.history_trades = []
-    state.current_observation = "Métricas e histórico limpos. Robô pronto para novas oportunidades institucionais."
-    try:
-        conn = sqlite3.connect(RESULTS_DB_PATH)
-        cursor = conn.cursor()
-        if state.email:
-            cursor.execute("DELETE FROM trade_results WHERE email = ?", (state.email,))
-        else:
-            cursor.execute("DELETE FROM trade_results")
-        conn.commit()
-        cursor.execute("VACUUM")
-        conn.close()
-    except Exception as e:
-        print(f"[DB RESET ERR] {e}", flush=True)
-    if state.ai_enabled:
-        asyncio.create_task(varrer_60_candles_ativos())
+    state.current_observation = "Placar da sessão zerado com sucesso. O histórico completo de operações foi preservado."
+    print("\n[PLACAR ZERADO] Placar da sessão resetado para 0x0 sem apagar o histórico de trades.", flush=True)
     return {"success": True}
+
+@app.get("/api/history")
+async def api_get_history():
+    """Retorna o histórico completo de operações registradas no banco de dados SQLite."""
+    if not state.email:
+        return {"history": state.history_trades}
+    try:
+        with sqlite3.connect(RESULTS_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM trade_results WHERE email = ? ORDER BY id DESC LIMIT 100",
+                (_norm_email(state.email),)
+            ).fetchall()
+            return {"history": [dict(r) for r in rows]}
+    except Exception as e:
+        return {"history": state.history_trades}
 
 class ConfigUpdate(BaseModel):
     asset: Optional[str] = None

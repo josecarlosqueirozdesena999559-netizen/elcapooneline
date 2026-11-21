@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BullEx Trader — Painel Autônomo Institucional</title>
+  <title>BullEx Trader — Painel Autônomo</title>
   <style>
     :root {
       --bg-darkest: #0b0e14;
@@ -13,9 +13,9 @@
       --border-subtle: #1e2638;
       --border-hover: #2a344d;
       --bullex-green: #00c26f;
-      --bullex-green-bg: rgba(0, 194, 111, 0.10);
+      --bullex-green-bg: rgba(0, 194, 111, 0.12);
       --bullex-red: #ff3b69;
-      --bullex-red-bg: rgba(255, 59, 105, 0.10);
+      --bullex-red-bg: rgba(255, 59, 105, 0.12);
       --bullex-orange: #f97316;
       --bullex-purple: #8b5cf6;
       --text-main: #f1f5f9;
@@ -51,70 +51,54 @@
     .txt-dim { color: var(--text-dim) !important; }
 
     /* =========================================================================
-       TOPBAR ESTILO BULLEX (ORGANIZADO, SEM A ABA DO ATIVO REPETIDA)
+       TOPBAR BULLX: SEM LOGO, COM MENUS TRADER ROOM, HISTÓRICO, CONFIGURAÇÕES, SAIR
        ========================================================================= */
     .bullex-topbar {
-      height: 54px;
+      height: 52px;
       background: var(--bg-header);
       border-bottom: 1px solid var(--border-subtle);
       display: flex;
       align-items: center;
-      padding: 0 16px;
-      gap: 12px;
+      padding: 0 18px;
+      gap: 16px;
       user-select: none;
       position: sticky;
       top: 0;
       z-index: 100;
     }
 
-    /* Logotipo BullEx Oficial */
-    .bx-brand-icon {
-      width: 32px;
-      height: 32px;
-      background: #000;
-      border: 1px solid #1e2638;
-      border-radius: 6px;
+    /* Menus de Navegação à Esquerda */
+    .bx-nav-menu {
       display: flex;
       align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      flex-shrink: 0;
+      gap: 6px;
     }
-    .bx-brand-icon svg {
-      width: 22px;
-      height: 22px;
-    }
-
-    /* Ícone Grid 4 Quadrados */
-    .bx-grid-btn {
-      width: 32px;
-      height: 32px;
-      background: #171d2b;
-      border: 1px solid var(--border-subtle);
-      border-radius: 6px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+    .bx-nav-item {
+      background: transparent;
+      border: 1px solid transparent;
       color: #94a3b8;
-      flex-shrink: 0;
-    }
-    .bx-grid-btn svg {
-      width: 14px;
-      height: 14px;
-    }
-
-    .bx-terminal-title {
       font-size: 13px !important;
-      color: #cbd5e1;
-      letter-spacing: -0.2px;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .bx-nav-item:hover {
+      color: #fff;
+      background: #171d2b;
+    }
+    .bx-nav-item.active {
+      color: #fff;
+      background: #171d2b;
+      border-color: var(--border-subtle);
     }
 
-    /* Lado Direito do Topbar Organizado */
+    /* Lado Direito do Topbar */
     .bx-topbar-right {
       margin-left: auto;
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
     }
 
     /* Botão Ligar/Desligar IA */
@@ -141,29 +125,22 @@
       opacity: 0.9;
     }
 
-    /* Mão de Entrada */
-    .bx-header-stake {
-      display: flex;
-      align-items: center;
-      height: 34px;
+    /* Botão Zerar Placar (Sem apagar históricos) */
+    .bx-btn-reset-score {
+      height: 32px;
+      padding: 0 10px;
+      border-radius: 5px;
       background: #171d2b;
       border: 1px solid var(--border-subtle);
-      border-radius: 6px;
-      padding: 0 8px;
-      gap: 4px;
-    }
-    .bx-header-stake span {
+      color: #94a3b8;
       font-size: 11px !important;
-      color: var(--text-dim);
+      cursor: pointer;
+      transition: all 0.15s;
     }
-    .bx-header-stake input {
-      width: 48px;
-      background: transparent;
-      border: none;
-      outline: none;
+    .bx-btn-reset-score:hover {
       color: #fff;
-      font-size: 12px !important;
-      text-align: right;
+      background: #20283b;
+      border-color: #334155;
     }
 
     /* Placar de WIN e LOSS */
@@ -262,7 +239,7 @@
       background: #202a42;
     }
 
-    /* Avatar do Usuário */
+    /* Avatar */
     .bx-user-avatar {
       position: relative;
       width: 28px;
@@ -299,29 +276,29 @@
     }
 
     /* =========================================================================
-       CONTEÚDO PRINCIPAL: A MOEDA + PENSAMENTO REAL DA IA EM TEXTO COMUM
+       CONTEÚDO PRINCIPAL: BARRA DO ATIVO + ANÁLISE COMPACTA DA IA
        ========================================================================= */
     .bullex-main-content {
       flex: 1;
-      padding: 20px 24px 40px;
-      max-width: 1300px;
+      padding: 18px 22px 35px;
+      max-width: 1320px;
       width: 100%;
       margin: 0 auto;
       display: flex;
       flex-direction: column;
-      gap: 20px;
+      gap: 16px;
     }
 
-    /* BARRA DA MOEDA EM ANÁLISE */
+    /* BARRA DO ATIVO EM ANÁLISE */
     .active-asset-bar {
       background: var(--bg-card);
       border: 1px solid var(--border-subtle);
       border-radius: 8px;
-      padding: 14px 20px;
+      padding: 12px 18px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 20px;
+      gap: 16px;
     }
 
     .asset-info-left {
@@ -330,8 +307,8 @@
       gap: 12px;
     }
     .hero-icon-box {
-      width: 38px;
-      height: 38px;
+      width: 36px;
+      height: 36px;
       position: relative;
       display: flex;
       align-items: center;
@@ -339,8 +316,8 @@
       flex-shrink: 0;
     }
     .hero-flag {
-      width: 24px;
-      height: 24px;
+      width: 22px;
+      height: 22px;
       border-radius: 50%;
       object-fit: cover;
       position: absolute;
@@ -350,8 +327,8 @@
     .hero-flag-1 { top: 0; left: 0; z-index: 2; }
     .hero-flag-2 { bottom: 0; right: 0; z-index: 1; }
     .hero-single-logo {
-      width: 30px;
-      height: 30px;
+      width: 28px;
+      height: 28px;
       border-radius: 50%;
       background: #1e2638;
       display: flex;
@@ -378,17 +355,17 @@
     .asset-info-center {
       display: flex;
       align-items: center;
-      gap: 24px;
+      gap: 20px;
       background: var(--bg-card-sub);
       border: 1px solid var(--border-subtle);
       border-radius: 6px;
-      padding: 8px 18px;
+      padding: 7px 16px;
     }
 
     .trigger-badge-status {
-      padding: 7px 18px;
+      padding: 6px 16px;
       border-radius: 6px;
-      font-size: 13px !important;
+      font-size: 12px !important;
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border-subtle);
       color: #94a3b8;
@@ -406,23 +383,127 @@
       color: var(--bullex-red);
     }
 
-    /* PENSAMENTO REAL DA IA: TEXTO COMUM NORMAL SEM FUNDO OU CARDS */
+    /* PENSAMENTO REAL DA IA: SEM FUNDO, SEM ESPAÇAMENTO EXCESSIVO */
     .ai-thought-section {
       width: 100%;
       display: flex;
       flex-direction: column;
-      gap: 8px;
     }
 
     .ai-thought-prose {
-      font-size: 14px !important;
-      line-height: 1.75;
+      font-size: 13.5px !important;
+      line-height: 1.45 !important;
       color: #cbd5e1;
       white-space: pre-wrap;
       font-family: var(--font-family) !important;
       background: transparent !important;
       border: none !important;
-      padding: 6px 2px;
+      padding: 0;
+    }
+
+    /* MODAL DE HISTÓRICO */
+    .bx-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    .bx-modal-backdrop.open {
+      display: flex;
+    }
+    .bx-modal-window {
+      width: 100%;
+      max-width: 720px;
+      max-height: 85vh;
+      background: #111622;
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 15px 40px rgba(0,0,0,0.6);
+      overflow: hidden;
+    }
+    .bx-modal-header {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 14px !important;
+      color: #fff;
+    }
+    .bx-modal-close {
+      cursor: pointer;
+      color: #94a3b8;
+      font-size: 14px;
+      padding: 4px;
+    }
+    .bx-modal-close:hover {
+      color: #fff;
+    }
+    .bx-modal-body {
+      padding: 16px 18px;
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    /* Tabela de Histórico */
+    .history-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px !important;
+    }
+    .history-table th {
+      text-align: left;
+      padding: 8px;
+      color: var(--text-dim);
+      border-bottom: 1px solid var(--border-subtle);
+      text-transform: uppercase;
+      font-size: 10px !important;
+    }
+    .history-table td {
+      padding: 9px 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+      color: #cbd5e1;
+    }
+
+    /* Modal de Configurações */
+    .config-field-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+    .config-label {
+      font-size: 12px !important;
+      color: var(--text-muted);
+    }
+    .config-input {
+      height: 36px;
+      background: #171d2b;
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 0 12px;
+      color: #fff;
+      font-size: 13px !important;
+      outline: none;
+    }
+    .config-input:focus {
+      border-color: var(--bullex-green);
+    }
+    .config-save-btn {
+      height: 36px;
+      background: var(--bullex-green);
+      border: none;
+      border-radius: 6px;
+      color: #0b0e14;
+      font-size: 13px !important;
+      cursor: pointer;
+      margin-top: 8px;
     }
 
     /* Modal de Login */
@@ -441,18 +522,16 @@
     }
     .bx-login-card {
       width: 100%;
-      max-width: 400px;
+      max-width: 380px;
       background: #111622;
       border: 1px solid var(--border-subtle);
       border-radius: 8px;
-      padding: 28px 24px;
+      padding: 24px 22px;
       display: flex;
       flex-direction: column;
       gap: 16px;
-      box-shadow: 0 15px 35px rgba(0,0,0,0.6);
     }
-    .bx-input-field {
-      width: 100%;
+    .bx-login-card input {
       height: 38px;
       background: #171d2b;
       border: 1px solid var(--border-subtle);
@@ -462,10 +541,7 @@
       font-size: 13px !important;
       outline: none;
     }
-    .bx-input-field:focus {
-      border-color: var(--bullex-green);
-    }
-    .bx-submit-btn {
+    .bx-login-card button {
       height: 38px;
       background: var(--bullex-green);
       border: none;
@@ -479,30 +555,17 @@
 <body>
 
   <!-- =========================================================================
-       TOPBAR ESTILO BULLEX (SEM O ATIVO REPETIDO NO TOPO, MENU BEM ORGANIZADO)
+       TOPBAR BULLX: SEM LOGO, COM MENUS TRADER ROOM, HISTÓRICO, CONFIGURAÇÕES, SAIR
        ========================================================================= -->
   <header class="bullex-topbar">
     
-    <!-- Ícone BullEx (Touro Oficial) -->
-    <div class="bx-brand-icon" title="BullEx Trading Room">
-      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M4 18L9 13L13 16L20 8" stroke="#00c26f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M16 8H20V12" stroke="#00c26f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        <circle cx="5" cy="6" r="2" fill="#ffffff"/>
-      </svg>
-    </div>
-
-    <!-- Ícone Grid 4 Quadrados -->
-    <div class="bx-grid-btn" title="Visualização de Gráficos">
-      <svg viewBox="0 0 16 16" fill="currentColor">
-        <rect x="2" y="2" width="5" height="5" rx="1"/>
-        <rect x="9" y="2" width="5" height="5" rx="1"/>
-        <rect x="2" y="9" width="5" height="5" rx="1"/>
-        <rect x="9" y="9" width="5" height="5" rx="1"/>
-      </svg>
-    </div>
-
-    <div class="bx-terminal-title">BullEx Trading Terminal</div>
+    <!-- Menus de Navegação à Esquerda -->
+    <nav class="bx-nav-menu">
+      <button class="bx-nav-item active" id="menuRoomBtn" onclick="switchView('room')">Trader Room</button>
+      <button class="bx-nav-item" id="menuHistBtn" onclick="openHistoryModal()">Histórico</button>
+      <button class="bx-nav-item" id="menuCfgBtn" onclick="openConfigModal()">Configurações</button>
+      <button class="bx-nav-item" id="menuLogoutBtn" onclick="handleLogout()">Sair</button>
+    </nav>
 
     <!-- Lado Direito do Topbar Organizado -->
     <div class="bx-topbar-right">
@@ -512,13 +575,12 @@
         <span id="headerAiBtnText">LIGAR IA</span>
       </button>
 
-      <!-- Mão de Entrada Rápida -->
-      <div class="bx-header-stake">
-        <span>Mão: $</span>
-        <input type="number" id="headerStakeInput" value="5.0" step="1" min="1" onchange="saveConfigStake()">
-      </div>
+      <!-- BOTÃO ZERAR PLACAR (SEM APAGAR HISTÓRICOS) -->
+      <button class="bx-btn-reset-score" onclick="resetScoreboardOnly()" title="Zerar placar da sessão (o histórico de trades é mantido)">
+        Zerar Placar
+      </button>
 
-      <!-- PLACAR DE WIN E LOSS (NO LUGAR DE "DEPOSITAR") -->
+      <!-- PLACAR DE WIN E LOSS -->
       <div class="bx-scoreboard-pill" title="Placar de Operações da Sessão">
         <div class="sc-item-win">WIN <span id="scWins" class="med">0</span></div>
         <div class="sc-divider">|</div>
@@ -568,7 +630,7 @@
   </header>
 
   <!-- =========================================================================
-       CONTEÚDO PRINCIPAL: A MOEDA + PENSAMENTO REAL DA IA EM TEXTO COMUM
+       CONTEÚDO PRINCIPAL: A MOEDA + PENSAMENTO REAL DA IA EM TEXTO COMPACTO
        ========================================================================= -->
   <main class="bullex-main-content">
     
@@ -583,7 +645,7 @@
           <span class="hero-otc-badge" id="heroOtcBadge">otc</span>
         </div>
         <div>
-          <div style="font-size: 16px; color: #fff;" class="med" id="heroAssetName">USD/BRL OTC</div>
+          <div style="font-size: 15px; color: #fff;" class="med" id="heroAssetName">USD/BRL OTC</div>
           <div style="font-size: 11px; color: var(--text-dim);" id="heroPayoutBadge">Binária • Payout 87%</div>
         </div>
       </div>
@@ -591,17 +653,22 @@
       <div class="asset-info-center">
         <div>
           <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Preço:</span>
-          <span style="font-size: 14px; color: #fff; margin-left: 4px;" class="med" id="heroPriceVal">5.42150</span>
+          <span style="font-size: 13.5px; color: #fff; margin-left: 4px;" class="med" id="heroPriceVal">5.42150</span>
         </div>
-        <div style="height: 18px; width: 1px; background: var(--border-subtle);"></div>
+        <div style="height: 16px; width: 1px; background: var(--border-subtle);"></div>
         <div>
           <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Vela M1:</span>
-          <span style="font-size: 14px; color: var(--bullex-green); margin-left: 4px;" class="med" id="candleClockDigits">00:45</span>
+          <span style="font-size: 13.5px; color: var(--bullex-green); margin-left: 4px;" class="med" id="candleClockDigits">00:45</span>
         </div>
-        <div style="height: 18px; width: 1px; background: var(--border-subtle);"></div>
+        <div style="height: 16px; width: 1px; background: var(--border-subtle);"></div>
         <div>
           <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Confluência:</span>
-          <span style="font-size: 14px; color: var(--bullex-green); margin-left: 4px;" class="med" id="totalConfluenceScore">85%</span>
+          <span style="font-size: 13.5px; color: var(--bullex-green); margin-left: 4px;" class="med" id="totalConfluenceScore">85%</span>
+        </div>
+        <div style="height: 16px; width: 1px; background: var(--border-subtle);"></div>
+        <div>
+          <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Mão:</span>
+          <span style="font-size: 13.5px; color: #cbd5e1; margin-left: 4px;" class="med" id="activeStakeDisplay">$5.00</span>
         </div>
       </div>
 
@@ -611,52 +678,96 @@
 
     </section>
 
-    <!-- PENSAMENTO REAL DA IA (TEXTO COMUM NORMAL SEM FUNDO NEM CARDS) -->
+    <!-- PENSAMENTO REAL DA IA: TEXTO SEM ESPAÇAMENTO EXCESSIVO E SEM FUNDO -->
     <section class="ai-thought-section">
-      <div class="ai-thought-prose" id="thoughtText">Iniciando sistema de monitoramento... Clique em Ligar IA para começar o rastreamento dos ativos.</div>
+      <div class="ai-thought-prose" id="thoughtText">Aguardando inicialização do robô. Clique no botão Ligar IA para iniciar as análises.</div>
     </section>
 
   </main>
 
   <!-- =========================================================================
-       MODAL DE LOGIN (SE DESCONECTADO DA BULLEX)
+       MODAL DE HISTÓRICO
+       ========================================================================= -->
+  <div class="bx-modal-backdrop" id="modalHistory">
+    <div class="bx-modal-window">
+      <div class="bx-modal-header">
+        <span>Histórico de Operações</span>
+        <span class="bx-modal-close" onclick="closeModal('modalHistory')">✕</span>
+      </div>
+      <div class="bx-modal-body">
+        <table class="history-table">
+          <thead>
+            <tr>
+              <th>Data/Hora</th>
+              <th>Ativo</th>
+              <th>Direção</th>
+              <th>Entrada</th>
+              <th>Resultado</th>
+              <th>Lucro</th>
+            </tr>
+          </thead>
+          <tbody id="historyTableBody">
+            <tr><td colspan="6" style="text-align:center; color:var(--text-dim);">Nenhuma operação registrada na sessão.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- =========================================================================
+       MODAL DE CONFIGURAÇÕES
+       ========================================================================= -->
+  <div class="bx-modal-backdrop" id="modalConfig">
+    <div class="bx-modal-window" style="max-width: 440px;">
+      <div class="bx-modal-header">
+        <span>Configurações do Robô</span>
+        <span class="bx-modal-close" onclick="closeModal('modalConfig')">✕</span>
+      </div>
+      <div class="bx-modal-body">
+        <div class="config-field-group">
+          <label class="config-label">Mão de Entrada ($):</label>
+          <input type="number" id="cfgStake" class="config-input" value="5.0" step="1" min="1">
+        </div>
+        <div class="config-field-group">
+          <label class="config-label">Fator do Martingale (ex: 2.0x):</label>
+          <input type="number" id="cfgGaleFactor" class="config-input" value="2.0" step="0.1" min="1">
+        </div>
+        <div class="config-field-group">
+          <label class="config-label">Meta de Stop Win ($):</label>
+          <input type="number" id="cfgStopWin" class="config-input" value="100.0" step="10">
+        </div>
+        <div class="config-field-group">
+          <label class="config-label">Limite de Stop Loss ($):</label>
+          <input type="number" id="cfgStopLoss" class="config-input" value="200.0" step="10">
+        </div>
+        <button class="config-save-btn" onclick="saveFullConfig()">Salvar Configurações</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =========================================================================
+       MODAL DE LOGIN
        ========================================================================= -->
   <div class="bx-login-modal" id="loginModal">
     <div class="bx-login-card">
-      <div style="display:flex; align-items:center; gap:10px;">
-        <div class="bx-brand-icon">
-          <svg viewBox="0 0 24 24" fill="none">
-            <path d="M4 18L9 13L13 16L20 8" stroke="#00c26f" stroke-width="2" stroke-linecap="round"/>
-            <circle cx="5" cy="6" r="2" fill="#fff"/>
-          </svg>
-        </div>
-        <div>
-          <div style="font-size:16px; color:#fff;">Conectar à BullEx</div>
-          <div style="font-size:11px; color:var(--text-muted);">Insira suas credenciais de acesso</div>
-        </div>
+      <div style="font-size:15px; color:#fff;">Conectar à BullEx</div>
+      <input type="email" id="loginEmail" placeholder="Email BullEx">
+      <input type="password" id="loginPass" placeholder="Senha BullEx">
+      <div style="display:flex; gap:12px;">
+        <label style="font-size:12px; color:#cbd5e1; display:flex; align-items:center; gap:4px; cursor:pointer;">
+          <input type="radio" name="loginMode" value="DEMO" checked> Conta Prática (DEMO)
+        </label>
+        <label style="font-size:12px; color:#cbd5e1; display:flex; align-items:center; gap:4px; cursor:pointer;">
+          <input type="radio" name="loginMode" value="REAL"> Conta Real
+        </label>
       </div>
-
-      <div style="display:flex; flex-direction:column; gap:10px;">
-        <input type="email" id="loginEmail" class="bx-input-field" placeholder="Seu email BullEx">
-        <input type="password" id="loginPass" class="bx-input-field" placeholder="Sua senha BullEx">
-        
-        <div style="display:flex; gap:10px;">
-          <label style="font-size:12px; color:#cbd5e1; display:flex; align-items:center; gap:4px; cursor:pointer;">
-            <input type="radio" name="loginMode" value="DEMO" checked> Conta Prática (DEMO)
-          </label>
-          <label style="font-size:12px; color:#cbd5e1; display:flex; align-items:center; gap:4px; cursor:pointer;">
-            <input type="radio" name="loginMode" value="REAL"> Conta Real
-          </label>
-        </div>
-      </div>
-
-      <button class="bx-submit-btn" onclick="submitLogin()">Conectar Agora</button>
+      <button onclick="submitLogin()">Conectar</button>
       <div id="loginFeedback" style="font-size:12px; color:var(--bullex-red); text-align:center;"></div>
     </div>
   </div>
 
   <!-- =========================================================================
-       SCRIPTS JAVASCRIPT: PENSAMENTO REAL DA IA E TEMPO REAL
+       SCRIPTS JAVASCRIPT: LÓGICA EM TEMPO REAL E GERENCIAMENTO DOS MENUS
        ========================================================================= -->
   <script>
     const CURRENCY_FLAGS = {
@@ -683,7 +794,8 @@
       mode: 'DEMO',
       aiEnabled: false,
       lastAsset: '',
-      lastPrice: 0.0
+      lastPrice: 0.0,
+      stake: 5.0
     };
 
     function parseAssetVisuals(assetName) {
@@ -808,9 +920,9 @@
       };
     }
 
-    // PENSAMENTO REAL DA IA EM TEXTO COMUM NORMAL COM VALORES DE CONFLUÊNCIA
-    function gerarPensamentoRealIA(ativo, dt, med, clockStr, seg, sig) {
-      if (!ativo) return "Aguardando inicialização do robô. Clique no botão Ligar IA acima para iniciar as análises.";
+    // PENSAMENTO REAL DA IA: TEXTO SEM ESPAÇAMENTO EXCESSIVO E CONECTADO COM O MOTOR
+    function gerarPensamentoRealIA(ativo, dt, med, clockStr, seg, sig, observationBackend) {
+      if (!ativo) return "Aguardando inicialização do robô. Clique no botão Ligar IA para iniciar as análises.";
       
       const agora = new Date().toLocaleTimeString('pt-BR');
       const decisao = sig?.direction || med.direcao_sugerida;
@@ -819,54 +931,134 @@
       const rsi = (dt.rsi14 || 50).toFixed(1);
       const restam = 60 - seg;
 
-      let texto = `[${agora}] Estou analisando o ativo ${ativo} neste exato momento, cotado a ${preco}, durante o fechamento do candle M1 (${seg}s de 60s, restando ${restam}s para o nascimento da próxima vela).\n\n`;
+      let linha1 = `[${agora}] Analisando ${ativo} a ${preco} no candle M1 (${seg}s/60s, restam ${restam}s para abertura da próxima vela).`;
 
+      let linha2 = "";
       if (dt.ema9 > dt.ema21 && dt.ema21 > dt.ema50) {
-        texto += `Na minha leitura de tendência, os compradores estão no comando da estrutura: a EMA 9 (${(dt.ema9||0).toFixed(5)}) está trabalhando acima da EMA 21 (${(dt.ema21||0).toFixed(5)}) e da EMA 50 (${(dt.ema50||0).toFixed(5)}), com o preço sustentado acima da média macro MA Trend 200 (${(dt.ma_trend_200||0).toFixed(5)}). Essa confluência de médias pontua ${med.c1_trend}% favorável para compra.\n\n`;
+        linha2 = `Tendência de alta estrutural ativa: EMA9 (${(dt.ema9||0).toFixed(5)}) > EMA21 (${(dt.ema21||0).toFixed(5)}) > EMA50 (${(dt.ema50||0).toFixed(5)}) e acima da MA200 (${(dt.ma_trend_200||0).toFixed(5)}) (Confluência estrutural: ${med.c1_trend}%).`;
       } else if (dt.ema9 < dt.ema21 && dt.ema21 < dt.ema50) {
-        texto += `Na minha leitura de tendência, os vendedores estão no comando da estrutura: a EMA 9 (${(dt.ema9||0).toFixed(5)}) está trabalhando abaixo da EMA 21 (${(dt.ema21||0).toFixed(5)}) e da EMA 50 (${(dt.ema50||0).toFixed(5)}), com o preço pressionado abaixo da MA Trend 200 (${(dt.ma_trend_200||0).toFixed(5)}). Essa confluência de médias pontua ${med.c1_trend}% favorável para venda.\n\n`;
+        linha2 = `Tendência de baixa estrutural ativa: EMA9 (${(dt.ema9||0).toFixed(5)}) < EMA21 (${(dt.ema21||0).toFixed(5)}) < EMA50 (${(dt.ema50||0).toFixed(5)}) e abaixo da MA200 (${(dt.ma_trend_200||0).toFixed(5)}) (Confluência estrutural: ${med.c1_trend}%).`;
       } else {
-        texto += `Na minha leitura de tendência, o mercado se encontra em consolidação ou transição entre as médias móveis, pontuando ${med.c1_trend}% de confluência estrutural.\n\n`;
+        linha2 = `Estrutura em consolidação e médias compactadas (Confluência estrutural: ${med.c1_trend}%).`;
       }
 
-      texto += `Em relação ao momento e aos osciladores, o RSI 14 está marcando ${rsi}. `;
-      if (rsi >= 45 && rsi <= 72 && decisao === 'CALL') {
-        texto += `Essa faixa de oscilador confirma que o preço tem espaço livre para continuar subindo sem entrar em sobrecompra extrema, pontuando ${med.c2_momentum}% no critério de momentum.\n\n`;
-      } else if (rsi <= 55 && rsi >= 28 && decisao === 'PUT') {
-        texto += `Essa faixa de oscilador confirma que a pressão de venda tem espaço livre para continuar caindo sem entrar em sobrevenda extrema, pontuando ${med.c2_momentum}% no critério de momentum.\n\n`;
-      } else if (rsi > 75) {
-        texto += `O RSI está em zona de sobrecompra elevada, o que me faz segurar qualquer ordem de compra para evitar compras em topo esticado.\n\n`;
-      } else if (rsi < 25) {
-        texto += `O RSI está em zona de sobrevenda acentuada, o que me faz segurar qualquer ordem de venda para evitar vender no fundo.\n\n`;
-      } else {
-        texto += `O oscilador opera em faixa intermediária com ${med.c2_momentum}% de confluência.\n\n`;
-      }
+      let linha3 = `Momentum e Osciladores: RSI 14 em ${rsi} e RSI 7 em ${(dt.rsi7||50).toFixed(1)} com pontuação de ${med.c2_momentum}%. MACD linha em ${(dt.macd||0).toFixed(6)} com histograma em ${dt.macd_expanding_bull ? 'expansão compradora' : (dt.macd_expanding_bear ? 'expansão vendedora' : 'estabilidade')} (${(dt.macd_hist||0).toFixed(6)}) pontuando ${med.c3_macd}%.`;
 
-      if (dt.macd_expanding_bull) {
-        texto += `O indicador MACD está com o histograma expandindo para cima com valor de +${(dt.macd_hist||0).toFixed(6)}, o que confirma entrada de volume financeiro comprador institucional (pontuação de ${med.c3_macd}%).\n\n`;
-      } else if (dt.macd_expanding_bear) {
-        texto += `O indicador MACD está com o histograma expandindo para baixo com valor de ${(dt.macd_hist||0).toFixed(6)}, o que confirma aceleração do volume vendedor institucional (pontuação de ${med.c3_macd}%).\n\n`;
-      } else {
-        texto += `O MACD registra variação estável com pontuação de ${med.c3_macd}% no volume.\n\n`;
-      }
+      let linha4 = `Price Action e Zonas SMC: Formação ${dt.padrao_detectado || 'regular'}, fractais em ${dt.fractal_status || 'monitoramento'} com suporte em ${(dt.suporte_macro_60||0).toFixed(5)} e resistência em ${(dt.resistencia_macro_60||0).toFixed(5)} (pontuação: ${med.c4_fractal}%).`;
 
-      if (dt.fractal_status && !dt.fractal_status.includes('Neutro')) {
-        texto += `No comportamento do candle e zonas de preço, identifico ${dt.fractal_status}, com suporte macro em ${(dt.suporte_macro_60||0).toFixed(5)} e resistência macro em ${(dt.resistencia_macro_60||0).toFixed(5)} (pontuação de ${med.c4_fractal}%).\n\n`;
-      } else {
-        texto += `No comportamento do candle, observo formação de ${dt.padrao_detectado || 'fluxo regular'}, respeitando suporte em ${(dt.suporte_macro_60||0).toFixed(5)} e resistência em ${(dt.resistencia_macro_60||0).toFixed(5)} (pontuação de ${med.c4_fractal}%).\n\n`;
-      }
+      let linha5 = `Confluência geral calculada: ${conf}% (Meta de gatilho: 80%).`;
 
-      texto += `Confluência técnica total calculada: ${conf}%.\n`;
-
+      let linha6 = "";
       if (decisao === 'CALL' && conf >= 80) {
-        texto += `Decisão Operacional: Confluência compradora aprovada em ${conf}%. Estou posicionando a ordem de COMPRA (CALL) para entrar com precisão cirúrgica na virada do candle, no segundo 00s (faltando exatamente ${restam} segundos).`;
+        linha6 = `Decisão Operacional: COMPRA (CALL) confirmada com ${conf}% de confluência. Ordem programada para disparo no segundo 00s exato da virada de vela (em ${restam}s).`;
       } else if (decisao === 'PUT' && conf >= 80) {
-        texto += `Decisão Operacional: Confluência vendedora aprovada em ${conf}%. Estou posicionando a ordem de VENDA (PUT) para entrar com precisão cirúrgica na virada do candle, no segundo 00s (faltando exatamente ${restam} segundos).`;
+        linha6 = `Decisão Operacional: VENDA (PUT) confirmada com ${conf}% de confluência. Ordem programada para disparo no segundo 00s exato da virada de vela (em ${restam}s).`;
       } else {
-        texto += `Decisão Operacional: A confluência calculada está em ${conf}%, abaixo da meta exigida de 80%. Continuo processando os dados e aguardo o alinhamento completo antes de disparar qualquer ordem na conta.`;
+        linha6 = `Decisão Operacional: AGUARDAR. Confluência de ${conf}% abaixo do limiar de segurança de 80%. O robô segue monitorando segundo a segundo até a confluência plena.`;
       }
 
-      return texto;
+      let linhaObs = "";
+      if (observationBackend && !observationBackend.includes('Iniciando carregamento') && !observationBackend.includes('Inteligência Artificial desligada')) {
+        linhaObs = `\nLeitura Direta da IA: ${observationBackend.replace(/\[Gemini AI \d{2}:\d{2}:\d{2}\]/g, '').trim()}`;
+      }
+
+      return `${linha1}\n${linha2}\n${linha3}\n${linha4}\n${linha5}\n${linha6}${linhaObs}`;
+    }
+
+    // Gerenciamento de Menus e Modais
+    function switchView(viewName) {
+      document.querySelectorAll('.bx-nav-item').forEach(el => el.classList.remove('active'));
+      document.getElementById('menuRoomBtn').classList.add('active');
+    }
+
+    async function openHistoryModal() {
+      document.getElementById('modalHistory').classList.add('open');
+      try {
+        const res = await fetch('/api/history');
+        const d = await res.json();
+        const tbody = document.getElementById('historyTableBody');
+        const list = d.history || [];
+        if (list.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:var(--text-dim); padding:16px;">Nenhuma operação registrada.</td></tr>';
+          return;
+        }
+        let html = '';
+        list.forEach(item => {
+          const isWin = item.result === 'WIN';
+          const prof = parseFloat(item.profit || 0);
+          const colorClass = isWin ? 'txt-green' : 'txt-red';
+          const dirClass = item.direction === 'CALL' ? 'txt-green' : 'txt-red';
+          const hora = item.trade_time || (item.created_at ? new Date(item.created_at * 1000).toLocaleTimeString('pt-BR') : '--:--');
+          html += `<tr>
+            <td>${hora}</td>
+            <td>${item.asset}</td>
+            <td class="${dirClass} med">${item.direction}</td>
+            <td>$${parseFloat(item.stake || 0).toFixed(2)}</td>
+            <td class="${colorClass} med">${item.result}</td>
+            <td class="${colorClass} med">${prof >= 0 ? '+' : ''}$${prof.toFixed(2)}</td>
+          </tr>`;
+        });
+        tbody.innerHTML = html;
+      } catch (err) {
+        console.error("Erro ao carregar histórico:", err);
+      }
+    }
+
+    function openConfigModal() {
+      document.getElementById('cfgStake').value = appState.stake;
+      document.getElementById('modalConfig').classList.add('open');
+    }
+
+    function closeModal(modalId) {
+      document.getElementById(modalId).classList.remove('open');
+    }
+
+    async function saveFullConfig() {
+      const stake = parseFloat(document.getElementById('cfgStake').value) || 5.0;
+      const galeFactor = parseFloat(document.getElementById('cfgGaleFactor').value) || 2.0;
+      const stopWin = parseFloat(document.getElementById('cfgStopWin').value) || 100.0;
+      const stopLoss = parseFloat(document.getElementById('cfgStopLoss').value) || 200.0;
+
+      try {
+        await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            stake: stake,
+            gale_factor: galeFactor,
+            stop_win: stopWin,
+            stop_loss: stopLoss
+          })
+        });
+        appState.stake = stake;
+        document.getElementById('activeStakeDisplay').textContent = `$${stake.toFixed(2)}`;
+        closeModal('modalConfig');
+      } catch (err) {
+        console.error("Erro ao salvar config:", err);
+      }
+    }
+
+    // ZERAR PLACAR SEM APAGAR HISTÓRICOS
+    async function resetScoreboardOnly() {
+      if (!confirm("Deseja zerar o placar da sessão (WIN / LOSS)? O histórico de operações NÃO será apagado.")) {
+        return;
+      }
+      try {
+        await fetch('/api/reset_score', { method: 'POST' });
+        fetchStatus();
+      } catch (err) {
+        console.error("Erro ao zerar placar:", err);
+      }
+    }
+
+    async function handleLogout() {
+      if (!confirm("Deseja realmente sair da conta BullEx?")) return;
+      try {
+        await fetch('/api/logout', { method: 'POST' });
+        location.reload();
+      } catch (err) {
+        location.reload();
+      }
     }
 
     function toggleAccountMenu() {
@@ -906,19 +1098,6 @@
         fetchStatus();
       } catch (err) {
         console.error("Erro ao alternar IA:", err);
-      }
-    }
-
-    async function saveConfigStake() {
-      const val = parseFloat(document.getElementById('headerStakeInput').value) || 5.0;
-      try {
-        await fetch('/api/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ stake: val })
-        });
-      } catch (err) {
-        console.error("Erro ao salvar stake:", err);
       }
     }
 
@@ -1004,9 +1183,10 @@
           btnHeaderAiText.textContent = 'LIGAR IA';
         }
 
-        // Stake
-        if (document.activeElement !== document.getElementById('headerStakeInput') && d.config?.stake) {
-          document.getElementById('headerStakeInput').value = d.config.stake;
+        // Stake Configurado
+        if (d.config?.stake) {
+          appState.stake = d.config.stake;
+          document.getElementById('activeStakeDisplay').textContent = `$${d.config.stake.toFixed(2)}`;
         }
 
         // A Moeda Analisada
@@ -1049,8 +1229,8 @@
           trigBadge.textContent = `AGUARDANDO CONFLUÊNCIA (${seg}s/60s)`;
         }
 
-        // O Pensamento Real da IA como Texto Comum Normal com Confluência em Valores
-        const textoPensamento = gerarPensamentoRealIA(activeAsset, dt, med, clockStr, seg, sig);
+        // Pensamento Real da IA Sem Espaçamento Excessivo
+        const textoPensamento = gerarPensamentoRealIA(activeAsset, dt, med, clockStr, seg, sig, d.observation);
         document.getElementById('thoughtText').textContent = textoPensamento;
 
       } catch (e) {
