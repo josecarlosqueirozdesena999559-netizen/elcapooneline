@@ -204,7 +204,7 @@ def rotacionar_proxima_chave(motivo: str = "") -> Optional[str]:
             state.gemini_key = item["key"]
             cred_total = sum(k["credits"] for k in API_KEY_POOL if not k["exhausted"])
             state.gemini_status = f"Ativo ({item['label']})"
-            state.current_observation = f"[Gemini AI] 🔄 {antiga} esgotada ({motivo})! Alternando automaticamente para {item['label']} ({item['credits']} cr). Pool total: {cred_total} cr."
+            state.current_observation = f"[Gemini AI] {antiga} esgotada ({motivo}). Alternando automaticamente para {item['label']} ({item['credits']} cr). Pool total: {cred_total} cr."
             print(f"\n[KEY POOL ROTATION] {antiga} esgotada ({motivo}). Nova chave ativa: {item['label']} com {item['credits']} créditos (Total Pool: {cred_total})", flush=True)
             return item["key"]
 
@@ -1745,46 +1745,66 @@ def restaurar_cache_candles_inicial():
 
 restaurar_cache_candles_inicial()
 
-async def aquecer_candles_todos_ativos():
-    """Ao ligar a IA, puxa os 60 candles atuais de TODOS os ativos OTC e salva no computador com progresso visível."""
+async def aquecer_candles_em_background(ativo_prioritario: str = ""):
+    """Carrega os 60 candles dos demais ativos OTC em segundo plano sem bloquear a análise do ativo atual."""
     pool_otc = obter_pool_otc_binarios()
     total = len(pool_otc)
-    state.candles_cache = {}
-    state.warmup_progress = {"active": True, "loaded": 0, "total": total, "asset": "", "percent": 0}
-    print(f"\n[AQUECIMENTO GLOBAL] Carregando 60 candles de todos os {total} ativos OTC...", flush=True)
+    state.warmup_progress = {"active": True, "loaded": len(state.candles_cache), "total": total, "asset": "", "percent": int((len(state.candles_cache)/total)*100) if total else 0}
+    print(f"\n[AQUECIMENTO DE BACKGROUND] Carregando 60 candles para {total} ativos OTC...", flush=True)
 
     for idx, ativo in enumerate(pool_otc, start=1):
         if not state.ai_enabled or state.is_paused:
             state.warmup_progress["active"] = False
             return
+        if ativo == ativo_prioritario and ativo in state.candles_cache and len(state.candles_cache[ativo]) >= 20:
+            continue
         pct = int((idx / total) * 100) if total > 0 else 100
         state.warmup_progress = {"active": True, "loaded": idx, "total": total, "asset": ativo, "percent": pct}
-        state.current_observation = f"🔄 Carregando histórico de 60 candles: {ativo} ({idx}/{total} — {pct}%)"
 
         if state.api and state.is_connected:
             try:
                 candles = await asyncio.wait_for(
                     asyncio.to_thread(state.api.get_candles, ativo, 60, 60, int(time.time())),
-                    timeout=4.0
+                    timeout=3.5
                 )
                 if candles and len(candles) >= 20:
                     state.candles_cache[ativo] = candles[-60:]
             except Exception as ex:
-                print(f"[AQUECIMENTO ERR] {ativo}: {ex}", flush=True)
+                pass
 
     try:
         with open(CANDLES_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(state.candles_cache, f)
-    except Exception as ex:
-        print(f"[CACHE SAVE ERR] {ex}", flush=True)
+    except Exception:
+        pass
 
     state.warmup_done = True
     state.warmup_progress = {"active": False, "loaded": len(state.candles_cache), "total": total, "asset": "", "percent": 100}
-    state.current_observation = f"✅ Histórico de 60 candles carregado para {len(state.candles_cache)}/{total} ativos! Iniciando análises com Gemini AI..."
-    print(f"[AQUECIMENTO CONCLUÍDO] {len(state.candles_cache)}/{total} ativos salvos em {CANDLES_CACHE_FILE}", flush=True)
+    print(f"[AQUECIMENTO CONCLUÍDO] {len(state.candles_cache)}/{total} ativos em cache.", flush=True)
+
+async def carregar_60_candles_ativo_imediato(ativo: str):
+    """Puxa imediatamente os 60 candles M1 do ativo alvo na BullEx ao ligar a IA e já calcula os indicadores."""
+    if not (state.api and state.is_connected):
+        return
+    try:
+        agora_ts = int(time.time())
+        print(f"\n[60 CANDLES IMEDIATO] Puxando 60 candles M1 de {ativo} da BullEx...", flush=True)
+        candles = await asyncio.wait_for(
+            asyncio.to_thread(state.api.get_candles, ativo, 60, 60, agora_ts),
+            timeout=5.0
+        )
+        if candles and len(candles) >= 20:
+            state.candles_cache[ativo] = candles[-60:]
+            dados_60 = calcular_indicadores_60(candles[-60:])
+            if dados_60:
+                state.last_candle_data = dados_60
+                state.active_asset = ativo
+                print(f"[60 CANDLES OK] {ativo}: Preço={dados_60.get('ultimo_preco')} | RSI={dados_60.get('rsi14')} | MACD={dados_60.get('macd')}", flush=True)
+    except Exception as ex:
+        print(f"[60 CANDLES ERR] {ativo}: {ex}", flush=True)
 
 async def varrer_60_candles_ativos():
-    """Varre TODOS os ativos binários OTC da corretora sem repetir até operar em todos"""
+    """Varre os ativos binários OTC da corretora sem repetir até operar em todos"""
     if not state.ai_enabled or state.is_trading or state.is_scanning:
         return
     if state.current_gale_step > 0:
@@ -1800,10 +1820,14 @@ async def varrer_60_candles_ativos():
 
     state.is_scanning = True
     try:
-        if not state.warmup_done:
-            await aquecer_candles_todos_ativos()
-            if not state.ai_enabled or state.is_paused:
-                return
+        # Garante que o ativo ativo tenha 60 candles
+        ativo_prioritario = state.active_asset or "EURUSD-OTC"
+        if ativo_prioritario not in state.candles_cache or len(state.candles_cache.get(ativo_prioritario, [])) < 20:
+            await carregar_60_candles_ativo_imediato(ativo_prioritario)
+
+        # Se ainda não iniciou o background warmup dos outros ativos, dispara em segundo plano sem bloquear
+        if not state.warmup_done and not state.warmup_progress.get("active"):
+            asyncio.create_task(aquecer_candles_em_background(ativo_prioritario))
         agora_ts = int(time.time())
         agora_str = datetime.now().strftime("%H:%M:%S")
         segundo_vela = agora_ts % 60
@@ -2037,7 +2061,7 @@ async def loop_candle_tempo_real():
                     )
                 except Exception:
                     pass
-            if not ativo or state.warmup_progress.get("active"):
+            if not ativo:
                 continue
             agora_ts = int(time.time())
             novos = await asyncio.wait_for(
@@ -2425,21 +2449,19 @@ async def api_toggle_ai():
             return {"ai_enabled": False, "success": False, "message": msg_saldo}
     state.ai_enabled = not state.ai_enabled
     if state.ai_enabled:
-        # Ao ligar a IA: limpa sinais antigos e força recarga dos 60 candles de TODOS os ativos
+        # Ao ligar a IA: carrega imediatamente os 60 candles do ativo ativo na corretora
         state.active_signal = None
-        state.last_candle_data = {}
-        state.warmup_done = False
-        state.warmup_progress = {"active": True, "loaded": 0, "total": len(obter_pool_otc_binarios()), "asset": "", "percent": 0}
-        state.current_observation = "🔄 Iniciando carregamento dos 60 candles atuais de todos os ativos OTC..."
-        print("\n[IA LIGADA PELO USUÁRIO] Carregando 60 candles atuais de todos os ativos OTC...", flush=True)
+        ativo_alvo = state.active_asset or "EURUSD-OTC"
+        state.active_asset = ativo_alvo
+        state.current_observation = f"Carregando os 60 candles M1 de {ativo_alvo} na BullEx para iniciar a auditoria institucional..."
+        print(f"\n[IA LIGADA] Ativando robô e puxando 60 candles de {ativo_alvo}...", flush=True)
         asyncio.create_task(varrer_60_candles_ativos())
     else:
-        # Ao desligar a IA: limpa sinal ativo e reseta warmup para recarregar ao ligar novamente
+        # Ao desligar a IA: limpa sinal ativo e pausa varredura
         state.active_signal = None
-        state.warmup_done = False
         state.warmup_progress = {"active": False, "loaded": 0, "total": 0, "asset": "", "percent": 0}
-        state.current_observation = "Inteligência Artificial desligada. Clique no botão 'Ligar IA' para aquecer os ativos com os últimos 60 candles e iniciar."
-        print("\n[IA DESLIGADA PELO USUÁRIO] Operações e varredura pausadas.", flush=True)
+        state.current_observation = "Inteligência Artificial desligada. Clique no botão Ligar IA para carregar os 60 candles e iniciar a auditoria em tempo real."
+        print("\n[IA DESLIGADA] Operações e varredura pausadas.", flush=True)
     return {"ai_enabled": state.ai_enabled}
 
 @app.post("/api/toggle_pause")

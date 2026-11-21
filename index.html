@@ -1581,56 +1581,65 @@
       };
     }
 
-    // FORMATAÇÃO DO PENSAMENTO REAL DA IA COM VALORES REAIS, FLUXO NATURAL E SEM ROBÓTICA
-    function gerarPensamentoRealIA(ativo, dt, med, clockStr, seg, sig, observationBackend) {
-      if (!ativo) return "Aguardando inicialização do robô. Clique no botão Ligar IA para iniciar as análises quantitativas.";
+    // FORMATAÇÃO DO PENSAMENTO REAL DA IA COM VALORES 100% REAIS, FLUXO LIMPO E SEM ROBÓTICA
+    function gerarPensamentoRealIA(ativo, dt, med, clockStr, seg, sig, observationBackend, aiEnabled) {
+      if (!aiEnabled) {
+        return "Inteligência Artificial desligada. Clique no botão Ligar IA para carregar os 60 candles e iniciar a auditoria institucional em tempo real.";
+      }
+      if (!dt || !dt.ultimo_preco || dt.ultimo_preco <= 0) {
+        return `Conectando à BullEx e carregando os últimos 60 candles M1 de ${ativo || 'EURUSD-OTC'}...`;
+      }
       
       const agora = new Date().toLocaleTimeString('pt-BR');
       const decisao = sig?.direction || med.direcao_sugerida;
       const conf = sig?.confluence || med.confluencia_total;
-      const preco = (dt.ultimo_preco && dt.ultimo_preco > 0) ? dt.ultimo_preco.toFixed(5) : "1.08450";
-      const rsi14 = (dt.rsi14 && dt.rsi14 > 0) ? dt.rsi14.toFixed(1) : "52.4";
-      const rsi7 = (dt.rsi7 && dt.rsi7 > 0) ? dt.rsi7.toFixed(1) : "54.8";
-      const restam = 60 - seg;
+      const preco = dt.ultimo_preco.toFixed(5);
+      const rsi14 = (dt.rsi14 !== undefined && dt.rsi14 !== null) ? Number(dt.rsi14).toFixed(1) : "50.0";
+      const rsi7 = (dt.rsi7 !== undefined && dt.rsi7 !== null) ? Number(dt.rsi7).toFixed(1) : "50.0";
+      const restam = Math.max(0, 60 - seg);
       const nomeAtivo = formatarAtivoNome(ativo);
 
-      // Parágrafo 1: Contexto e Estrutura de Médias
+      // Leitura da Estrutura de Médias e Tendência
       let estruturaProsa = "";
       if (dt.ema9 && dt.ema21 && dt.ema9 > dt.ema21) {
-        estruturaProsa = `A estrutura técnica aponta tendência altista, com EMA 9 (${(dt.ema9).toFixed(5)}) operando acima da EMA 21 (${(dt.ema21).toFixed(5)}) e EMA 50 (${(dt.ema50||0).toFixed(5)}) alinhadas favoravelmente (confluência de tendência em ${med.c1_trend}%).`;
+        estruturaProsa = `A estrutura técnica aponta tendência altista, com EMA 9 (${Number(dt.ema9).toFixed(5)}) operando acima da EMA 21 (${Number(dt.ema21).toFixed(5)}) e EMA 50 (${Number(dt.ema50||0).toFixed(5)}) alinhadas favoravelmente (confluência de tendência em ${med.c1_trend}%).`;
       } else if (dt.ema9 && dt.ema21 && dt.ema9 < dt.ema21) {
-        estruturaProsa = `A estrutura técnica aponta pressão vendedora, com EMA 9 (${(dt.ema9).toFixed(5)}) operando abaixo da EMA 21 (${(dt.ema21).toFixed(5)}) e EMA 50 (${(dt.ema50||0).toFixed(5)}) apontadas para baixo (confluência de tendência em ${med.c1_trend}%).`;
+        estruturaProsa = `A estrutura técnica aponta pressão vendedora, com EMA 9 (${Number(dt.ema9).toFixed(5)}) operando abaixo da EMA 21 (${Number(dt.ema21).toFixed(5)}) e EMA 50 (${Number(dt.ema50||0).toFixed(5)}) apontadas para baixo (confluência de tendência em ${med.c1_trend}%).`;
       } else {
-        estruturaProsa = `As médias móveis exponenciais encontram-se compactadas e em consolidação lateral, indicando fase de acumulação de ordens institucionais (confluência de tendência em ${med.c1_trend}%).`;
+        estruturaProsa = `As médias móveis exponenciais encontram-se compactadas e em consolidação lateral (confluência de tendência em ${med.c1_trend}%).`;
       }
       let p1 = `[${agora}] Analisando ${nomeAtivo} cotado a ${preco} no candle M1 (${seg}s de 60s, restando ${restam}s para a conclusão da vela). ${estruturaProsa}`;
 
-      // Parágrafo 2: Momentum e Osciladores
+      // Leitura de Momentum e Osciladores
       let macdStatus = dt.macd_expanding_bull ? 'expansão compradora' : (dt.macd_expanding_bear ? 'expansão vendedora' : 'estabilidade neutra');
-      let p2 = `Na leitura de momentum, o oscilador RSI 14 marca ${rsi14} com RSI 7 rápido em ${rsi7}, apontando ${rsi14 > 55 ? 'pressão compradora ativa' : (rsi14 < 45 ? 'pressão vendedora ativa' : 'equilíbrio de fluxo')}. O MACD (12, 26, 9) apresenta linha em ${(dt.macd||0).toFixed(6)} com histograma em ${(dt.macd_hist||0).toFixed(6)} em ${macdStatus}, totalizando ${med.c2_momentum}% de confluência nos osciladores.`;
+      let p2 = `Na leitura de momentum, o oscilador RSI 14 marca ${rsi14} com RSI 7 rápido em ${rsi7}, apontando ${Number(rsi14) > 55 ? 'pressão compradora ativa' : (Number(rsi14) < 45 ? 'pressão vendedora ativa' : 'equilíbrio de fluxo')}. O MACD (12, 26, 9) apresenta linha em ${Number(dt.macd||0).toFixed(6)} com histograma em ${Number(dt.macd_hist||0).toFixed(6)} em ${macdStatus}, totalizando ${med.c2_momentum}% de confluência nos osciladores.`;
 
-      // Parágrafo 3: SMC, Zonas e Price Action
-      let supStr = (dt.suporte_macro_60 && dt.suporte_macro_60 > 0) ? dt.suporte_macro_60.toFixed(5) : (dt.ultimo_preco ? (dt.ultimo_preco * 0.9995).toFixed(5) : "1.08400");
-      let resStr = (dt.resistencia_macro_60 && dt.resistencia_macro_60 > 0) ? dt.resistencia_macro_60.toFixed(5) : (dt.ultimo_preco ? (dt.ultimo_preco * 1.0005).toFixed(5) : "1.08500");
-      let p3 = `No Price Action institucional e zonas Smart Money, observa-se formação ${dt.padrao_detectado || 'regular de continuação'}, com mapeamento de liquidez e suporte macro em ${supStr} e resistência em ${resStr}, conferindo ${med.c4_fractal}% de confluência técnica de posicionamento.`;
+      // Smart Money Concepts e Zonas Macro das 60 Velas
+      let supStr = (dt.suporte_macro_60 && dt.suporte_macro_60 > 0) ? Number(dt.suporte_macro_60).toFixed(5) : "--";
+      let resStr = (dt.resistencia_macro_60 && dt.resistencia_macro_60 > 0) ? Number(dt.resistencia_macro_60).toFixed(5) : "--";
+      let p3 = `No Price Action institucional e zonas Smart Money, observa-se formação ${dt.padrao_detectado || 'regular de continuação'}, com mapeamento de liquidez e suporte macro das 60 velas em ${supStr} e resistência em ${resStr}, conferindo ${med.c4_fractal}% de confluência técnica de posicionamento.`;
 
-      // Parágrafo 4: Confluência Ponderada e Decisão
+      // Confluência Global e Decisão Técnica
       let p4 = "";
       if (decisao === 'CALL' && conf >= 80) {
-        p4 = `Confluência técnica total atingiu ${conf}% (meta mínima de 80%). Decisão: DISPARO DE COMPRA (CALL) autorizado. O gatilho de entrada com a mão de $${appState.stake.toFixed(2)} será executado automaticamente no segundo 00s da virada de vela (em ${restam}s).`;
+        p4 = `Confluência técnica total calculada em ${conf}% (meta de 80%). Decisão: DISPARO DE COMPRA (CALL) autorizado. O gatilho de entrada com a mão de $${appState.stake.toFixed(2)} será executado automaticamente no segundo 00s da virada de vela (em ${restam}s).`;
       } else if (decisao === 'PUT' && conf >= 80) {
-        p4 = `Confluência técnica total atingiu ${conf}% (meta mínima de 80%). Decisão: DISPARO DE VENDA (PUT) autorizado. O gatilho de entrada com a mão de $${appState.stake.toFixed(2)} será executado automaticamente no segundo 00s da virada de vela (em ${restam}s).`;
+        p4 = `Confluência técnica total calculada em ${conf}% (meta de 80%). Decisão: DISPARO DE VENDA (PUT) autorizado. O gatilho de entrada com a mão de $${appState.stake.toFixed(2)} será executado automaticamente no segundo 00s da virada de vela (em ${restam}s).`;
       } else {
         p4 = `Confluência técnica global calculada em ${conf}% (abaixo do limiar de segurança de 80%). Decisão: AGUARDAR. O robô segue monitorando o fluxo segundo a segundo até a confluência plena dos indicadores institucionais.`;
       }
 
-      // Parágrafo 5: Gemini AI
+      // Parecer do Gemini AI vindo do backend
       let pObs = "";
       if (observationBackend && !observationBackend.includes('Iniciando carregamento') && !observationBackend.includes('Inteligência Artificial desligada')) {
-        pObs = `\nAuditoria Gemini AI: ${observationBackend.replace(/\[Gemini AI \d{2}:\d{2}:\d{2}\]/g, '').trim()}`;
+        let cleanObs = observationBackend.replace(/\[(ANALISE INSTITUCIONAL|Gemini AI) \d{2}:\d{2}:\d{2}\]/g, '').trim();
+        if (cleanObs) {
+          pObs = `\nParecer Gemini AI: ${cleanObs}`;
+        }
       }
 
-      return `${p1}\n\n${p2}\n\n${p3}\n\n${p4}${pObs}`;
+      // Texto contínuo sem espaçamento excessivo
+      return `${p1}\n${p2}\n${p3}\n${p4}${pObs}`;
     }
 
     function switchView(viewName) {
@@ -1989,14 +1998,20 @@
 
         // Preço
         const dt = d.last_candle_data || {};
-        const priceVal = (dt.ultimo_preco && dt.ultimo_preco > 0) ? dt.ultimo_preco : 1.08450;
         const priceElem = document.getElementById('heroPriceVal');
-        priceElem.textContent = priceVal.toFixed(5);
-        if (appState.lastPrice && priceVal !== appState.lastPrice) {
-          priceElem.style.color = priceVal > appState.lastPrice ? 'var(--bullex-green)' : 'var(--bullex-red)';
-          setTimeout(() => { priceElem.style.color = '#fff'; }, 300);
+        if (dt.ultimo_preco && dt.ultimo_preco > 0) {
+          const priceVal = dt.ultimo_preco;
+          priceElem.textContent = priceVal.toFixed(5);
+          if (appState.lastPrice && priceVal !== appState.lastPrice) {
+            priceElem.style.color = priceVal > appState.lastPrice ? 'var(--bullex-green)' : 'var(--bullex-red)';
+            setTimeout(() => { priceElem.style.color = '#fff'; }, 300);
+          }
+          appState.lastPrice = priceVal;
+        } else if (appState.lastPrice) {
+          priceElem.textContent = appState.lastPrice.toFixed(5);
+        } else {
+          priceElem.textContent = '--';
         }
-        appState.lastPrice = priceVal;
 
         // Relógio M1
         const clockStr = d.candle_clock || '00:00';
@@ -2006,21 +2021,27 @@
         // Medidores e Confluência
         const med = calcularMedidoresPrompt(dt);
         const finalConf = d.active_signal?.confluence || med.confluencia_total;
-        document.getElementById('totalConfluenceScore').textContent = `${finalConf}%`;
-
+        const totalConfElem = document.getElementById('totalConfluenceScore');
         const trigBadge = document.getElementById('triggerBadge');
         const sig = d.active_signal;
-        const decFinal = sig?.direction || med.direcao_sugerida;
 
-        if (decFinal === 'CALL') {
-          trigBadge.className = 'trigger-badge-status call';
-          trigBadge.textContent = `CALL (COMPRA) • 00s (${60 - seg}s)`;
-        } else if (decFinal === 'PUT') {
-          trigBadge.className = 'trigger-badge-status put';
-          trigBadge.textContent = `PUT (VENDA) • 00s (${60 - seg}s)`;
-        } else {
+        if (!d.ai_enabled) {
+          totalConfElem.textContent = '--';
           trigBadge.className = 'trigger-badge-status';
-          trigBadge.textContent = `AGUARDANDO CONFLUÊNCIA (${seg}s/60s)`;
+          trigBadge.textContent = 'IA DESLIGADA';
+        } else {
+          totalConfElem.textContent = `${finalConf}%`;
+          const decFinal = sig?.direction || med.direcao_sugerida;
+          if (decFinal === 'CALL' && finalConf >= 78) {
+            trigBadge.className = 'trigger-badge-status call';
+            trigBadge.textContent = `CALL (COMPRA) • 00s (${Math.max(0, 60 - seg)}s)`;
+          } else if (decFinal === 'PUT' && finalConf >= 78) {
+            trigBadge.className = 'trigger-badge-status put';
+            trigBadge.textContent = `PUT (VENDA) • 00s (${Math.max(0, 60 - seg)}s)`;
+          } else {
+            trigBadge.className = 'trigger-badge-status';
+            trigBadge.textContent = `AGUARDANDO CONFLUÊNCIA (${seg}s/60s)`;
+          }
         }
 
         // ALTERNÂNCIA: TELA DE OPERAÇÃO ATIVA VS TELA DE ANÁLISE
@@ -2120,7 +2141,7 @@
           viewAnalysis.style.display = 'flex';
 
           // Pensamento Real da IA Formatado e Sem Zeros
-          const textoPensamento = gerarPensamentoRealIA(activeAsset, dt, med, clockStr, seg, sig, d.observation);
+          const textoPensamento = gerarPensamentoRealIA(activeAsset, dt, med, clockStr, seg, sig, d.observation, d.ai_enabled);
           document.getElementById('thoughtText').textContent = textoPensamento;
         }
 
