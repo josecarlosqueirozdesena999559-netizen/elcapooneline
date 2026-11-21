@@ -1729,6 +1729,22 @@ def analisar_quant_smc(ativo: str, dados: Dict[str, Any]) -> Dict[str, Any]:
 # ========================================================
 CANDLES_CACHE_FILE = os.path.join(os.path.dirname(__file__), "candles_cache.json")
 
+def restaurar_cache_candles_inicial():
+    if os.path.exists(CANDLES_CACHE_FILE):
+        try:
+            with open(CANDLES_CACHE_FILE, "r", encoding="utf-8") as f:
+                state.candles_cache = json.load(f)
+                ativo_padrao = state.active_asset or "EURUSD-OTC"
+                if ativo_padrao in state.candles_cache:
+                    c_init = state.candles_cache[ativo_padrao]
+                    if len(c_init) >= 20:
+                        state.last_candle_data = calcular_indicadores_60(c_init)
+            print(f"[CACHE RESTORE] {len(state.candles_cache)} ativos restaurados do cache no startup.", flush=True)
+        except Exception as ex:
+            print(f"[CACHE RESTORE ERR] {ex}", flush=True)
+
+restaurar_cache_candles_inicial()
+
 async def aquecer_candles_todos_ativos():
     """Ao ligar a IA, puxa os 60 candles atuais de TODOS os ativos OTC e salva no computador com progresso visível."""
     pool_otc = obter_pool_otc_binarios()
@@ -2337,6 +2353,11 @@ async def api_status():
             f"[ANALISE INSTITUCIONAL {agora_hms}]",
             state.current_observation,
         )
+    if (not state.last_candle_data or state.last_candle_data.get("ultimo_preco") == 0) and state.candles_cache:
+        ativo_now = state.active_asset or "EURUSD-OTC"
+        c_list = state.candles_cache.get(ativo_now, [])
+        if len(c_list) >= 20:
+            state.last_candle_data = calcular_indicadores_60(c_list)
     bal = state.balance_demo if state.mode == "DEMO" else state.balance_real
     return {
         "connected": bool(state.is_connected and state.api is not None),
