@@ -503,6 +503,51 @@
       color: var(--bullex-red);
     }
 
+    /* BARRA DE PROGRESSO DE CARREGAMENTO DOS 60 CANDLES */
+    .warmup-loading-bar {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 16px 20px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .wlb-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .wlb-title {
+      font-size: 13.5px;
+      color: #fff;
+      font-weight: 400;
+    }
+    .wlb-pct {
+      font-size: 14px;
+      color: var(--bullex-green);
+      font-weight: 500;
+    }
+    .wlb-progress-track {
+      width: 100%;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .wlb-progress-bar {
+      height: 100%;
+      background: var(--bullex-green);
+      border-radius: 4px;
+      transition: width 0.3s ease;
+    }
+    .wlb-asset-detail {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
     /* PENSAMENTO REAL DA IA: TEXTO LIMPO SEM FUNDO OU CARDS */
     .ai-thought-section {
       width: 100%;
@@ -1222,8 +1267,23 @@
       
       <!-- VISÃO 1: ANÁLISE QUANTITATIVA EM TEMPO REAL (QUANDO NÃO ESTÁ EM OPERAÇÃO) -->
       <div id="viewAnalysis" style="display: flex; flex-direction: column; gap: 16px; width: 100%;">
-        <!-- BARRA DE TELEMETRIA DO ATIVO EM ANÁLISE -->
-        <section class="active-asset-bar">
+
+        <!-- BARRA/CARD DE CARREGAMENTO DOS 60 CANDLES (ENQUANTO CARREGA TODOS OS ATIVOS) -->
+        <section class="warmup-loading-bar" id="warmupLoadingBar" style="display: none;">
+          <div class="wlb-header">
+            <span class="wlb-title" id="wlbTitle">Carregando Histórico de 60 Candles</span>
+            <span class="wlb-pct med" id="wlbPct">0%</span>
+          </div>
+          <div class="wlb-progress-track">
+            <div class="wlb-progress-bar" id="wlbProgressBar" style="width: 0%;"></div>
+          </div>
+          <div class="wlb-footer">
+            <span class="wlb-asset-detail" id="wlbAssetDetail">Puxando velas M1 de todos os ativos OTC da BullEx...</span>
+          </div>
+        </section>
+
+        <!-- BARRA DE TELEMETRIA DO ATIVO EM ANÁLISE (SÓ APARECE QUANDO JÁ TIVER O ATIVO QUE VAI ANALISAR) -->
+        <section class="active-asset-bar" id="activeAssetBar" style="display: none;">
           <div class="asset-info-center" style="margin-left: 0;">
             <div>
               <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Preço:</span>
@@ -2013,7 +2073,15 @@
 
         // A Moeda Analisada
         const activeAsset = d.active_asset || 'EURUSD-OTC';
-        renderActiveAsset(activeAsset, d.last_candle_data?.payout || 87);
+        const tabEl = document.getElementById('bxActiveTab');
+        const wp = d.warmup_progress || {};
+        if (!d.ai_enabled || !d.warmup_done) {
+          if (tabEl) tabEl.style.opacity = '0.4';
+          renderActiveAsset(wp.asset || activeAsset, 87);
+        } else {
+          if (tabEl) tabEl.style.opacity = '1';
+          renderActiveAsset(activeAsset, d.last_candle_data?.payout || 87);
+        }
 
         // Preço, Relógio e Confluência
         const dt = d.last_candle_data || {};
@@ -2027,23 +2095,32 @@
         const clockStr = d.candle_clock || '00:00';
         const seg = dt.segundo_da_vela ?? (60 - parseInt(clockStr.replace('00:', '')));
 
+        const assetBar = document.getElementById('activeAssetBar');
+        const warmupBar = document.getElementById('warmupLoadingBar');
+
         if (!d.ai_enabled) {
-          // IA DESLIGADA: Não mostra preço nem relógio de vela correndo
+          // IA DESLIGADA: oculta a barra do ativo e o warmup
+          if (assetBar) assetBar.style.display = 'none';
+          if (warmupBar) warmupBar.style.display = 'none';
           priceElem.textContent = '--';
           clockDigitsElem.textContent = '--:--';
           totalConfElem.textContent = '--';
           trigBadge.className = 'trigger-badge-status';
           trigBadge.textContent = 'IA DESLIGADA';
         } else if (!d.warmup_done) {
-          // CARREGANDO 60 CANDLES DE TODOS OS ATIVOS
-          const wp = d.warmup_progress || {};
-          priceElem.textContent = '--';
-          clockDigitsElem.textContent = '--:--';
-          totalConfElem.textContent = '--';
-          trigBadge.className = 'trigger-badge-status';
-          trigBadge.textContent = `CARREGANDO 60 CANDLES (${wp.percent || 0}%)`;
+          // ENQUANTO CARREGA OS 60 CANDLES: FICA SÓ O CARREGAMENTO DOS CANDLES!
+          // NÃO APARECE PREÇO, VELA M1, CONFLUÊNCIA NEM MÃO ENQUANTO NÃO TIVER O ATIVO
+          if (assetBar) assetBar.style.display = 'none';
+          if (warmupBar) warmupBar.style.display = 'flex';
+          const pct = wp.percent || 0;
+          document.getElementById('wlbProgressBar').style.width = `${pct}%`;
+          document.getElementById('wlbPct').textContent = `${pct}%`;
+          document.getElementById('wlbAssetDetail').textContent = d.observation || `Carregando histórico dos 60 candles: ${wp.asset || 'ativos OTC'} (${wp.loaded || 0}/${wp.total || 14} — ${pct}%)...`;
         } else {
-          // IA LIGADA E 60 CANDLES PRONTOS: AI SIM ELE COMEÇA A ANALISAR E OPERAR
+          // CARREGAMENTO CONCLUÍDO: SÓ APARECE A BARRA QUANDO JÁ TIVER O ATIVO QUE VAI ANALISAR!
+          if (warmupBar) warmupBar.style.display = 'none';
+          if (assetBar) assetBar.style.display = 'flex';
+
           if (dt.ultimo_preco && dt.ultimo_preco > 0) {
             const priceVal = dt.ultimo_preco;
             priceElem.textContent = priceVal.toFixed(5);

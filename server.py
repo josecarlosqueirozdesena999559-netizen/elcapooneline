@@ -1806,6 +1806,14 @@ async def varrer_60_candles_ativos():
         print(f"[IA BLOQUEADA] {msg_saldo}", flush=True)
         return
 
+    # Trava mandatória: o robô funciona SOMENTE com a API e com saldo de créditos positivo
+    creds = getattr(state, "gemini_credits", {})
+    if isinstance(creds, dict) and creds.get("total_credits") is not None and creds.get("total_credits") <= 0:
+        state.ai_enabled = False
+        state.current_observation = "Chave da API sem créditos disponíveis. O robô só funciona com saldo de créditos positivo na API."
+        print("[IA BLOQUEADA] Créditos da API esgotados.", flush=True)
+        return
+
     state.is_scanning = True
     try:
         agora_ts = int(time.time())
@@ -2428,6 +2436,16 @@ async def api_toggle_ai():
             state.ai_enabled = False
             state.current_observation = msg_saldo
             return {"ai_enabled": False, "success": False, "message": msg_saldo}
+        
+        # Trava mandatória: o robô funciona SOMENTE com API conectada e com saldo de créditos positivo
+        creds_info = await asyncio.to_thread(atualizar_creditos_gemini, True)
+        total_creds = creds_info.get("total_credits")
+        if total_creds is not None and total_creds <= 0:
+            msg_cred = "Chave da API sem créditos disponíveis (0 créditos). O robô só funciona com saldo de créditos positivo na API."
+            state.ai_enabled = False
+            state.current_observation = msg_cred
+            print(f"[BLOQUEIO IA] {msg_cred}", flush=True)
+            return {"ai_enabled": False, "success": False, "message": msg_cred}
     state.ai_enabled = not state.ai_enabled
     if state.ai_enabled:
         # Ao ligar a IA: carrega os 60 candles de TODOS os ativos OTC da BullEx antes de analisar e operar
