@@ -230,8 +230,8 @@ class BotMemoryState:
         self.expiration_minutes = 1
         self.current_key_idx = 0
         self.gemini_key = API_KEY_POOL[0]["key"]
-        self.use_martingale = False
-        self.max_gales = 0
+        self.use_martingale = True
+        self.max_gales = 1
         self.current_gale_step = 0
         self.gale_factor = 2.0
         self.stop_win = 100.0
