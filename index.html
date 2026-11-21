@@ -469,19 +469,7 @@
     .meter-crit-score {
       font-size: 12px !important;
     }
-    .meter-bar-track {
-      width: 100%;
-      height: 6px;
-      background: #1f2738;
-      border-radius: 3px;
-      overflow: hidden;
-    }
-    .meter-bar-fill {
-      height: 100%;
-      border-radius: 3px;
-      background: var(--bullex-green);
-      transition: width 0.25s, background 0.25s;
-    }
+
     .meter-crit-desc {
       font-size: 10px !important;
       color: var(--text-dim);
@@ -797,10 +785,8 @@
             <span class="meter-crit-name">1. Tendência & Médias</span>
             <span class="meter-crit-score med txt-green" id="scoreTrend">90%</span>
           </div>
-          <div class="meter-bar-track">
-            <div class="meter-bar-fill" id="barTrend" style="width: 90%;"></div>
-          </div>
           <div class="meter-crit-desc" id="descTrend">EMA9 > EMA21 > EMA50 acima da MA Trend 200.</div>
+          <div style="font-size:11px; color:#94a3b8;" id="statusTrend">Status: Alinhado para Operação</div>
         </div>
 
         <!-- Medidor 2: Momentum & Osciladores -->
@@ -809,10 +795,8 @@
             <span class="meter-crit-name">2. Momentum & RSI</span>
             <span class="meter-crit-score med txt-green" id="scoreMomentum">85%</span>
           </div>
-          <div class="meter-bar-track">
-            <div class="meter-bar-fill" id="barMomentum" style="width: 85%;"></div>
-          </div>
           <div class="meter-crit-desc" id="descMomentum">RSI 14 em zona favorável sem exaustão.</div>
+          <div style="font-size:11px; color:#94a3b8;" id="statusMomentum">Status: Força Confirmada</div>
         </div>
 
         <!-- Medidor 3: Expansão MACD & Força -->
@@ -821,10 +805,8 @@
             <span class="meter-crit-name">3. Expansão MACD</span>
             <span class="meter-crit-score med txt-green" id="scoreMacd">88%</span>
           </div>
-          <div class="meter-bar-track">
-            <div class="meter-bar-fill" id="barMacd" style="width: 88%;"></div>
-          </div>
           <div class="meter-crit-desc" id="descMacd">Histograma em expansão e fluxo comprador.</div>
+          <div style="font-size:11px; color:#94a3b8;" id="statusMacd">Status: Expansão Ativa</div>
         </div>
 
         <!-- Medidor 4: Price Action & Fractais -->
@@ -833,10 +815,8 @@
             <span class="meter-crit-name">4. Fractais & Zonas</span>
             <span class="meter-crit-score med txt-green" id="scoreFractal">82%</span>
           </div>
-          <div class="meter-bar-track">
-            <div class="meter-bar-fill" id="barFractal" style="width: 82%;"></div>
-          </div>
           <div class="meter-crit-desc" id="descFractal">Rejeição e confirmação em zonas fractais.</div>
+          <div style="font-size:11px; color:#94a3b8;" id="statusFractal">Status: Zona SMC Ativa</div>
         </div>
 
         <!-- Disparador Central do Sinal -->
@@ -1344,19 +1324,23 @@ STATUS DO GATILHO: ${decisao} | ${gatilhoTxt}`;
         document.getElementById('candleClockDigits').textContent = clockStr;
         const seg = dt.segundo_da_vela ?? (60 - parseInt(clockStr.replace('00:', '')));
 
-        // Medidores dos Prompts
+        // Medidores dos Prompts (Texto Puro)
         const med = calcularMedidoresPrompt(dt);
         document.getElementById('scoreTrend').textContent = `${med.c1_trend}%`;
-        document.getElementById('barTrend').style.width = `${med.c1_trend}%`;
+        document.getElementById('descTrend').textContent = dt.tendencia_emas || 'EMA9 > EMA21 > EMA50';
+        document.getElementById('statusTrend').textContent = `Status: ${med.c1_trend >= 80 ? 'Alinhado para Operação' : 'Aguardando Alinhamento'}`;
 
         document.getElementById('scoreMomentum').textContent = `${med.c2_momentum}%`;
-        document.getElementById('barMomentum').style.width = `${med.c2_momentum}%`;
+        document.getElementById('descMomentum').textContent = `RSI 14 em ${(dt.rsi14 || 50).toFixed(1)} e RSI 7 em ${(dt.rsi7 || 50).toFixed(1)}.`;
+        document.getElementById('statusMomentum').textContent = `Status: ${med.c2_momentum >= 80 ? 'Força Confirmada' : 'Zona Neutra'}`;
 
         document.getElementById('scoreMacd').textContent = `${med.c3_macd}%`;
-        document.getElementById('barMacd').style.width = `${med.c3_macd}%`;
+        document.getElementById('descMacd').textContent = `MACD: ${(dt.macd || 0).toFixed(6)} | Hist: ${(dt.macd_hist || 0).toFixed(6)}.`;
+        document.getElementById('statusMacd').textContent = `Status: ${dt.macd_expanding_bull ? 'Expansão Compradora (Alta)' : (dt.macd_expanding_bear ? 'Expansão Vendedora (Baixa)' : 'Lateral')}`;
 
         document.getElementById('scoreFractal').textContent = `${med.c4_fractal}%`;
-        document.getElementById('barFractal').style.width = `${med.c4_fractal}%`;
+        document.getElementById('descFractal').textContent = dt.fractal_status || 'Zonas de Williams em monitoramento.';
+        document.getElementById('statusFractal').textContent = `Status: ${med.c4_fractal >= 80 ? 'Zona SMC Ativa' : 'Aguardando Teste'}`;
 
         const finalConf = d.active_signal?.confluence || med.confluencia_total;
         document.getElementById('totalConfluenceScore').textContent = `${finalConf}%`;
