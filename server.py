@@ -148,13 +148,13 @@ def obter_pool_otc_binarios() -> List[str]:
 
 SCAN_ASSETS_PRIORITY = OTC_BINARY_CATALOG
 
-# Pool de Chaves com Rotação Automática (3 Chaves / 757 Créditos Somados)
+# Pool de Chaves com Rotação Automática (3 Chaves / Créditos Diários Renovados)
 API_KEY_POOL = [
     {
         "id": 1,
         "label": "Chave 5 (Principal)",
         "key": "sk-eWO12W1x-flzVPOkm_hcVFhU3JTbKShmdjvt52p6gfZKP-rYbCyCzWz0qlQc4TyqQoybsxe20jeoO25AlgmIKO-qrPOF",
-        "credits": 300,
+        "credits": 295,
         "max_credits": 300,
         "exhausted": False
     },
@@ -162,7 +162,7 @@ API_KEY_POOL = [
         "id": 2,
         "label": "Chave 3 (Reserva 1)",
         "key": "sk-fwbSvlXpSOxJCvb8LkKSDvcdPBwtFmuxs1-AObo4ghwynYcJBOr4JaXzLOpD8MawjaWegeakdA9n-9re5_ENRkWtf2I4",
-        "credits": 298,
+        "credits": 300,
         "max_credits": 300,
         "exhausted": False
     },
@@ -170,7 +170,7 @@ API_KEY_POOL = [
         "id": 3,
         "label": "Chave 4 (Reserva 2)",
         "key": "sk-25iVyLYJOlutOOKU-yN3hgENMN3uHzDmgSVavczWte2hAdQyPfA7AIuRbjAhvkvWNX-VS1huuo2-d8t62_4jB14mGPZV",
-        "credits": 159,
+        "credits": 150,
         "max_credits": 300,
         "exhausted": False
     }
@@ -942,12 +942,14 @@ def atualizar_creditos_gemini(force: bool = False) -> Dict[str, Any]:
         )
         if r.status_code == 200:
             d = r.json()
-            tc = int(d.get("total_credits") or 0)
-            if chave_info:
-                chave_info["credits"] = tc
-                if tc <= 0:
-                    chave_info["exhausted"] = True
-                    rotacionar_proxima_chave("Créditos zerados na consulta")
+            tc = d.get("total_credits")
+            if tc is not None:
+                tc = int(tc)
+                if chave_info:
+                    chave_info["credits"] = tc
+                    if tc <= 0:
+                        chave_info["exhausted"] = True
+                        rotacionar_proxima_chave("Créditos zerados na consulta")
 
             pool_total = sum(k["credits"] for k in API_KEY_POOL if not k.get("exhausted", False))
             max_pool = sum(k.get("max_credits", 300) for k in API_KEY_POOL)
@@ -956,11 +958,11 @@ def atualizar_creditos_gemini(force: bool = False) -> Dict[str, Any]:
                 "free_credits": int(d.get("free_credits") or 0),
                 "refresh_credits": pool_total,
                 "max_refresh_credits": max_pool,
-                "active_key_credits": tc,
+                "active_key_credits": tc if tc is not None else 300,
                 "active_key_name": chave_info["label"] if chave_info else "Chave Ativa",
                 "last_sync": agora
             }
-        elif r.status_code in [401, 403, 429]:
+        elif r.status_code in [401, 403]:
             if chave_info:
                 chave_info["exhausted"] = True
                 chave_info["credits"] = 0
@@ -1079,9 +1081,20 @@ Responda ESTRITAMENTE em formato JSON com o schema exigido.
                         headers=headers,
                         json={"message": {"content": full_prompt}}
                     )
-                    if resp.status_code in [401, 403, 429]:
+                    if resp.status_code == 429:
                         txt_err = resp.text.lower()
-                        print(f"[API POOL] Resposta {resp.status_code} ({txt_err[:120]}). Rotacionando para próxima chave...", flush=True)
+                        if "credit" in txt_err or "exhausted" in txt_err or "quota" in txt_err:
+                            print(f"[API POOL] Créditos esgotados ({txt_err[:120]}). Rotacionando para próxima chave...", flush=True)
+                            nova = rotacionar_proxima_chave("Créditos esgotados")
+                            if nova:
+                                continue
+                            return None
+                        else:
+                            print(f"[API RATE LIMIT] 429 temporário ({txt_err[:120]}). Aguardando 2s...", flush=True)
+                            await asyncio.sleep(2.0)
+                            continue
+                    elif resp.status_code in [401, 403]:
+                        print(f"[API POOL] Chave inválida ou bloqueada ({resp.status_code}). Rotacionando...", flush=True)
                         nova = rotacionar_proxima_chave(f"HTTP {resp.status_code}")
                         if nova:
                             continue
@@ -1932,11 +1945,11 @@ async def varrer_60_candles_ativos():
         bb_up = float(dados_60.get("bb_upper") or 0)
         bb_low = float(dados_60.get("bb_lower") or 0)
         rsi_val = float(dados_60.get("rsi14") or 50)
-        if decisao == "CALL" and ((bb_up > 0 and ultimo_p >= bb_up * 0.9998) or rsi_val >= 72):
+        if decisao == "CALL" and (bb_up > 0 and ultimo_p > bb_up * 1.001 and rsi_val >= 78):
             print(f" -> [FILTRO ANTI-TOPO] CALL bloqueado em {ativo} (preço={ultimo_p}, BB_sup={bb_up}, RSI={rsi_val}).", flush=True)
             decisao = "AGUARDAR"
             analise["texto_observacao"] = f"[{ativo} | {agora_str}] CALL bloqueado em topo extremo (BB Sup={bb_up}, RSI={rsi_val}). Aguardando melhor ponto."
-        elif decisao == "PUT" and ((bb_low > 0 and ultimo_p <= bb_low * 1.0002) or rsi_val <= 28):
+        elif decisao == "PUT" and (bb_low > 0 and ultimo_p < bb_low * 0.999 and rsi_val <= 22):
             print(f" -> [FILTRO ANTI-FUNDO] PUT bloqueado em {ativo} (preço={ultimo_p}, BB_inf={bb_low}, RSI={rsi_val}).", flush=True)
             decisao = "AGUARDAR"
             analise["texto_observacao"] = f"[{ativo} | {agora_str}] PUT bloqueado em fundo extremo (BB Inf={bb_low}, RSI={rsi_val}). Aguardando melhor ponto."
@@ -1948,9 +1961,9 @@ async def varrer_60_candles_ativos():
 
         if decisao in ["CALL", "PUT"] and conf >= limite_confluencia and not state.is_trading and not state.is_paused:
             seg_agora = int(time.time()) % 60
-            # Se virou a vela durante a análise, mas ainda está no início (<= 25s), entra com perfeição nesta nova vela!
-            if seg_agora > 25 and (int(time.time()) // 60) != minuto_inicio_analise:
-                print(f" -> [ATRASO EXCESSIVO] {ativo}: a vela virou e já passou de 25s ({seg_agora}s). Reavaliando próximo candle...", flush=True)
+            # Se virou a vela durante a análise, mas ainda está no início (<= 45s), entra com precisão nesta nova vela!
+            if seg_agora > 45 and (int(time.time()) // 60) != minuto_inicio_analise:
+                print(f" -> [ATRASO EXCESSIVO] {ativo}: a vela virou e já passou de 45s ({seg_agora}s). Reavaliando próximo candle...", flush=True)
                 return
 
             state.active_asset = ativo
