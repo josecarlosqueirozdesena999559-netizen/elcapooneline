@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BullEx Trader — Painel Autônomo</title>
+  <title>ORIUM BINARY 15.COM — Sistema de Operações Automáticas</title>
   <style>
     :root {
       --bg-darkest: #0b0e14;
@@ -160,31 +160,41 @@
       gap: 10px;
     }
 
-    .bx-brand-icon {
-      width: 32px;
-      height: 32px;
-      background: #000;
-      border: 1px solid var(--border-subtle);
-      border-radius: 6px;
+    /* Nome do Sistema no Topo */
+    .header-brand-wrap {
       display: flex;
       align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
+      gap: 10px;
+      padding: 0 4px;
+      user-select: none;
+      cursor: default;
     }
-
-    .bx-launcher-icon {
-      width: 32px;
-      height: 32px;
-      background: transparent;
-      border-radius: 6px;
+    .header-brand-title-wrap {
+      display: flex;
+      flex-direction: column;
+      line-height: 1.15;
+    }
+    .header-brand-sub {
+      font-size: 9px !important;
+      font-weight: 500 !important;
+      letter-spacing: 2px;
+      color: #94a3b8;
+      text-transform: uppercase;
+    }
+    .header-brand-main {
+      font-size: 14.5px !important;
+      font-weight: 600 !important;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
       display: flex;
       align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      flex-shrink: 0;
+      gap: 4px;
     }
-    .bx-launcher-icon:hover svg rect {
-      fill: #cbd5e1;
+    .header-brand-main .title-white {
+      color: #ffffff;
+    }
+    .header-brand-main .title-green {
+      color: var(--bullex-green);
     }
 
     /* Aba do Ativo Analisado (Idêntico ao da BullEx com linha roxa) */
@@ -1184,23 +1194,15 @@
     <!-- TOPBAR -->
     <header class="bullex-topbar">
       <div class="bx-topbar-left">
-        <!-- Logo BullEx (Ícone quadrado arredondado com gráfico verde) -->
-        <div class="bx-brand-icon" title="BullEx Platform">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
-            <path d="M4 15l5-5 4 4 7-7" stroke="#00c26f" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-            <polyline points="15 7 20 7 20 12" stroke="#00c26f" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-            <circle cx="4" cy="15" r="2" fill="#fff"/>
-          </svg>
-        </div>
-
-        <!-- Ícone 4 Quadrados (App Launcher) -->
-        <div class="bx-launcher-icon" title="Menu de Ativos">
-          <svg viewBox="0 0 20 20" width="16" height="16" fill="#64748b">
-            <rect x="2" y="2" width="6.5" height="6.5" rx="1.5"/>
-            <rect x="11.5" y="2" width="6.5" height="6.5" rx="1.5"/>
-            <rect x="2" y="11.5" width="6.5" height="6.5" rx="1.5"/>
-            <rect x="11.5" y="11.5" width="6.5" height="6.5" rx="1.5"/>
-          </svg>
+        <!-- Nome do Sistema (ORIUM BINARY 15.COM) -->
+        <div class="header-brand-wrap" title="ORIUM BINARY 15.COM">
+          <div class="header-brand-title-wrap">
+            <span class="header-brand-sub">ORIUM</span>
+            <div class="header-brand-main">
+              <span class="title-white">BINARY</span>
+              <span class="title-green">15.COM</span>
+            </div>
+          </div>
         </div>
 
         <!-- Aba do Ativo Analisado (Só aparece quando iniciar as análises) -->
