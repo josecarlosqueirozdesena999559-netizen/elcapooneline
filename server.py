@@ -2462,18 +2462,26 @@ async def api_reset_score():
 @app.get("/api/history")
 async def api_get_history():
     """Retorna o histórico completo de operações registradas no banco de dados SQLite."""
-    if not state.email:
-        return {"history": state.history_trades}
+    res = []
     try:
         with sqlite3.connect(RESULTS_DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM trade_results WHERE email = ? ORDER BY id DESC LIMIT 100",
-                (_norm_email(state.email),)
-            ).fetchall()
-            return {"history": [dict(r) for r in rows]}
+            if state.email:
+                rows = conn.execute(
+                    "SELECT * FROM trade_results WHERE email = ? ORDER BY id DESC LIMIT 100",
+                    (_norm_email(state.email),)
+                ).fetchall()
+                res = [dict(r) for r in rows]
+            if not res:
+                rows = conn.execute(
+                    "SELECT * FROM trade_results ORDER BY id DESC LIMIT 100"
+                ).fetchall()
+                res = [dict(r) for r in rows]
     except Exception as e:
-        return {"history": state.history_trades}
+        print(f"[HISTORY DB ERR] {e}", flush=True)
+    if not res and state.history_trades:
+        res = list(reversed(state.history_trades))
+    return {"history": res}
 
 class ConfigUpdate(BaseModel):
     asset: Optional[str] = None
