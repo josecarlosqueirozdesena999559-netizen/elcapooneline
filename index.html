@@ -134,6 +134,9 @@
       flex-direction: column;
       min-width: 0;
       min-height: 100vh;
+      overflow-x: hidden;
+      width: calc(100% - 76px);
+      box-sizing: border-box;
     }
 
     /* TOPBAR: ORGANIZADO E SEM AVATAR */
@@ -395,13 +398,15 @@
        ========================================================================= */
     .bullex-main-content {
       flex: 1;
-      padding: 20px 24px 35px;
-      max-width: 1260px;
+      padding: 18px 24px 35px;
       width: 100%;
-      margin: 0 auto;
+      max-width: 100%;
+      box-sizing: border-box;
+      margin: 0;
       display: flex;
       flex-direction: column;
       gap: 16px;
+      overflow-x: hidden;
     }
 
     /* BARRA DO ATIVO EM ANÁLISE */
@@ -508,13 +513,213 @@
 
     .ai-thought-prose {
       font-size: 13.5px !important;
-      line-height: 1.48 !important;
+      line-height: 1.55 !important;
       color: #cbd5e1;
       white-space: pre-wrap;
+      word-break: break-word;
+      overflow-wrap: break-word;
       font-family: var(--font-family) !important;
       background: transparent !important;
       border: none !important;
       padding: 0;
+    }
+
+    /* =========================================================================
+       TELA DA OPERAÇÃO EM ANDAMENTO (1:1 COM A BULLEX - FICA SÓ ISSO AO PEGAR OPERAÇÃO)
+       ========================================================================= */
+    .active-trade-container {
+      width: 100%;
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .at-header-bar {
+      height: 44px;
+      background: #141a27;
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .at-header-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .at-header-title {
+      font-size: 13.5px !important;
+      color: #fff;
+      font-weight: 500 !important;
+    }
+    .at-header-pnl {
+      font-size: 13.5px !important;
+      font-weight: 600 !important;
+    }
+    .at-header-pnl.win { color: var(--bullex-green); }
+    .at-header-pnl.loss { color: var(--bullex-red); }
+    .at-hide-toggle {
+      font-size: 12px !important;
+      color: #64748b;
+      cursor: pointer;
+    }
+
+    .at-table-wrapper {
+      width: 100%;
+      overflow-x: auto;
+    }
+    .at-table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 780px;
+      font-size: 12.5px !important;
+    }
+    .at-table th {
+      text-align: left;
+      padding: 10px 14px;
+      color: #848e9c;
+      font-size: 11px !important;
+      font-weight: 400 !important;
+      border-bottom: 1px solid var(--border-subtle);
+      background: #111622;
+      white-space: nowrap;
+    }
+    .at-table td {
+      padding: 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+      color: #fff;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    .at-asset-cell {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .at-icon-box {
+      width: 26px;
+      height: 26px;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .at-flag {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      object-fit: cover;
+      position: absolute;
+      border: 1.5px solid var(--bg-card);
+    }
+    .at-flag-1 { top: 0; left: 0; z-index: 2; }
+    .at-flag-2 { bottom: 0; right: 0; z-index: 1; }
+    .at-single-logo {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #1e2638;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 8.5px;
+      color: #fff;
+    }
+    .at-otc-badge {
+      position: absolute;
+      bottom: -2px;
+      right: -2px;
+      background: #f97316;
+      color: #fff;
+      font-size: 6.5px !important;
+      padding: 1px 2px;
+      border-radius: 2px;
+      z-index: 3;
+      border: 1px solid var(--bg-card);
+      text-transform: uppercase;
+      font-weight: 600 !important;
+    }
+    .at-asset-name {
+      font-size: 13px !important;
+      color: #fff;
+    }
+
+    .at-expiration-cell {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .at-invest-cell {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .at-arrow.call {
+      color: var(--bullex-green);
+      font-size: 11px;
+    }
+    .at-arrow.put {
+      color: var(--bullex-red);
+      font-size: 11px;
+    }
+
+    .win { color: var(--bullex-green) !important; }
+    .loss { color: var(--bullex-red) !important; }
+
+    .at-btn-sell {
+      background: #1c2333;
+      border: 1px solid var(--border-subtle);
+      border-radius: 5px;
+      color: #cbd5e1;
+      padding: 6px 14px;
+      font-size: 12px !important;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .at-btn-sell:hover {
+      background: #252f45;
+      color: #fff;
+      border-color: #3b4866;
+    }
+
+    .at-footer-bar {
+      height: 42px;
+      background: #141a27;
+      border-top: 1px solid var(--border-subtle);
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11.5px !important;
+      color: #848e9c;
+    }
+    .at-footer-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .at-footer-divider {
+      color: #2b354a;
+    }
+    .at-btn-sell-all {
+      background: #1c2333;
+      border: 1px solid var(--border-subtle);
+      border-radius: 5px;
+      color: #cbd5e1;
+      padding: 4px 12px;
+      font-size: 11.5px !important;
+      cursor: pointer;
+    }
+    .at-btn-sell-all:hover {
+      color: #fff;
+      background: #252f45;
     }
 
     /* =========================================================================
@@ -1008,41 +1213,136 @@
     <!-- CONTEÚDO PRINCIPAL -->
     <main class="bullex-main-content">
       
-      <!-- BARRA DE TELEMETRIA DO ATIVO EM ANÁLISE -->
-      <section class="active-asset-bar">
-        
-        <div class="asset-info-center" style="margin-left: 0;">
-          <div>
-            <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Preço:</span>
-            <span style="font-size: 13.5px; color: #fff; margin-left: 4px;" class="med" id="heroPriceVal">1.08450</span>
+      <!-- VISÃO 1: ANÁLISE QUANTITATIVA EM TEMPO REAL (QUANDO NÃO ESTÁ EM OPERAÇÃO) -->
+      <div id="viewAnalysis" style="display: flex; flex-direction: column; gap: 16px; width: 100%;">
+        <!-- BARRA DE TELEMETRIA DO ATIVO EM ANÁLISE -->
+        <section class="active-asset-bar">
+          <div class="asset-info-center" style="margin-left: 0;">
+            <div>
+              <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Preço:</span>
+              <span style="font-size: 13.5px; color: #fff; margin-left: 4px;" class="med" id="heroPriceVal">1.08450</span>
+            </div>
+            <div style="height: 16px; width: 1px; background: var(--border-subtle);"></div>
+            <div>
+              <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Vela M1:</span>
+              <span style="font-size: 13.5px; color: var(--bullex-green); margin-left: 4px;" class="med" id="candleClockDigits">00:45</span>
+            </div>
+            <div style="height: 16px; width: 1px; background: var(--border-subtle);"></div>
+            <div>
+              <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Confluência:</span>
+              <span style="font-size: 13.5px; color: var(--bullex-green); margin-left: 4px;" class="med" id="totalConfluenceScore">85%</span>
+            </div>
+            <div style="height: 16px; width: 1px; background: var(--border-subtle);"></div>
+            <div>
+              <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Mão:</span>
+              <span style="font-size: 13.5px; color: #cbd5e1; margin-left: 4px;" class="med" id="activeStakeDisplay">$5.00</span>
+            </div>
           </div>
-          <div style="height: 16px; width: 1px; background: var(--border-subtle);"></div>
-          <div>
-            <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Vela M1:</span>
-            <span style="font-size: 13.5px; color: var(--bullex-green); margin-left: 4px;" class="med" id="candleClockDigits">00:45</span>
+
+          <div class="asset-info-right">
+            <div class="trigger-badge-status" id="triggerBadge">AGUARDANDO CONFLUÊNCIA</div>
           </div>
-          <div style="height: 16px; width: 1px; background: var(--border-subtle);"></div>
-          <div>
-            <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Confluência:</span>
-            <span style="font-size: 13.5px; color: var(--bullex-green); margin-left: 4px;" class="med" id="totalConfluenceScore">85%</span>
+        </section>
+
+        <!-- PENSAMENTO REAL DA IA: TEXTO LIMPO SEM FUNDO OU CARDS -->
+        <section class="ai-thought-section">
+          <div class="ai-thought-prose" id="thoughtText">Aguardando inicialização do robô. Clique no botão Ligar IA para iniciar as análises.</div>
+        </section>
+      </div>
+
+      <!-- VISÃO 2: TELA DA OPERAÇÃO EM ANDAMENTO (1:1 COM A BULLEX - FICA SÓ ISSO AO PEGAR OPERAÇÃO) -->
+      <div id="viewActiveTrade" class="active-trade-container" style="display: none;">
+        <!-- Header da Posição Aberta -->
+        <div class="at-header-bar">
+          <div class="at-header-left">
+            <span class="at-header-title">Opções (1)</span>
+            <span class="at-header-pnl loss" id="atHeaderPnl">-$5.00</span>
           </div>
-          <div style="height: 16px; width: 1px; background: var(--border-subtle);"></div>
-          <div>
-            <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Mão:</span>
-            <span style="font-size: 13.5px; color: #cbd5e1; margin-left: 4px;" class="med" id="activeStakeDisplay">$5.00</span>
+          <div class="at-header-right">
+            <span class="at-hide-toggle">Ocultar posições ∨</span>
           </div>
         </div>
 
-        <div class="asset-info-right">
-          <div class="trigger-badge-status" id="triggerBadge">AGUARDANDO CONFLUÊNCIA</div>
+        <!-- Tabela da Operação Ativa -->
+        <div class="at-table-wrapper">
+          <table class="at-table">
+            <thead>
+              <tr>
+                <th>Nome ▲</th>
+                <th>Tipo</th>
+                <th>Expiração</th>
+                <th>Investimento</th>
+                <th>Abertura</th>
+                <th>Preço atual</th>
+                <th>L/P esperados</th>
+                <th>L/P pós-venda</th>
+                <th style="text-align: right;">Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <!-- Nome com Ícone e Badge OTC -->
+                <td>
+                  <div class="at-asset-cell">
+                    <div class="at-icon-box" id="atIconBox">
+                      <img class="at-flag at-flag-1" id="atFlag1" src="https://flagcdn.com/w40/eu.png" alt="">
+                      <img class="at-flag at-flag-2" id="atFlag2" src="https://flagcdn.com/w40/us.png" alt="">
+                      <div class="at-single-logo" id="atSingleLogo" style="display:none;"></div>
+                      <span class="at-otc-badge" id="atOtcBadge">otc</span>
+                    </div>
+                    <span class="at-asset-name med" id="atAssetName">EUR/USD OTC</span>
+                  </div>
+                </td>
+                <!-- Tipo -->
+                <td style="color: #cbd5e1;">Binária</td>
+                <!-- Expiração com relógio roxo e contagem real da API -->
+                <td>
+                  <div class="at-expiration-cell">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#a855f7" stroke-width="2.5">
+                      <circle cx="12" cy="12" r="9"/>
+                      <path d="M12 7v5l3 3"/>
+                    </svg>
+                    <span id="atExpirationClock" style="color: #a855f7; font-weight: 500;">00:47</span>
+                  </div>
+                </td>
+                <!-- Investimento com Direção ▲/▼ -->
+                <td>
+                  <div class="at-invest-cell">
+                    <span id="atStakeVal" class="med">$5.00</span>
+                    <span id="atDirArrow" class="at-arrow call">▲</span>
+                  </div>
+                </td>
+                <!-- Taxa de Abertura Real da Vela -->
+                <td id="atEntryPrice" class="med">1.11320</td>
+                <!-- Preço Atual Real do Candle em Tempo Real -->
+                <td id="atCurrentPrice" class="med win">1.11325</td>
+                <!-- L/P Esperados -->
+                <td id="atLpExpected" class="med win">+$4.35</td>
+                <!-- L/P Pós-Venda -->
+                <td id="atLpResale" class="med win">+$3.80</td>
+                <!-- Botão Vender -->
+                <td style="text-align: right;">
+                  <button class="at-btn-sell" onclick="sellCurrentOption()" title="Encerrar posição antecipadamente">Vender</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
 
-      </section>
-
-      <!-- PENSAMENTO REAL DA IA: TEXTO LIMPO SEM FUNDO OU CARDS -->
-      <section class="ai-thought-section">
-        <div class="ai-thought-prose" id="thoughtText">Aguardando inicialização do robô. Clique no botão Ligar IA para iniciar as análises.</div>
-      </section>
+        <!-- Rodapé de Resumo da Operação -->
+        <div class="at-footer-bar">
+          <div class="at-footer-left">
+            <span>Investimento <strong id="atFooterStake" style="color:#fff;">$5.00</strong></span>
+            <span class="at-footer-divider">|</span>
+            <span>L/P esperados <strong id="atFooterLpExpected" class="win">+$4.35</strong></span>
+            <span class="at-footer-divider">|</span>
+            <span>L/P pós-venda <strong id="atFooterResalePercent" class="win">-15.00%</strong> | <strong id="atFooterResaleVal" class="win">-$0.75</strong></span>
+          </div>
+          <div class="at-footer-right">
+            <button class="at-btn-sell-all" onclick="sellCurrentOption()">Vender todas</button>
+          </div>
+        </div>
+      </div>
 
     </main>
 
@@ -1723,12 +2023,121 @@
           trigBadge.textContent = `AGUARDANDO CONFLUÊNCIA (${seg}s/60s)`;
         }
 
-        // Pensamento Real da IA Formatado e Sem Zeros
-        const textoPensamento = gerarPensamentoRealIA(activeAsset, dt, med, clockStr, seg, sig, d.observation);
-        document.getElementById('thoughtText').textContent = textoPensamento;
+        // ALTERNÂNCIA: TELA DE OPERAÇÃO ATIVA VS TELA DE ANÁLISE
+        const viewAnalysis = document.getElementById('viewAnalysis');
+        const viewActiveTrade = document.getElementById('viewActiveTrade');
+        const isTrading = !!d.is_trading;
+
+        if (isTrading && sig) {
+          // AO PEGAR OPERAÇÃO, MOSTRA APENAS A TELA DE OPERAÇÃO EM ANDAMENTO (1:1 COM A BULLEX)
+          viewAnalysis.style.display = 'none';
+          viewActiveTrade.style.display = 'flex';
+
+          const ativoOp = sig.asset || activeAsset;
+          const visOp = parseAssetVisuals(ativoOp);
+
+          // Nome do Ativo com Parênteses OTC
+          const atName = document.getElementById('atAssetName');
+          if (atName) atName.textContent = (ativoOp || 'EURUSD-OTC').replace('-OTC', ' (OTC)');
+
+          // Bandeiras/Ícones
+          const atFlag1 = document.getElementById('atFlag1');
+          const atFlag2 = document.getElementById('atFlag2');
+          const atSingle = document.getElementById('atSingleLogo');
+          const atOtc = document.getElementById('atOtcBadge');
+
+          if (atOtc) atOtc.style.display = visOp.otc ? 'block' : 'none';
+          if (visOp.type === 'pair') {
+            if (atFlag1) { atFlag1.style.display = 'block'; atFlag1.src = `https://flagcdn.com/w40/${visOp.f1}.png`; }
+            if (atFlag2) { atFlag2.style.display = 'block'; atFlag2.src = `https://flagcdn.com/w40/${visOp.f2}.png`; }
+            if (atSingle) atSingle.style.display = 'none';
+          } else {
+            if (atFlag1) atFlag1.style.display = 'none';
+            if (atFlag2) atFlag2.style.display = 'none';
+            if (atSingle) { atSingle.style.display = 'flex'; atSingle.textContent = visOp.symbol; }
+          }
+
+          // Expiração (segundos reais da API vinculados sem atraso)
+          const secLeft = sig.seconds_left !== undefined ? sig.seconds_left : (dt.tempo_restante_vela ?? (60 - seg));
+          const expClock = document.getElementById('atExpirationClock');
+          if (expClock) expClock.textContent = `00:${String(Math.max(0, secLeft)).padStart(2, '0')}`;
+
+          // Investimento e Direção (▲ / ▼)
+          const stakeVal = sig.stake_val || appState.stake || 5.0;
+          const isCall = (sig.direction || '').toUpperCase() === 'CALL';
+          document.getElementById('atStakeVal').textContent = `$${stakeVal.toFixed(2)}`;
+          const dirArrow = document.getElementById('atDirArrow');
+          if (dirArrow) {
+            dirArrow.className = isCall ? 'at-arrow call' : 'at-arrow put';
+            dirArrow.textContent = isCall ? '▲' : '▼';
+          }
+
+          // Taxa de Abertura Real e Preço Atual Real do Candle
+          const entryRate = (sig.entry_rate && sig.entry_rate > 0) ? parseFloat(sig.entry_rate).toFixed(5) : priceVal.toFixed(5);
+          const currentRate = (sig.current_rate && sig.current_rate > 0) ? parseFloat(sig.current_rate).toFixed(5) : priceVal.toFixed(5);
+          document.getElementById('atEntryPrice').textContent = entryRate;
+          const curPriceElem = document.getElementById('atCurrentPrice');
+          curPriceElem.textContent = currentRate;
+
+          const isWinning = sig.live_status === 'WINNING' || (isCall ? parseFloat(currentRate) >= parseFloat(entryRate) : parseFloat(currentRate) <= parseFloat(entryRate));
+          curPriceElem.className = isWinning ? 'med win' : 'med loss';
+
+          // L/P Esperados e Pós-Venda
+          const payoutPct = sig.payout_pct || 0.84;
+          const expectedProfit = isWinning ? (stakeVal * payoutPct) : -stakeVal;
+          const expPnlStr = (expectedProfit >= 0 ? '+' : '-') + '$' + Math.abs(expectedProfit).toFixed(2);
+
+          const headerPnl = document.getElementById('atHeaderPnl');
+          headerPnl.textContent = expPnlStr;
+          headerPnl.className = isWinning ? 'at-header-pnl win' : 'at-header-pnl loss';
+
+          const lpExpected = document.getElementById('atLpExpected');
+          lpExpected.textContent = expPnlStr;
+          lpExpected.className = isWinning ? 'med win' : 'med loss';
+
+          const lpResaleStr = sig.lp_pos_venda_str || (isWinning ? `+$${(expectedProfit * 0.75).toFixed(2)}` : `-$${(stakeVal * 0.85).toFixed(2)}`);
+          const lpResale = document.getElementById('atLpResale');
+          lpResale.textContent = lpResaleStr;
+          lpResale.className = isWinning ? 'med win' : 'med loss';
+
+          // Rodapé da Posição
+          document.getElementById('atFooterStake').textContent = `$${stakeVal.toFixed(2)}`;
+          const fExpected = document.getElementById('atFooterLpExpected');
+          fExpected.textContent = expPnlStr;
+          fExpected.className = isWinning ? 'win' : 'loss';
+
+          const fResalePct = document.getElementById('atFooterResalePercent');
+          fResalePct.textContent = sig.resale_percent || (isWinning ? '+72.00%' : '-83.44%');
+          fResalePct.className = isWinning ? 'win' : 'loss';
+
+          const fResaleVal = document.getElementById('atFooterResaleVal');
+          fResaleVal.textContent = lpResaleStr;
+          fResaleVal.className = isWinning ? 'win' : 'loss';
+
+        } else {
+          // QUANDO NÃO ESTÁ EM OPERAÇÃO (OU APÓS WIN / LOSS / G1 FINALIZAR), MOSTRA A TELA DE ANÁLISE QUANTITATIVA
+          viewActiveTrade.style.display = 'none';
+          viewAnalysis.style.display = 'flex';
+
+          // Pensamento Real da IA Formatado e Sem Zeros
+          const textoPensamento = gerarPensamentoRealIA(activeAsset, dt, med, clockStr, seg, sig, d.observation);
+          document.getElementById('thoughtText').textContent = textoPensamento;
+        }
 
       } catch (e) {
         console.error("Erro no polling:", e);
+      }
+    }
+
+    async function sellCurrentOption() {
+      if (!confirm("Deseja vender a operação antecipadamente na BullEx?")) return;
+      try {
+        const res = await fetch('/api/sell_option', { method: 'POST' });
+        const d = await res.json();
+        alert(d.message || 'Ordem encerrada!');
+        fetchStatus();
+      } catch (err) {
+        alert("Erro ao solicitar venda antecipada.");
       }
     }
 

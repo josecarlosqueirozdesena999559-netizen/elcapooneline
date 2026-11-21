@@ -2358,6 +2358,10 @@ async def api_status():
         c_list = state.candles_cache.get(ativo_now, [])
         if len(c_list) >= 20:
             state.last_candle_data = calcular_indicadores_60(c_list)
+    if state.is_trading and state.active_signal:
+        cur_p = state.last_candle_data.get("ultimo_preco")
+        if cur_p and cur_p > 0:
+            state.active_signal["current_rate"] = cur_p
     bal = state.balance_demo if state.mode == "DEMO" else state.balance_real
     return {
         "connected": bool(state.is_connected and state.api is not None),
