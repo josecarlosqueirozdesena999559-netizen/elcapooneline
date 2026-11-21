@@ -8,7 +8,6 @@
     :root {
       --bg-darkest: #0b0e14;
       --bg-header: #131722;
-      --bg-tab-active: #171d2b;
       --bg-card: #111622;
       --bg-card-sub: #171d2b;
       --border-subtle: #1e2638;
@@ -52,16 +51,16 @@
     .txt-dim { color: var(--text-dim) !important; }
 
     /* =========================================================================
-       TOPBAR ESTILO BULLEX (COM ABA ÚNICA DA MOEDA, LIGAR IA E PLACAR)
+       TOPBAR ESTILO BULLEX (ORGANIZADO, SEM A ABA DO ATIVO REPETIDA)
        ========================================================================= */
     .bullex-topbar {
-      height: 52px;
+      height: 54px;
       background: var(--bg-header);
       border-bottom: 1px solid var(--border-subtle);
       display: flex;
       align-items: center;
-      padding: 0 14px;
-      gap: 10px;
+      padding: 0 16px;
+      gap: 12px;
       user-select: none;
       position: sticky;
       top: 0;
@@ -104,95 +103,18 @@
       height: 14px;
     }
 
-    /* Aba Única da Moeda Analisada (Troca Automática) */
-    .bx-asset-tab {
-      height: 40px;
-      background: var(--bg-tab-active);
-      border: 1px solid var(--border-subtle);
-      border-bottom: 2px solid var(--bullex-purple);
-      border-radius: 6px 6px 2px 2px;
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      padding: 0 14px 0 10px;
-      cursor: default;
-      position: relative;
-      flex-shrink: 0;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-    }
-
-    .bx-asset-icon-box {
-      width: 28px;
-      height: 28px;
-      position: relative;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-    }
-    .bx-flag-circle {
-      width: 19px;
-      height: 19px;
-      border-radius: 50%;
-      object-fit: cover;
-      position: absolute;
-      border: 1.5px solid #111622;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.5);
-    }
-    .bx-flag-1 { top: 1px; left: 0; z-index: 2; }
-    .bx-flag-2 { bottom: 1px; right: 0; z-index: 1; }
-    .bx-single-logo {
-      width: 24px;
-      height: 24px;
-      border-radius: 50%;
-      background: #1e2638;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 11px;
-      color: #fff;
-      border: 1.5px solid #111622;
-    }
-    .bx-otc-badge {
-      position: absolute;
-      bottom: -1px;
-      right: -2px;
-      background: #f97316;
-      color: #fff;
-      font-size: 8px !important;
-      line-height: 1;
-      padding: 1px 3px;
-      border-radius: 3px;
-      letter-spacing: -0.2px;
-      z-index: 3;
-      border: 1px solid #111622;
-    }
-
-    .bx-tab-info {
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      gap: 1px;
-    }
-    .bx-tab-name {
+    .bx-terminal-title {
       font-size: 13px !important;
-      color: #f1f5f9;
-      line-height: 1.1;
-      white-space: nowrap;
-    }
-    .bx-tab-sub {
-      font-size: 10px !important;
-      color: var(--text-dim);
-      line-height: 1;
-      white-space: nowrap;
+      color: #cbd5e1;
+      letter-spacing: -0.2px;
     }
 
-    /* Lado Direito do Topbar */
+    /* Lado Direito do Topbar Organizado */
     .bx-topbar-right {
       margin-left: auto;
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 12px;
     }
 
     /* Botão Ligar/Desligar IA */
@@ -377,17 +299,17 @@
     }
 
     /* =========================================================================
-       CONTEÚDO PRINCIPAL: A MOEDA + ANÁLISE EM TEXTO LIMPO TEMPO REAL
+       CONTEÚDO PRINCIPAL: A MOEDA + PENSAMENTO REAL DA IA EM TEXTO COMUM
        ========================================================================= */
     .bullex-main-content {
       flex: 1;
-      padding: 16px 20px 30px;
-      max-width: 1440px;
+      padding: 20px 24px 40px;
+      max-width: 1300px;
       width: 100%;
       margin: 0 auto;
       display: flex;
       flex-direction: column;
-      gap: 14px;
+      gap: 20px;
     }
 
     /* BARRA DA MOEDA EM ANÁLISE */
@@ -484,45 +406,23 @@
       color: var(--bullex-red);
     }
 
-    /* CARD DA ANÁLISE TÉCNICA INSTITUCIONAL EM TEXTO LIMPO */
-    .ai-terminal-card {
-      flex: 1;
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      border-radius: 8px;
-      padding: 18px 22px;
+    /* PENSAMENTO REAL DA IA: TEXTO COMUM NORMAL SEM FUNDO OU CARDS */
+    .ai-thought-section {
+      width: 100%;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 8px;
     }
-    .terminal-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      font-size: 12px !important;
-      color: var(--text-dim);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      padding-bottom: 8px;
-      border-bottom: 1px solid var(--border-subtle);
-    }
-    .terminal-credits-pill {
-      color: var(--bullex-green);
-      font-size: 11px !important;
-    }
-    .terminal-text-box {
-      flex: 1;
-      min-height: 480px;
-      background: #090c12;
-      border: 1px solid #1a2233;
-      border-radius: 6px;
-      padding: 18px 20px;
-      font-size: 13px !important;
-      line-height: 1.65;
-      color: #e2e8f0;
+
+    .ai-thought-prose {
+      font-size: 14px !important;
+      line-height: 1.75;
+      color: #cbd5e1;
       white-space: pre-wrap;
       font-family: var(--font-family) !important;
-      overflow-y: auto;
+      background: transparent !important;
+      border: none !important;
+      padding: 6px 2px;
     }
 
     /* Modal de Login */
@@ -579,7 +479,7 @@
 <body>
 
   <!-- =========================================================================
-       TOPBAR ESTILO BULLEX (COM ABA ÚNICA DA MOEDA, LIGAR IA E PLACAR)
+       TOPBAR ESTILO BULLEX (SEM O ATIVO REPETIDO NO TOPO, MENU BEM ORGANIZADO)
        ========================================================================= -->
   <header class="bullex-topbar">
     
@@ -602,22 +502,9 @@
       </svg>
     </div>
 
-    <!-- Aba Única da Moeda Analisada (Troca Automática) -->
-    <div class="bx-asset-tab" id="singleAssetTab">
-      <div class="bx-asset-icon-box" id="tabIconBox">
-        <img class="bx-flag-circle bx-flag-1" id="tabFlag1" src="https://flagcdn.com/w40/us.png" alt="">
-        <img class="bx-flag-circle bx-flag-2" id="tabFlag2" src="https://flagcdn.com/w40/br.png" alt="">
-        <div class="bx-single-logo" id="tabSingleLogo" style="display:none;"></div>
-        <span class="bx-otc-badge" id="tabOtcBadge">otc</span>
-      </div>
+    <div class="bx-terminal-title">BullEx Trading Terminal</div>
 
-      <div class="bx-tab-info">
-        <span class="bx-tab-name" id="tabAssetName">USD/BRL OTC</span>
-        <span class="bx-tab-sub" id="tabAssetSub">Binária • Payout 87%</span>
-      </div>
-    </div>
-
-    <!-- Lado Direito do Topbar -->
+    <!-- Lado Direito do Topbar Organizado -->
     <div class="bx-topbar-right">
       
       <!-- BOTÃO LIGAR/DESLIGAR IA NA BARRA SUPERIOR -->
@@ -681,7 +568,7 @@
   </header>
 
   <!-- =========================================================================
-       CONTEÚDO PRINCIPAL: A MOEDA + ANÁLISE EM TEXTO LIMPO TEMPO REAL
+       CONTEÚDO PRINCIPAL: A MOEDA + PENSAMENTO REAL DA IA EM TEXTO COMUM
        ========================================================================= -->
   <main class="bullex-main-content">
     
@@ -703,7 +590,7 @@
 
       <div class="asset-info-center">
         <div>
-          <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Preço Atual:</span>
+          <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Preço:</span>
           <span style="font-size: 14px; color: #fff; margin-left: 4px;" class="med" id="heroPriceVal">5.42150</span>
         </div>
         <div style="height: 18px; width: 1px; background: var(--border-subtle);"></div>
@@ -724,13 +611,9 @@
 
     </section>
 
-    <!-- ANÁLISE TÉCNICA INSTITUCIONAL EM TEXTO LIMPO (TEMPO REAL SEGUNDO A SEGUNDO) -->
-    <section class="ai-terminal-card">
-      <div class="terminal-header">
-        <span>Análise Técnica Institucional em Tempo Real (Atualização Contínua)</span>
-        <span class="terminal-credits-pill" id="terminalCredits">Gemini AI • 300 Créditos Disponíveis</span>
-      </div>
-      <div class="terminal-text-box" id="terminalText">Aguardando inicialização da análise...</div>
+    <!-- PENSAMENTO REAL DA IA (TEXTO COMUM NORMAL SEM FUNDO NEM CARDS) -->
+    <section class="ai-thought-section">
+      <div class="ai-thought-prose" id="thoughtText">Iniciando sistema de monitoramento... Clique em Ligar IA para começar o rastreamento dos ativos.</div>
     </section>
 
   </main>
@@ -773,7 +656,7 @@
   </div>
 
   <!-- =========================================================================
-       SCRIPTS JAVASCRIPT: LÓGICA EM TEMPO REAL E MAPA DE BANDEIRAS
+       SCRIPTS JAVASCRIPT: PENSAMENTO REAL DA IA E TEMPO REAL
        ========================================================================= -->
   <script>
     const CURRENCY_FLAGS = {
@@ -832,16 +715,9 @@
       };
     }
 
-    function renderAssetTab(assetName, payout) {
+    function renderActiveAsset(assetName, payout) {
       if (!assetName) return;
       const vis = parseAssetVisuals(assetName);
-
-      const tabFlag1 = document.getElementById('tabFlag1');
-      const tabFlag2 = document.getElementById('tabFlag2');
-      const tabSingle = document.getElementById('tabSingleLogo');
-      const tabOtc = document.getElementById('tabOtcBadge');
-      const tabName = document.getElementById('tabAssetName');
-      const tabSub = document.getElementById('tabAssetSub');
 
       const heroFlag1 = document.getElementById('heroFlag1');
       const heroFlag2 = document.getElementById('heroFlag2');
@@ -852,32 +728,17 @@
 
       const payoutTxt = payout ? `${Math.round(payout)}%` : '87%';
 
-      tabName.textContent = vis.label;
-      tabSub.textContent = `Binária • Payout ${payoutTxt}`;
-      tabOtc.style.display = vis.otc ? 'block' : 'none';
-
       heroName.textContent = vis.label;
       heroPayout.textContent = `Binária • Payout ${payoutTxt}`;
       heroOtc.style.display = vis.otc ? 'block' : 'none';
 
       if (vis.type === 'pair') {
-        tabFlag1.style.display = 'block';
-        tabFlag2.style.display = 'block';
-        tabSingle.style.display = 'none';
-        tabFlag1.src = `https://flagcdn.com/w40/${vis.f1}.png`;
-        tabFlag2.src = `https://flagcdn.com/w40/${vis.f2}.png`;
-
         heroFlag1.style.display = 'block';
         heroFlag2.style.display = 'block';
         heroSingle.style.display = 'none';
         heroFlag1.src = `https://flagcdn.com/w40/${vis.f1}.png`;
         heroFlag2.src = `https://flagcdn.com/w40/${vis.f2}.png`;
       } else {
-        tabFlag1.style.display = 'none';
-        tabFlag2.style.display = 'none';
-        tabSingle.style.display = 'flex';
-        tabSingle.textContent = vis.symbol;
-
         heroFlag1.style.display = 'none';
         heroFlag2.style.display = 'none';
         heroSingle.style.display = 'flex';
@@ -947,53 +808,65 @@
       };
     }
 
-    function gerarTextoAnaliseProfissional(ativo, dt, med, clockStr, seg, sig) {
+    // PENSAMENTO REAL DA IA EM TEXTO COMUM NORMAL COM VALORES DE CONFLUÊNCIA
+    function gerarPensamentoRealIA(ativo, dt, med, clockStr, seg, sig) {
+      if (!ativo) return "Aguardando inicialização do robô. Clique no botão Ligar IA acima para iniciar as análises.";
+      
       const agora = new Date().toLocaleTimeString('pt-BR');
       const decisao = sig?.direction || med.direcao_sugerida;
       const conf = sig?.confluence || med.confluencia_total;
-      
-      let gatilhoTxt = "Aguardando confluencia tecnica dos 4 criterios institucionais.";
-      if (decisao === 'CALL') {
-        gatilhoTxt = `Confluencia compradora confirmada (${conf}%). Disparo de CALL programado para a abertura do proximo candle (segundo 00s). Restam ${60 - seg} segundos.`;
-      } else if (decisao === 'PUT') {
-        gatilhoTxt = `Confluencia vendedora confirmada (${conf}%). Disparo de PUT programado para a abertura do proximo candle (segundo 00s). Restam ${60 - seg} segundos.`;
+      const preco = (dt.ultimo_preco || 0).toFixed(5);
+      const rsi = (dt.rsi14 || 50).toFixed(1);
+      const restam = 60 - seg;
+
+      let texto = `[${agora}] Estou analisando o ativo ${ativo} neste exato momento, cotado a ${preco}, durante o fechamento do candle M1 (${seg}s de 60s, restando ${restam}s para o nascimento da próxima vela).\n\n`;
+
+      if (dt.ema9 > dt.ema21 && dt.ema21 > dt.ema50) {
+        texto += `Na minha leitura de tendência, os compradores estão no comando da estrutura: a EMA 9 (${(dt.ema9||0).toFixed(5)}) está trabalhando acima da EMA 21 (${(dt.ema21||0).toFixed(5)}) e da EMA 50 (${(dt.ema50||0).toFixed(5)}), com o preço sustentado acima da média macro MA Trend 200 (${(dt.ma_trend_200||0).toFixed(5)}). Essa confluência de médias pontua ${med.c1_trend}% favorável para compra.\n\n`;
+      } else if (dt.ema9 < dt.ema21 && dt.ema21 < dt.ema50) {
+        texto += `Na minha leitura de tendência, os vendedores estão no comando da estrutura: a EMA 9 (${(dt.ema9||0).toFixed(5)}) está trabalhando abaixo da EMA 21 (${(dt.ema21||0).toFixed(5)}) e da EMA 50 (${(dt.ema50||0).toFixed(5)}), com o preço pressionado abaixo da MA Trend 200 (${(dt.ma_trend_200||0).toFixed(5)}). Essa confluência de médias pontua ${med.c1_trend}% favorável para venda.\n\n`;
       } else {
-        gatilhoTxt = `Rastreamento quantitativo no candle ${seg}s/60s. Calculando confluencias segundo a segundo.`;
+        texto += `Na minha leitura de tendência, o mercado se encontra em consolidação ou transição entre as médias móveis, pontuando ${med.c1_trend}% de confluência estrutural.\n\n`;
       }
 
-      const macdExpStr = dt.macd_expanding_bull ? 'Compradora (Bullish)' : (dt.macd_expanding_bear ? 'Vendedora (Bearish)' : 'Neutra');
+      texto += `Em relação ao momento e aos osciladores, o RSI 14 está marcando ${rsi}. `;
+      if (rsi >= 45 && rsi <= 72 && decisao === 'CALL') {
+        texto += `Essa faixa de oscilador confirma que o preço tem espaço livre para continuar subindo sem entrar em sobrecompra extrema, pontuando ${med.c2_momentum}% no critério de momentum.\n\n`;
+      } else if (rsi <= 55 && rsi >= 28 && decisao === 'PUT') {
+        texto += `Essa faixa de oscilador confirma que a pressão de venda tem espaço livre para continuar caindo sem entrar em sobrevenda extrema, pontuando ${med.c2_momentum}% no critério de momentum.\n\n`;
+      } else if (rsi > 75) {
+        texto += `O RSI está em zona de sobrecompra elevada, o que me faz segurar qualquer ordem de compra para evitar compras em topo esticado.\n\n`;
+      } else if (rsi < 25) {
+        texto += `O RSI está em zona de sobrevenda acentuada, o que me faz segurar qualquer ordem de venda para evitar vender no fundo.\n\n`;
+      } else {
+        texto += `O oscilador opera em faixa intermediária com ${med.c2_momentum}% de confluência.\n\n`;
+      }
 
-      return `[AUDITORIA TECNICA QUANTITATIVA ${agora}]
-ATIVO EM ANALISE: ${ativo} | PRECO ATUAL: ${(dt.ultimo_preco || 0).toFixed(5)} | VELA M1: ${seg}s/60s (Relogio: ${clockStr})
+      if (dt.macd_expanding_bull) {
+        texto += `O indicador MACD está com o histograma expandindo para cima com valor de +${(dt.macd_hist||0).toFixed(6)}, o que confirma entrada de volume financeiro comprador institucional (pontuação de ${med.c3_macd}%).\n\n`;
+      } else if (dt.macd_expanding_bear) {
+        texto += `O indicador MACD está com o histograma expandindo para baixo com valor de ${(dt.macd_hist||0).toFixed(6)}, o que confirma aceleração do volume vendedor institucional (pontuação de ${med.c3_macd}%).\n\n`;
+      } else {
+        texto += `O MACD registra variação estável com pontuação de ${med.c3_macd}% no volume.\n\n`;
+      }
 
-1. ESTRUTURA E MEDIAS MOVEIS:
-   Diagnostico: ${dt.tendencia_emas || 'ALTA ESTRUTURAL'}
-   EMA 9: ${(dt.ema9||0).toFixed(5)} | EMA 21: ${(dt.ema21||0).toFixed(5)} | EMA 50: ${(dt.ema50||0).toFixed(5)} | MA Trend 200: ${(dt.ma_trend_200||0).toFixed(5)}
-   Alinhamento: ${dt.ema9 > dt.ema21 ? 'EMA9 > EMA21 > EMA50 (Fluxo de Alta)' : 'EMA9 < EMA21 < EMA50 (Fluxo de Baixa)'}
-   Pontuacao do Criterio: ${med.c1_trend}%
+      if (dt.fractal_status && !dt.fractal_status.includes('Neutro')) {
+        texto += `No comportamento do candle e zonas de preço, identifico ${dt.fractal_status}, com suporte macro em ${(dt.suporte_macro_60||0).toFixed(5)} e resistência macro em ${(dt.resistencia_macro_60||0).toFixed(5)} (pontuação de ${med.c4_fractal}%).\n\n`;
+      } else {
+        texto += `No comportamento do candle, observo formação de ${dt.padrao_detectado || 'fluxo regular'}, respeitando suporte em ${(dt.suporte_macro_60||0).toFixed(5)} e resistência em ${(dt.resistencia_macro_60||0).toFixed(5)} (pontuação de ${med.c4_fractal}%).\n\n`;
+      }
 
-2. OSCILADORES E MOMENTUM:
-   RSI (14 Periodos): ${(dt.rsi14||50).toFixed(2)} | RSI (7 Periodos): ${(dt.rsi7||50).toFixed(2)}
-   Estocastico (%K / %D): ${(dt.stoch_k||50).toFixed(2)} | ADX (14 Periodos): ${(dt.adx14||25).toFixed(2)} (${dt.adx_forte ? 'Tendencia Forte' : 'Moderada'})
-   Pontuacao do Criterio: ${med.c2_momentum}%
+      texto += `Confluência técnica total calculada: ${conf}%.\n`;
 
-3. VOLUME E EXPANSÃO MACD:
-   Linha MACD: ${(dt.macd||0).toFixed(6)} | Linha de Sinal: ${(dt.macd_signal||0).toFixed(6)} | Histograma: ${(dt.macd_hist||0).toFixed(6)}
-   Dinamica do Histograma: Expansao ${macdExpStr}
-   Pontuacao do Criterio: ${med.c3_macd}%
+      if (decisao === 'CALL' && conf >= 80) {
+        texto += `Decisão Operacional: Confluência compradora aprovada em ${conf}%. Estou posicionando a ordem de COMPRA (CALL) para entrar com precisão cirúrgica na virada do candle, no segundo 00s (faltando exatamente ${restam} segundos).`;
+      } else if (decisao === 'PUT' && conf >= 80) {
+        texto += `Decisão Operacional: Confluência vendedora aprovada em ${conf}%. Estou posicionando a ordem de VENDA (PUT) para entrar com precisão cirúrgica na virada do candle, no segundo 00s (faltando exatamente ${restam} segundos).`;
+      } else {
+        texto += `Decisão Operacional: A confluência calculada está em ${conf}%, abaixo da meta exigida de 80%. Continuo processando os dados e aguardo o alinhamento completo antes de disparar qualquer ordem na conta.`;
+      }
 
-4. PRICE ACTION, VELAS M1 E ZONAS SMC:
-   Padrao Detectado: ${dt.padrao_detectado || 'Fluxo Institucional'}
-   Dimensoes: Corpo: ${(dt.body_now||0).toFixed(5)} | Pavio Superior: ${(dt.candle_ultimo?.pavio_superior||0).toFixed(5)} | Pavio Inferior: ${(dt.candle_ultimo?.pavio_inferior||0).toFixed(5)}
-   Fractais de Williams (5 Velas): ${dt.fractal_status || 'Neutro'}
-   Resistencia Macro (60 Velas): ${(dt.resistencia_macro_60||0).toFixed(5)} | Suporte Macro (60 Velas): ${(dt.suporte_macro_60||0).toFixed(5)}
-   Pontuacao do Criterio: ${med.c4_fractal}%
-
-========================================================================================
-RESULTADO DA CONFLUENCIA INSTITUCIONAL: ${conf}% (Meta de Gatilho: 80%)
-DECISAO OPERACIONAL: ${decisao}
-STATUS DO DISPARO: ${gatilhoTxt}
-========================================================================================`;
+      return texto;
     }
 
     function toggleAccountMenu() {
@@ -1138,7 +1011,7 @@ STATUS DO DISPARO: ${gatilhoTxt}
 
         // A Moeda Analisada
         const activeAsset = d.active_asset || 'EURUSD-OTC';
-        renderAssetTab(activeAsset, d.last_candle_data?.payout || 87);
+        renderActiveAsset(activeAsset, d.last_candle_data?.payout || 87);
 
         // Preço
         const dt = d.last_candle_data || {};
@@ -1156,7 +1029,7 @@ STATUS DO DISPARO: ${gatilhoTxt}
         document.getElementById('candleClockDigits').textContent = clockStr;
         const seg = dt.segundo_da_vela ?? (60 - parseInt(clockStr.replace('00:', '')));
 
-        // Medidores e Gatilho
+        // Medidores e Confluência
         const med = calcularMedidoresPrompt(dt);
         const finalConf = d.active_signal?.confluence || med.confluencia_total;
         document.getElementById('totalConfluenceScore').textContent = `${finalConf}%`;
@@ -1176,12 +1049,9 @@ STATUS DO DISPARO: ${gatilhoTxt}
           trigBadge.textContent = `AGUARDANDO CONFLUÊNCIA (${seg}s/60s)`;
         }
 
-        // Terminal da Análise em Texto Limpo Tempo Real
-        const txtAnalise = gerarTextoAnaliseProfissional(activeAsset, dt, med, clockStr, seg, sig);
-        document.getElementById('terminalText').textContent = txtAnalise;
-
-        const creds = d.gemini_credits?.total_credits ?? 300;
-        document.getElementById('terminalCredits').textContent = `Gemini AI • ${creds} Créditos Disponíveis`;
+        // O Pensamento Real da IA como Texto Comum Normal com Confluência em Valores
+        const textoPensamento = gerarPensamentoRealIA(activeAsset, dt, med, clockStr, seg, sig);
+        document.getElementById('thoughtText').textContent = textoPensamento;
 
       } catch (e) {
         console.error("Erro no polling:", e);
