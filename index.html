@@ -740,7 +740,7 @@
     .bx-side-drawer {
       position: fixed;
       top: 0;
-      left: 76px;
+      left: -350px;
       bottom: 0;
       width: 320px;
       max-width: calc(100vw - 80px);
@@ -750,11 +750,18 @@
       z-index: 125;
       display: flex;
       flex-direction: column;
-      transform: translateX(-110%);
-      transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+      visibility: hidden;
+      pointer-events: none;
+      opacity: 0;
+      transform: translateX(-50px);
+      transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease, visibility 0.2s ease, left 0.22s ease;
     }
     .bx-side-drawer.open {
+      left: 76px;
       transform: translateX(0);
+      visibility: visible;
+      pointer-events: auto;
+      opacity: 1;
     }
 
     .bx-drawer-header {
@@ -1582,12 +1589,16 @@
     }
 
     // FORMATAÇÃO DO PENSAMENTO REAL DA IA COM VALORES 100% REAIS, FLUXO LIMPO E SEM ROBÓTICA
-    function gerarPensamentoRealIA(ativo, dt, med, clockStr, seg, sig, observationBackend, aiEnabled) {
+    function gerarPensamentoRealIA(ativo, dt, med, clockStr, seg, sig, observationBackend, aiEnabled, warmupDone, warmupProgress) {
       if (!aiEnabled) {
-        return "Inteligência Artificial desligada. Clique no botão Ligar IA para carregar os 60 candles e iniciar a auditoria institucional em tempo real.";
+        return "Inteligência Artificial desligada. Clique no botão Ligar IA para carregar os 60 candles de todos os ativos e iniciar a auditoria institucional em tempo real.";
+      }
+      if (!warmupDone) {
+        const wp = warmupProgress || {};
+        return observationBackend || `Carregando histórico dos 60 candles de todos os ativos OTC (${wp.loaded || 0}/${wp.total || 14} — ${wp.percent || 0}%)...`;
       }
       if (!dt || !dt.ultimo_preco || dt.ultimo_preco <= 0) {
-        return `Conectando à BullEx e carregando os últimos 60 candles M1 de ${ativo || 'EURUSD-OTC'}...`;
+        return `Carregamento concluído. Iniciando auditoria dos 60 candles de ${ativo || 'EURUSD-OTC'} na BullEx...`;
       }
       
       const agora = new Date().toLocaleTimeString('pt-BR');
@@ -1631,7 +1642,7 @@
 
       // Parecer do Gemini AI vindo do backend
       let pObs = "";
-      if (observationBackend && !observationBackend.includes('Iniciando carregamento') && !observationBackend.includes('Inteligência Artificial desligada')) {
+      if (observationBackend && !observationBackend.includes('Carregando histórico') && !observationBackend.includes('Iniciando carregamento') && !observationBackend.includes('Inteligência Artificial desligada')) {
         let cleanObs = observationBackend.replace(/\[(ANALISE INSTITUCIONAL|Gemini AI) \d{2}:\d{2}:\d{2}\]/g, '').trim();
         if (cleanObs) {
           pObs = `\nParecer Gemini AI: ${cleanObs}`;
@@ -1878,6 +1889,14 @@
       }
     });
 
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeAllDrawers();
+        document.getElementById('accountMenu')?.classList.remove('show');
+        document.getElementById('loginModal')?.classList.remove('open');
+      }
+    });
+
     async function switchAccountMode(mode) {
       try {
         const res = await fetch('/api/config', {
@@ -1996,41 +2015,50 @@
         const activeAsset = d.active_asset || 'EURUSD-OTC';
         renderActiveAsset(activeAsset, d.last_candle_data?.payout || 87);
 
-        // Preço
+        // Preço, Relógio e Confluência
         const dt = d.last_candle_data || {};
         const priceElem = document.getElementById('heroPriceVal');
-        if (dt.ultimo_preco && dt.ultimo_preco > 0) {
-          const priceVal = dt.ultimo_preco;
-          priceElem.textContent = priceVal.toFixed(5);
-          if (appState.lastPrice && priceVal !== appState.lastPrice) {
-            priceElem.style.color = priceVal > appState.lastPrice ? 'var(--bullex-green)' : 'var(--bullex-red)';
-            setTimeout(() => { priceElem.style.color = '#fff'; }, 300);
-          }
-          appState.lastPrice = priceVal;
-        } else if (appState.lastPrice) {
-          priceElem.textContent = appState.lastPrice.toFixed(5);
-        } else {
-          priceElem.textContent = '--';
-        }
-
-        // Relógio M1
-        const clockStr = d.candle_clock || '00:00';
-        document.getElementById('candleClockDigits').textContent = clockStr;
-        const seg = dt.segundo_da_vela ?? (60 - parseInt(clockStr.replace('00:', '')));
-
-        // Medidores e Confluência
-        const med = calcularMedidoresPrompt(dt);
-        const finalConf = d.active_signal?.confluence || med.confluencia_total;
+        const clockDigitsElem = document.getElementById('candleClockDigits');
         const totalConfElem = document.getElementById('totalConfluenceScore');
         const trigBadge = document.getElementById('triggerBadge');
         const sig = d.active_signal;
+        const med = calcularMedidoresPrompt(dt);
+        const finalConf = sig?.confluence || med.confluencia_total;
+        const clockStr = d.candle_clock || '00:00';
+        const seg = dt.segundo_da_vela ?? (60 - parseInt(clockStr.replace('00:', '')));
 
         if (!d.ai_enabled) {
+          // IA DESLIGADA: Não mostra preço nem relógio de vela correndo
+          priceElem.textContent = '--';
+          clockDigitsElem.textContent = '--:--';
           totalConfElem.textContent = '--';
           trigBadge.className = 'trigger-badge-status';
           trigBadge.textContent = 'IA DESLIGADA';
+        } else if (!d.warmup_done) {
+          // CARREGANDO 60 CANDLES DE TODOS OS ATIVOS
+          const wp = d.warmup_progress || {};
+          priceElem.textContent = '--';
+          clockDigitsElem.textContent = '--:--';
+          totalConfElem.textContent = '--';
+          trigBadge.className = 'trigger-badge-status';
+          trigBadge.textContent = `CARREGANDO 60 CANDLES (${wp.percent || 0}%)`;
         } else {
+          // IA LIGADA E 60 CANDLES PRONTOS: AI SIM ELE COMEÇA A ANALISAR E OPERAR
+          if (dt.ultimo_preco && dt.ultimo_preco > 0) {
+            const priceVal = dt.ultimo_preco;
+            priceElem.textContent = priceVal.toFixed(5);
+            if (appState.lastPrice && priceVal !== appState.lastPrice) {
+              priceElem.style.color = priceVal > appState.lastPrice ? 'var(--bullex-green)' : 'var(--bullex-red)';
+              setTimeout(() => { priceElem.style.color = '#fff'; }, 300);
+            }
+            appState.lastPrice = priceVal;
+          } else {
+            priceElem.textContent = '--';
+          }
+
+          clockDigitsElem.textContent = clockStr;
           totalConfElem.textContent = `${finalConf}%`;
+
           const decFinal = sig?.direction || med.direcao_sugerida;
           if (decFinal === 'CALL' && finalConf >= 78) {
             trigBadge.className = 'trigger-badge-status call';
@@ -2141,7 +2169,7 @@
           viewAnalysis.style.display = 'flex';
 
           // Pensamento Real da IA Formatado e Sem Zeros
-          const textoPensamento = gerarPensamentoRealIA(activeAsset, dt, med, clockStr, seg, sig, d.observation, d.ai_enabled);
+          const textoPensamento = gerarPensamentoRealIA(activeAsset, dt, med, clockStr, seg, sig, d.observation, d.ai_enabled, d.warmup_done, d.warmup_progress);
           document.getElementById('thoughtText').textContent = textoPensamento;
         }
 
