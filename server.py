@@ -1368,99 +1368,53 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
     agora = datetime.now()
     seg_atual = agora.second
 
-    # Janela ideal de compra em M1 na BullEx: entre 22s e 27s da vela (bem perto do fechamento de compra dos 30s finais!)
-    # Se já passou dos 27s, aguarda a próxima vela abrir e depois espera chegar perto dos 24s-27s.
-    if is_immediate_gale and seg_atual <= 27:
-        seg_ate_virada = 0
-        target_virada_epoch = agora_ts
-    elif 18 <= seg_atual <= 27:
-        seg_ate_virada = 0
-        target_virada_epoch = agora_ts
-    elif seg_atual < 18:
-        seg_ate_virada = 0
-        target_virada_epoch = agora_ts
-    else:
-        seg_ate_virada = (60 - seg_atual) % 60
-        if seg_ate_virada == 0:
-            seg_ate_virada = 60
+    # EXECUÇÃO IMEDIATA SEM DELAY (0s LAG):
+    # Se a análise confirmou e estamos até os 40s da vela: DISPARA IMEDIATAMENTE!
+    # Se já passou dos 40s (fim da vela): aguarda a virada (segundo 00s) e entra no 1º segundo da abertura!
+    if seg_atual >= 41 and not is_immediate_gale:
+        seg_ate_virada = 60 - seg_atual
         target_virada_epoch = agora_ts + seg_ate_virada
+        state.active_signal = {
+            "asset": ativo,
+            "direction": direcao,
+            "confluence": conf,
+            "expiration": "M1 (1 Minuto)",
+            "target": f"Abertura Nova Vela ({seg_ate_virada}s)",
+            "seconds_left": seg_ate_virada,
+            "target_epoch": target_virada_epoch,
+            "action_hint": f"[{tipo_operacao}] Sinal confirmado! Aguardando virada para pegar abertura da vela.",
+            "status": f"SINAL CONFIRMADO ({tipo_operacao}) — AGUARDANDO ABERTURA",
+            "time": agora.strftime("%H:%M:%S"),
+            "gale_step": state.current_gale_step,
+            "stake": valor
+        }
+        print(f"\n[SINAL CONFIRMADO - {tipo_operacao}] {direcao} em {ativo} | Aguardando {seg_ate_virada}s para virada exata da vela...", flush=True)
+        while time.time() < target_virada_epoch - 0.1:
+            if not state.ai_enabled and "Manual" not in motivo_str:
+                state.is_trading = False
+                state.active_signal = None
+                return
+            await asyncio.sleep(0.1)
+            rest = max(0, int(round(target_virada_epoch - time.time())))
+            if state.active_signal:
+                state.active_signal["seconds_left"] = rest
+    else:
+        state.active_signal = {
+            "asset": ativo,
+            "direction": direcao,
+            "confluence": conf,
+            "expiration": "M1 (1 Minuto)",
+            "target": "Disparo Imediato (0s Lag)",
+            "seconds_left": 0,
+            "target_epoch": agora_ts,
+            "action_hint": f"[{tipo_operacao}] Todos os indicadores e IA confirmados! Disparando imediatamente.",
+            "status": f"EXECUTANDO DISPARO IMEDIATO ({tipo_operacao})",
+            "time": agora.strftime("%H:%M:%S"),
+            "gale_step": state.current_gale_step,
+            "stake": valor
+        }
 
-    state.active_signal = {
-        "asset": ativo,
-        "direction": direcao,
-        "confluence": conf,
-        "expiration": "M1 (1 Minuto)",
-        "target": "Janela Final (22s–27s)" if seg_ate_virada == 0 else "Próxima Vela (Janela 22s–27s)",
-        "seconds_left": seg_ate_virada,
-        "target_epoch": target_virada_epoch,
-        "action_hint": f"[{tipo_operacao}] Aguardando zona próxima aos 30s finais de compra para melhor taxa.",
-        "status": f"SINAL IDENTIFICADO ({tipo_operacao}) — PREPARANDO JANELA 30s",
-        "time": agora.strftime("%H:%M:%S"),
-        "gale_step": state.current_gale_step,
-        "stake": valor
-    }
-
-    print(f"\n[SINAL IDENTIFICADO - {tipo_operacao}] {direcao} em {ativo} (M1) | {seg_ate_virada}s para virada", flush=True)
-
-    # 1. Se precisou aguardar a virada da vela, faz contagem regressiva até 00s
-    while time.time() < target_virada_epoch - 0.15:
-        if not state.ai_enabled and "Manual" not in motivo_str:
-            state.is_trading = False
-            state.active_signal = None
-            return
-        await asyncio.sleep(0.15)
-        rest_virada = max(0, int(round(target_virada_epoch - time.time())))
-        if state.active_signal:
-            state.active_signal["seconds_left"] = rest_virada
-            state.active_signal["status"] = f"AGUARDANDO NOVA VELA M1 ({rest_virada}s)"
-
-    # 2. Agora dentro da vela (00s..27s): aguarda chegar perto dos 30s finais de compra (entre 22s e 27s)
-    # capturando retração a favor da entrada (subida para PUT, descida para CALL)
-    preco_abertura = None
-    if state.api and state.is_connected:
-        try:
-            c_open = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(time.time()))
-            if c_open and len(c_open) > 0:
-                preco_abertura = float(c_open[-1].get("open") or c_open[-1].get("close") or 0.0)
-        except Exception:
-            preco_abertura = None
-
-    while True:
-        if not state.ai_enabled and "Manual" not in motivo_str:
-            state.is_trading = False
-            state.active_signal = None
-            return
-        now_ts = time.time()
-        seg_vela = int(now_ts) % 60
-        if seg_vela >= 27:
-            print(f" -> [JANELA 27s ATINGIDA] Executando {direcao} em {ativo} aos {seg_vela}s (perto do fechamento de compra 30s).", flush=True)
-            break
-
-        preco_atual = None
-        if seg_vela >= 20 and state.api and state.is_connected:
-            try:
-                c_live = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(now_ts))
-                if c_live and len(c_live) > 0:
-                    if not preco_abertura:
-                        preco_abertura = float(c_live[-1].get("open") or c_live[-1].get("close") or 0.0)
-                    preco_atual = float(c_live[-1].get("close") or 0.0)
-            except Exception:
-                pass
-            if preco_abertura and preco_atual:
-                if (direcao == "PUT" and preco_atual > preco_abertura) or (direcao == "CALL" and preco_atual < preco_abertura):
-                    print(f" -> [TAXA IDEAL PERTO DOS 30s] {ativo} {direcao} capturado aos {seg_vela}s (abertura={preco_abertura}, atual={preco_atual})!", flush=True)
-                    break
-
-        faltam_janela = max(0, 27 - seg_vela)
-        if state.active_signal:
-            state.active_signal["seconds_left"] = faltam_janela
-            state.active_signal["target_epoch"] = now_ts + faltam_janela
-            state.active_signal["status"] = f"AGUARDANDO ZONA FINAL DE COMPRA ({29 - seg_vela}s)"
-            state.active_signal["action_hint"] = f"[{tipo_operacao}] Aguardando melhor taxa perto dos 30s finais ({seg_vela}s/27s)..."
-        await asyncio.sleep(0.35)
-
-    # Disparo IMEDIATO na abertura da vela (segundo 00s-01s)
-    # ZERO ATRASO: sem esperar 28s, sem risco de timeout de compra e sem pular de vela!
+    # Disparo IMEDIATO (ZERO ATRASO): sem esperar 27s, pegando a taxa exata de abertura ou confirmação!
     agora_exec_str = datetime.now().strftime("%H:%M:%S")
     if state.active_signal:
         exp_epoch = calcular_expiracao_m1_epoch(time.time(), 1)
@@ -1953,6 +1907,34 @@ async def varrer_60_candles_ativos():
             print(f" -> [FILTRO ANTI-FUNDO] PUT bloqueado em {ativo} (preço={ultimo_p}, BB_inf={bb_low}, RSI={rsi_val}).", flush=True)
             decisao = "AGUARDAR"
             analise["texto_observacao"] = f"[{ativo} | {agora_str}] PUT bloqueado em fundo extremo (BB Inf={bb_low}, RSI={rsi_val}). Aguardando melhor ponto."
+
+        # Confluência Obrigatória de Indicadores (Tendência + MACD + RSI + IA)
+        macd_exp_bull = bool(dados_60.get("macd_expanding_bull"))
+        macd_exp_bear = bool(dados_60.get("macd_expanding_bear"))
+        macd_val = float(dados_60.get("macd") or 0.0)
+        macd_sig = float(dados_60.get("macd_signal") or 0.0)
+        tendencia_str = str(dados_60.get("tendencia_emas") or "")
+
+        if decisao == "CALL":
+            if "BAIXA ESTRUTURAL" in tendencia_str:
+                print(f" -> [FILTRO TENDÊNCIA] CALL bloqueado em {ativo} (tendência de baixa ativa).", flush=True)
+                decisao = "AGUARDAR"
+            elif macd_exp_bear:
+                print(f" -> [FILTRO MACD] CALL bloqueado em {ativo} (MACD expansivo de baixa).", flush=True)
+                decisao = "AGUARDAR"
+            elif rsi_val >= 75:
+                print(f" -> [FILTRO RSI] CALL bloqueado em {ativo} (RSI {rsi_val} sobrecomprado).", flush=True)
+                decisao = "AGUARDAR"
+        elif decisao == "PUT":
+            if "ALTA ESTRUTURAL" in tendencia_str:
+                print(f" -> [FILTRO TENDÊNCIA] PUT bloqueado em {ativo} (tendência de alta ativa).", flush=True)
+                decisao = "AGUARDAR"
+            elif macd_exp_bull:
+                print(f" -> [FILTRO MACD] PUT bloqueado em {ativo} (MACD expansivo de alta).", flush=True)
+                decisao = "AGUARDAR"
+            elif rsi_val <= 25:
+                print(f" -> [FILTRO RSI] PUT bloqueado em {ativo} (RSI {rsi_val} sobrevendido).", flush=True)
+                decisao = "AGUARDAR"
 
         olho_badge = dados_60.get("olho_deus_classificacao", "")
         obs_txt = analise.get("texto_observacao") or f"[{ativo} | {agora_str}] Decisão: {decisao} ({conf}% confluência) - {olho_badge}"
