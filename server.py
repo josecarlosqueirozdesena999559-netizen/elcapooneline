@@ -148,29 +148,37 @@ def obter_pool_otc_binarios() -> List[str]:
 
 SCAN_ASSETS_PRIORITY = OTC_BINARY_CATALOG
 
-# Pool de Chaves com Rotação Automática (3 Chaves / Créditos Diários Renovados)
+# Pool de Chaves com Rotação Automática (Chave Ativa Renovada + Reservas)
 API_KEY_POOL = [
     {
         "id": 1,
-        "label": "Chave 5 (Principal)",
-        "key": "sk-eWO12W1x-flzVPOkm_hcVFhU3JTbKShmdjvt52p6gfZKP-rYbCyCzWz0qlQc4TyqQoybsxe20jeoO25AlgmIKO-qrPOF",
-        "credits": 295,
-        "max_credits": 300,
-        "exhausted": False
-    },
-    {
-        "id": 2,
-        "label": "Chave 3 (Reserva 1)",
-        "key": "sk-fwbSvlXpSOxJCvb8LkKSDvcdPBwtFmuxs1-AObo4ghwynYcJBOr4JaXzLOpD8MawjaWegeakdA9n-9re5_ENRkWtf2I4",
+        "label": "Chave Principal (300 cr)",
+        "key": "sk-gIhZxnjkiUxeHBvinDB2RHnsIbyOOKxFo0sKZFsCjg4HIzgRkIfMPsxkh69kHN69hEiiWUxcMan6NqW0jIqhIZfUJzfz",
         "credits": 300,
         "max_credits": 300,
         "exhausted": False
     },
     {
+        "id": 2,
+        "label": "Chave 5 (Reserva 1)",
+        "key": "sk-eWO12W1x-flzVPOkm_hcVFhU3JTbKShmdjvt52p6gfZKP-rYbCyCzWz0qlQc4TyqQoybsxe20jeoO25AlgmIKO-qrPOF",
+        "credits": 0,
+        "max_credits": 300,
+        "exhausted": False
+    },
+    {
         "id": 3,
-        "label": "Chave 4 (Reserva 2)",
+        "label": "Chave 3 (Reserva 2)",
+        "key": "sk-fwbSvlXpSOxJCvb8LkKSDvcdPBwtFmuxs1-AObo4ghwynYcJBOr4JaXzLOpD8MawjaWegeakdA9n-9re5_ENRkWtf2I4",
+        "credits": 0,
+        "max_credits": 300,
+        "exhausted": False
+    },
+    {
+        "id": 4,
+        "label": "Chave 4 (Reserva 3)",
         "key": "sk-25iVyLYJOlutOOKU-yN3hgENMN3uHzDmgSVavczWte2hAdQyPfA7AIuRbjAhvkvWNX-VS1huuo2-d8t62_4jB14mGPZV",
-        "credits": 150,
+        "credits": 0,
         "max_credits": 300,
         "exhausted": False
     }
@@ -200,12 +208,12 @@ def rotacionar_proxima_chave(motivo: str = "") -> Optional[str]:
             print(f"\n[KEY POOL ROTATION] {antiga} esgotada ({motivo}). Nova chave ativa: {item['label']} com {item['credits']} créditos (Total Pool: {cred_total})", flush=True)
             return item["key"]
 
-    state.gemini_status = "Créditos esgotados em todas as 3 chaves (0 disponíveis)"
+    state.gemini_status = f"Créditos esgotados em todas as {len(API_KEY_POOL)} chaves (0 disponíveis)"
     if isinstance(state.gemini_credits, dict):
         state.gemini_credits["total_credits"] = 0
     state.ai_enabled = False
-    state.current_observation = "[Gemini AI] Todas as 3 chaves do pool esgotaram seus créditos (757 créditos consumidos)."
-    print("[KEY POOL ALERT] Todas as 3 chaves do pool foram esgotadas!", flush=True)
+    state.current_observation = f"[Gemini AI] Todas as {len(API_KEY_POOL)} chaves do pool esgotaram seus créditos."
+    print(f"[KEY POOL ALERT] Todas as {len(API_KEY_POOL)} chaves do pool foram esgotadas!", flush=True)
     return None
 
 class BotMemoryState:
