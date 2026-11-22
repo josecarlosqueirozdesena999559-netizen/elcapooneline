@@ -1478,15 +1478,15 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
                 state.active_signal["clock_str"] = f"00:{rest:02d}"
 
     # Estamos na janela de 24s a 29.2s!
-    # Obter preço de abertura para calcular a melhor taxa de retração:
+    # Obter preço de abertura para calcular a melhor taxa de retração sem bloquear a websocket:
     preco_abertura = 0.0
-    if state.api and state.is_connected:
-        try:
-            c_now = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(obter_tempo_oficial_plataforma()))
-            if c_now and len(c_now) > 0:
-                preco_abertura = float(c_now[-1].get("open") or c_now[-1].get("close") or 0.0)
-        except Exception:
-            preco_abertura = 0.0
+    cur_d = state.last_candle_data or {}
+    c_last = cur_d.get("candle_ultimo") or {}
+    preco_abertura = float(c_last.get("open") or cur_d.get("ultimo_preco") or 0.0)
+    if preco_abertura == 0.0:
+        c_list = state.candles_cache.get(ativo, [])
+        if c_list:
+            preco_abertura = float(c_list[-1].get("open") or c_list[-1].get("close") or 0.0)
 
     # Busca a melhor taxa até 29.0s da vela:
     # Se COMPRA: espera retrair um pouco para baixo da abertura para comprar no fundo
@@ -1498,14 +1498,7 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         if seg_janela >= 28.8 or (seg_janela < 24.0 and seg_janela > 1.0):
             break
 
-        taxa_atual = preco_abertura
-        if state.api and state.is_connected and preco_abertura > 0:
-            try:
-                c_tick = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(t_atual))
-                if c_tick and len(c_tick) > 0:
-                    taxa_atual = float(c_tick[-1].get("close") or taxa_atual)
-            except Exception:
-                pass
+        taxa_atual = float((state.last_candle_data or {}).get("ultimo_preco") or preco_abertura)
 
         if direcao.upper() == "CALL" and preco_abertura > 0:
             if taxa_atual <= preco_abertura:
@@ -2633,4 +2626,4 @@ async def serve_index():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8085)
+    uvicorn.run(app, host="0.0.0.0", port=8085, log_level="warning")

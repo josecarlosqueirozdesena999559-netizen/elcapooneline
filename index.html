@@ -1577,6 +1577,7 @@
 
         <!-- SALDO COM SELETOR DE CONTA DEMO OU REAL -->
         <div class="bx-balance-box" id="balanceBtn" onclick="toggleAccountMenu()" title="Clique para alternar entre Conta Demo e Conta Real">
+          <span class="bx-mode-badge" id="balanceTypeBadge" style="font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 500; margin-right: 6px; background: rgba(168,85,247,0.18); color: #c084fc;">DEMO</span>
           <span class="bx-balance-amount" id="balanceDisplay">$17,506.00</span>
           <span class="bx-balance-caret">▼</span>
         </div>
@@ -1701,8 +1702,11 @@
                     <span class="at-asset-name med" id="atAssetName">EUR/USD OTC</span>
                   </div>
                 </td>
-                <!-- Tipo -->
-                <td style="color: #cbd5e1;">Binária</td>
+                <!-- Tipo e Ticket BullEx -->
+                <td style="color: #cbd5e1;">
+                  <span id="atOrderType">Binária</span>
+                  <span id="atOrderIdBadge" style="font-size: 11px; color: var(--text-dim); margin-left: 6px; font-family: monospace;"></span>
+                </td>
                 <!-- Expiração com relógio roxo e contagem real da API -->
                 <td>
                   <div class="at-expiration-cell">
@@ -2632,6 +2636,12 @@
         const isDemo = (d.mode === 'DEMO');
         appState.mode = d.mode;
         const balAmount = document.getElementById('balanceDisplay');
+        const modeBadge = document.getElementById('balanceTypeBadge');
+        if (modeBadge) {
+          modeBadge.textContent = isDemo ? 'DEMO' : 'REAL';
+          modeBadge.style.background = isDemo ? 'rgba(168,85,247,0.18)' : 'rgba(0,194,111,0.18)';
+          modeBadge.style.color = isDemo ? '#c084fc' : 'var(--bullex-green)';
+        }
         const balVal = isDemo ? d.balance_demo : d.balance_real;
         balAmount.textContent = `$${(balVal || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
         if (isDemo) {
@@ -2752,7 +2762,10 @@
 
           if (trigBadge) {
             const decFinal = sig?.direction || med.direcao_sugerida;
-            if (decFinal === 'CALL' && finalConf >= 78) {
+            if (isTrading && sig && !sig.order_id) {
+              trigBadge.className = 'trigger-badge-status ' + (sig.direction || '').toLowerCase();
+              trigBadge.textContent = `${sig.direction || 'SINAL'} CONFIRMADO • BUSCANDO TAXA AOS 30s (${sig.seconds_left || 0}s)`;
+            } else if (decFinal === 'CALL' && finalConf >= 78) {
               trigBadge.className = 'trigger-badge-status call';
               trigBadge.textContent = `CALL (COMPRA) • 00s (${Math.max(0, 60 - seg)}s)`;
             } else if (decFinal === 'PUT' && finalConf >= 78) {
@@ -2770,7 +2783,8 @@
         const viewActiveTrade = document.getElementById('viewActiveTrade');
         const viewTraderRoom = document.getElementById('viewTraderRoom');
         const isTrading = !!d.is_trading;
-        window._isTradingActive = !!(isTrading && sig);
+        const hasBrokerOrder = !!(sig && sig.order_id);
+        window._isTradingActive = !!(isTrading && sig && hasBrokerOrder);
 
         if (currentMainTab === 'traderoom') {
           if (viewTraderRoom) viewTraderRoom.style.display = 'flex';
@@ -2788,9 +2802,13 @@
           }
         }
 
-        if (isTrading && sig) {
+        if (window._isTradingActive && sig) {
           const ativoOp = sig.asset || activeAsset;
           const visOp = parseAssetVisuals(ativoOp);
+
+          // Ticket da BullEx no cabeçalho da linha da ordem
+          const idBadge = document.getElementById('atOrderIdBadge');
+          if (idBadge) idBadge.textContent = sig.order_id ? `#${sig.order_id}` : '';
 
           // Nome do Ativo com Parênteses OTC
           const atName = document.getElementById('atAssetName');
