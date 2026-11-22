@@ -783,10 +783,10 @@
     .bx-drawer-backdrop {
       position: fixed;
       inset: 0;
-      background: rgba(0, 0, 0, 0.45);
-      backdrop-filter: blur(2px);
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(3px);
       display: none;
-      z-index: 120;
+      z-index: 1000;
     }
     .bx-drawer-backdrop.open {
       display: block;
@@ -795,28 +795,27 @@
     .bx-side-drawer {
       position: fixed;
       top: 0;
-      left: -350px;
+      left: 76px;
       bottom: 0;
       width: 320px;
       max-width: calc(100vw - 80px);
       background: var(--bg-card);
       border-right: 1px solid var(--border-subtle);
       box-shadow: 12px 0 35px rgba(0, 0, 0, 0.65);
-      z-index: 125;
-      display: flex;
+      z-index: 2000;
+      display: none;
       flex-direction: column;
-      visibility: hidden;
-      pointer-events: none;
-      opacity: 0;
-      transform: translateX(-50px);
-      transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease, visibility 0.2s ease, left 0.22s ease;
     }
     .bx-side-drawer.open {
-      left: 76px;
-      transform: translateX(0);
-      visibility: visible;
-      pointer-events: auto;
-      opacity: 1;
+      display: flex;
+    }
+
+    body.drawer-is-open #viewTraderRoom {
+      display: none !important;
+    }
+    body.drawer-is-open #bullexTradeRoomFrame {
+      visibility: hidden !important;
+      pointer-events: none !important;
     }
 
     .bx-drawer-header {
@@ -1125,18 +1124,331 @@
     .bx-login-card button:hover {
       opacity: 0.9;
     }
+
+    /* =========================================================================
+       TRADER ROOM (GRÁFICO BULLEX AO VIVO)
+       ========================================================================= */
+    .view-traderoom-wrap {
+      width: 100%;
+      height: calc(100vh - 84px);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      box-sizing: border-box;
+    }
+    .traderoom-topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 6px;
+      flex-shrink: 0;
+    }
+    .traderoom-frame-container {
+      flex: 1;
+      min-height: 0;
+      width: 100%;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border-subtle);
+      background: #0b0f17;
+      position: relative;
+    }
+    .traderoom-frame {
+      width: 100%;
+      height: 100%;
+      border: none;
+      display: block;
+    }
+
+    body.tab-traderoom-active {
+      overflow: hidden !important;
+      height: 100dvh !important;
+    }
+    body.tab-traderoom-active .bx-main-area {
+      height: 100dvh !important;
+      max-height: 100dvh !important;
+      overflow: hidden !important;
+    }
+    body.tab-traderoom-active .bullex-main-content {
+      flex: 1 !important;
+      min-height: 0 !important;
+      overflow: hidden !important;
+      padding: 6px 12px 10px !important;
+      gap: 6px !important;
+    }
+    body.tab-traderoom-active .view-traderoom-wrap {
+      flex: 1 !important;
+      min-height: 0 !important;
+      height: 100% !important;
+      max-height: 100% !important;
+      overflow: hidden !important;
+      display: flex !important;
+      flex-direction: column !important;
+    }
+    body.tab-traderoom-active .traderoom-frame-container {
+      flex: 1 !important;
+      min-height: 0 !important;
+      height: 100% !important;
+    }
+
+    /* DOCK DE NAVEGAÇÃO MOBILE (APENAS EM TELAS <= 768px) */
+    .bx-mobile-nav {
+      display: none;
+    }
+
+    /* =========================================================================
+       RESPONSIVIDADE COMPLETA PARA CELULAR (@media max-width: 768px)
+       ========================================================================= */
+    @media (max-width: 768px) {
+      body {
+        display: block !important;
+        width: 100% !important;
+        overflow-x: hidden !important;
+      }
+
+      /* Oculta sidebar vertical que toma muito espaço na tela estreita */
+      .bx-sidebar {
+        display: none !important;
+      }
+
+      /* Área principal toma 100% da largura com padding inferior para a barra fixa */
+      .bx-main-area {
+        width: 100% !important;
+        min-width: 0 !important;
+        margin: 0 !important;
+        padding-bottom: 64px !important;
+      }
+
+      /* Barra de navegação inferior estilo aplicativo mobile */
+      .bx-mobile-nav {
+        display: flex !important;
+        position: fixed !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        height: 56px !important;
+        background: #0e121a !important;
+        border-top: 1px solid var(--border-subtle) !important;
+        z-index: 2100 !important;
+        justify-content: space-around !important;
+        align-items: center !important;
+        padding: 0 4px !important;
+        box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.6) !important;
+      }
+
+      .bx-mob-item {
+        background: transparent;
+        border: none;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 3px;
+        color: #848e9c;
+        cursor: pointer;
+        padding: 4px 6px;
+        border-radius: 6px;
+        transition: all 0.15s;
+        flex: 1;
+        max-width: 65px;
+        height: 48px;
+        text-decoration: none;
+      }
+      .bx-mob-item svg {
+        width: 18px;
+        height: 18px;
+      }
+      .bx-mob-item span {
+        font-size: 8.5px !important;
+        letter-spacing: 0.2px;
+        white-space: nowrap;
+        text-transform: uppercase;
+      }
+      .bx-mob-item:hover, .bx-mob-item.active {
+        color: #fff;
+        background: rgba(255, 255, 255, 0.05);
+      }
+      .bx-mob-item.active {
+        color: var(--bullex-green) !important;
+      }
+
+      /* Topbar responsiva e fluida */
+      .bullex-topbar {
+        height: auto !important;
+        min-height: 48px !important;
+        padding: 6px 10px !important;
+        gap: 8px !important;
+        flex-wrap: wrap !important;
+        justify-content: space-between !important;
+      }
+      .bx-topbar-left {
+        gap: 6px !important;
+      }
+      .header-brand-sub {
+        font-size: 8px !important;
+        letter-spacing: 1.5px !important;
+      }
+      .header-brand-main {
+        font-size: 13px !important;
+      }
+      .bx-active-tab {
+        height: 34px !important;
+        padding: 0 8px !important;
+        gap: 6px !important;
+      }
+      .tab-asset-title {
+        font-size: 11.5px !important;
+      }
+      .tab-asset-sub {
+        font-size: 9px !important;
+      }
+
+      .bx-topbar-right {
+        gap: 6px !important;
+        flex-wrap: wrap !important;
+        justify-content: flex-end !important;
+      }
+      .bx-header-ai-btn {
+        height: 30px !important;
+        padding: 0 10px !important;
+        font-size: 11px !important;
+      }
+      .bx-scoreboard-pill {
+        padding: 4px 8px !important;
+        font-size: 10.5px !important;
+        gap: 5px !important;
+      }
+      .bx-balance-box {
+        height: 30px !important;
+        padding: 0 8px !important;
+        font-size: 11.5px !important;
+      }
+
+      /* Gavetas laterais ocupam a tela toda no celular */
+      .bx-side-drawer {
+        width: 100% !important;
+        max-width: 100vw !important;
+        left: 0 !important;
+        top: 0 !important;
+        bottom: 56px !important;
+        height: calc(100dvh - 56px) !important;
+        box-shadow: none !important;
+        border-left: none !important;
+        z-index: 2000 !important;
+        display: none;
+      }
+      .bx-side-drawer.open {
+        display: flex !important;
+      }
+
+      /* Conteúdo principal compacto */
+      .bullex-main-content {
+        padding: 10px 10px 20px !important;
+        gap: 12px !important;
+      }
+
+      /* Telemetria do ativo em análise */
+      .active-asset-bar {
+        height: auto !important;
+        padding: 10px 12px !important;
+        flex-direction: column !important;
+        gap: 10px !important;
+        align-items: stretch !important;
+      }
+      .asset-info-center {
+        flex-wrap: wrap !important;
+        gap: 8px 12px !important;
+        justify-content: space-between !important;
+      }
+      .asset-info-right {
+        width: 100% !important;
+      }
+      .trigger-badge-status {
+        width: 100% !important;
+        text-align: center !important;
+        box-sizing: border-box !important;
+      }
+
+      /* Pensamento da IA */
+      .ai-thought-section {
+        padding: 8px 10px !important;
+      }
+      .ai-thought-prose {
+        font-size: 12.5px !important;
+        line-height: 1.6 !important;
+      }
+
+      /* Visão da Operação Ativa no Celular */
+      .at-header-bar {
+        padding: 10px 12px !important;
+      }
+      .at-table-wrapper {
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+        width: 100% !important;
+      }
+      .at-table {
+        min-width: 640px !important;
+      }
+      .at-footer-bar {
+        flex-direction: column !important;
+        gap: 10px !important;
+        align-items: stretch !important;
+        padding: 12px !important;
+      }
+      .at-footer-left {
+        flex-wrap: wrap !important;
+        gap: 6px 10px !important;
+        font-size: 11.5px !important;
+      }
+      .at-footer-right {
+        width: 100% !important;
+      }
+      .at-btn-sell-all {
+        width: 100% !important;
+        text-align: center !important;
+        padding: 8px !important;
+      }
+
+      /* Trader Room no Celular */
+      body.tab-traderoom-active .bx-main-area {
+        height: 100dvh !important;
+        max-height: 100dvh !important;
+        padding-bottom: 56px !important;
+        overflow: hidden !important;
+      }
+      body.tab-traderoom-active .bullex-main-content {
+        padding: 4px 6px 6px !important;
+      }
+      .view-traderoom-wrap {
+        height: calc(100dvh - 135px) !important;
+        max-height: calc(100dvh - 135px) !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+      }
+    }
   </style>
 </head>
 <body>
 
   <!-- =========================================================================
-       MENU LATERAL (SIDEBAR COM NOSSOS MENUS: TRADER ROOM, HISTÓRICO, CFG, ZERAR, SAIR)
+       MENU LATERAL (SIDEBAR COM NOSSOS MENUS: ANÁLISE, TRADER ROOM, HISTÓRICO, CFG, ZERAR, SAIR)
        ========================================================================= -->
   <aside class="bx-sidebar">
     <div class="bx-sidebar-nav">
       
-      <!-- Trader Room -->
-      <button class="bx-side-item active" id="sideRoomBtn" onclick="closeAllDrawers()" title="Trader Room (Operações ao Vivo)">
+      <!-- Início (Tela de Análises) -->
+      <button class="bx-side-item btn-tab-analysis active" id="sideAnalysisBtn" onclick="switchMainTab('analysis')" title="Início — Tela de Análises">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M3 12h3m12 0h3M12 3v3m0 12v3"/>
+          <path d="M6.3 6.3l2.1 2.1m7.2 7.2l2.1 2.1M6.3 17.7l2.1-2.1m7.2-7.2l2.1-2.1"/>
+        </svg>
+        <span class="bx-side-label">Análise</span>
+      </button>
+
+      <!-- Trader Room (Gráfico BullEx ao Vivo) -->
+      <button class="bx-side-item btn-tab-traderoom" id="sideRoomBtn" onclick="switchMainTab('traderoom')" title="Trader Room (Gráfico BullEx ao Vivo)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M3 3v18h18"/>
           <path d="M18 9l-5 5-4-4-3 3"/>
@@ -1145,7 +1457,7 @@
       </button>
 
       <!-- Histórico de Trading -->
-      <button class="bx-side-item" id="sideHistBtn" onclick="toggleHistoryDrawer()" title="Histórico de Trading">
+      <button class="bx-side-item btn-drawer-hist" id="sideHistBtn" onclick="toggleHistoryDrawer()" title="Histórico de Trading">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="10"/>
           <polyline points="12 6 12 12 16 14"/>
@@ -1154,7 +1466,7 @@
       </button>
 
       <!-- Configurações -->
-      <button class="bx-side-item" id="sideCfgBtn" onclick="toggleConfigDrawer()" title="Configurações do Robô">
+      <button class="bx-side-item btn-drawer-cfg" id="sideCfgBtn" onclick="toggleConfigDrawer()" title="Configurações do Robô">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -1413,6 +1725,28 @@
         </div>
       </div>
 
+      <!-- VISÃO 3: TRADER ROOM BULLEX COM GRÁFICO AO VIVO -->
+      <div id="viewTraderRoom" class="view-traderoom-wrap" style="display: none;">
+        <div class="traderoom-topbar">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 13.5px; color: #fff;" class="med">Trader Room BullEx</span>
+            <span style="font-size: 10px; color: var(--text-muted); background: var(--bg-card-sub); border: 1px solid var(--border-subtle); padding: 2px 7px; border-radius: 4px; text-transform: uppercase;">Gráfico Oficial ao Vivo</span>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button type="button" onclick="reloadTraderRoom()" style="background: #171d2b; border: 1px solid var(--border-subtle); color: #cbd5e1; border-radius: 6px; padding: 5px 12px; font-size: 11.5px; cursor: pointer; transition: all 0.15s;">
+              Recarregar Gráfico
+            </button>
+            <a href="https://trade.bull-ex.com/traderoom" target="_blank" rel="noopener noreferrer" style="background: var(--bullex-green-bg); border: 1px solid rgba(0, 194, 111, 0.3); color: var(--bullex-green); border-radius: 6px; padding: 5px 12px; font-size: 11.5px; text-decoration: none; display: flex; align-items: center; gap: 4px;">
+              <span>Abrir BullEx</span>
+              <span>↗</span>
+            </a>
+          </div>
+        </div>
+        <div class="traderoom-frame-container">
+          <iframe id="bullexTradeRoomFrame" class="traderoom-frame" src="https://trade.bull-ex.com/traderoom" scrolling="yes" allow="fullscreen; clipboard-read; clipboard-write"></iframe>
+        </div>
+      </div>
+
     </main>
 
   </div>
@@ -1489,6 +1823,67 @@
       <div id="loginFeedback" style="font-size:12px; color:var(--bullex-red); text-align:center;"></div>
     </div>
   </div>
+
+  <!-- =========================================================================
+       BARRA DE NAVEGAÇÃO INFERIOR PARA DISPOSITIVOS MÓVEIS (CELULAR)
+       ========================================================================= -->
+  <nav class="bx-mobile-nav" id="bxMobileNav">
+    <!-- Início / Análise -->
+    <button class="bx-mob-item btn-tab-analysis active" onclick="switchMainTab('analysis')" title="Início — Análise em Tempo Real">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M3 12h3m12 0h3M12 3v3m0 12v3"/>
+        <path d="M6.3 6.3l2.1 2.1m7.2 7.2l2.1 2.1M6.3 17.7l2.1-2.1m7.2-7.2l2.1-2.1"/>
+      </svg>
+      <span>Análise</span>
+    </button>
+
+    <!-- Trader Room -->
+    <button class="bx-mob-item btn-tab-traderoom" onclick="switchMainTab('traderoom')" title="Trader Room (Gráfico BullEx)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 3v18h18"/>
+        <path d="M18 9l-5 5-4-4-3 3"/>
+      </svg>
+      <span>Trader Room</span>
+    </button>
+
+    <!-- Histórico -->
+    <button class="bx-mob-item btn-drawer-hist" onclick="toggleHistoryDrawer()" title="Histórico de Trading">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/>
+        <polyline points="12 6 12 12 16 14"/>
+      </svg>
+      <span>Histórico</span>
+    </button>
+
+    <!-- Configurações -->
+    <button class="bx-mob-item btn-drawer-cfg" onclick="toggleConfigDrawer()" title="Configurações">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+      <span>Config</span>
+    </button>
+
+    <!-- Zerar Placar -->
+    <button class="bx-mob-item" onclick="resetScoreboardOnly()" title="Zerar Placar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21.5 2v6h-6"/>
+        <path d="M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+      </svg>
+      <span>Zerar</span>
+    </button>
+
+    <!-- Sair -->
+    <button class="bx-mob-item" onclick="handleLogout()" title="Sair da Conta BullEx">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+        <polyline points="16 17 21 12 16 7"/>
+        <line x1="21" y1="12" x2="9" y2="12"/>
+      </svg>
+      <span>Sair</span>
+    </button>
+  </nav>
 
   <!-- =========================================================================
        SCRIPTS JAVASCRIPT: LÓGICA EM TEMPO REAL E GERENCIAMENTO DOS MENUS
@@ -1715,33 +2110,86 @@
       return `${p1}\n${p2}\n${p3}\n${p4}${pObs}`;
     }
 
-    function switchView(viewName) {
-      document.querySelectorAll('.bx-side-item').forEach(el => el.classList.remove('active'));
-      document.getElementById('sideRoomBtn').classList.add('active');
+    // GERENCIAMENTO DE VISÃO (INÍCIO/ANÁLISE VS TRADER ROOM BULLEX)
+    let currentMainTab = 'analysis'; // 'analysis' | 'traderoom'
+    window._isTradingActive = false;
+
+    function switchMainTab(tabName) {
+      currentMainTab = tabName;
+      closeAllDrawers(false);
+      updateMainTabUI();
+    }
+
+    function reloadTraderRoom() {
+      const iframe = document.getElementById('bullexTradeRoomFrame');
+      if (iframe) {
+        iframe.src = 'https://trade.bull-ex.com/traderoom';
+      }
+    }
+
+    function updateMainTabUI() {
+      const isAnalysis = currentMainTab === 'analysis';
+      const viewTraderRoom = document.getElementById('viewTraderRoom');
+      const viewAnalysis = document.getElementById('viewAnalysis');
+      const viewActiveTrade = document.getElementById('viewActiveTrade');
+
+      if (isAnalysis) {
+        document.body.classList.remove('tab-traderoom-active');
+        if (viewTraderRoom) viewTraderRoom.style.display = 'none';
+        if (window._isTradingActive) {
+          if (viewActiveTrade) viewActiveTrade.style.display = 'flex';
+          if (viewAnalysis) viewAnalysis.style.display = 'none';
+        } else {
+          if (viewAnalysis) viewAnalysis.style.display = 'flex';
+          if (viewActiveTrade) viewActiveTrade.style.display = 'none';
+        }
+        document.querySelectorAll('.btn-tab-analysis').forEach(el => el.classList.add('active'));
+        document.querySelectorAll('.btn-tab-traderoom').forEach(el => el.classList.remove('active'));
+      } else {
+        document.body.classList.add('tab-traderoom-active');
+        if (viewTraderRoom) viewTraderRoom.style.display = 'flex';
+        if (viewAnalysis) viewAnalysis.style.display = 'none';
+        if (viewActiveTrade) viewActiveTrade.style.display = 'none';
+
+        document.querySelectorAll('.btn-tab-analysis').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.btn-tab-traderoom').forEach(el => el.classList.add('active'));
+      }
     }
 
     // GERENCIAMENTO DAS GAVETAS LATERAIS (HISTÓRICO E CONFIGURAÇÕES)
     let allHistoryData = [];
 
+    function checkDrawerOpenState() {
+      const hOpen = document.getElementById('drawerHistory')?.classList.contains('open');
+      const cOpen = document.getElementById('drawerConfig')?.classList.contains('open');
+      if (hOpen || cOpen) {
+        document.body.classList.add('drawer-is-open');
+      } else {
+        document.body.classList.remove('drawer-is-open');
+      }
+    }
+
     function openHistoryDrawer() {
       closeConfigDrawer();
-      document.getElementById('drawerHistory').classList.add('open');
-      document.getElementById('sideHistBtn').classList.add('active');
-      document.getElementById('sideRoomBtn').classList.remove('active');
-      document.getElementById('drawerBackdrop').classList.add('open');
+      document.body.classList.add('drawer-is-open');
+      document.getElementById('drawerHistory')?.classList.add('open');
+      document.querySelectorAll('.btn-drawer-hist').forEach(el => el.classList.add('active'));
+      document.querySelectorAll('.btn-tab-analysis, .btn-tab-traderoom').forEach(el => el.classList.remove('active'));
+      document.getElementById('drawerBackdrop')?.classList.add('open');
       loadHistoryTrades();
     }
 
     function closeHistoryDrawer() {
-      document.getElementById('drawerHistory').classList.remove('open');
-      document.getElementById('sideHistBtn').classList.remove('active');
-      document.getElementById('sideRoomBtn').classList.add('active');
+      document.getElementById('drawerHistory')?.classList.remove('open');
+      document.querySelectorAll('.btn-drawer-hist').forEach(el => el.classList.remove('active'));
+      checkDrawerOpenState();
+      updateMainTabUI();
       checkBackdrop();
     }
 
     function toggleHistoryDrawer() {
       const d = document.getElementById('drawerHistory');
-      if (d.classList.contains('open')) {
+      if (d && d.classList.contains('open')) {
         closeHistoryDrawer();
       } else {
         openHistoryDrawer();
@@ -1750,33 +2198,39 @@
 
     function openConfigDrawer() {
       closeHistoryDrawer();
-      document.getElementById('cfgStake').value = appState.stake;
-      document.getElementById('drawerConfig').classList.add('open');
-      document.getElementById('sideCfgBtn').classList.add('active');
-      document.getElementById('sideRoomBtn').classList.remove('active');
-      document.getElementById('drawerBackdrop').classList.add('open');
+      document.body.classList.add('drawer-is-open');
+      const cfgStake = document.getElementById('cfgStake');
+      if (cfgStake) cfgStake.value = appState.stake;
+      document.getElementById('drawerConfig')?.classList.add('open');
+      document.querySelectorAll('.btn-drawer-cfg').forEach(el => el.classList.add('active'));
+      document.querySelectorAll('.btn-tab-analysis, .btn-tab-traderoom').forEach(el => el.classList.remove('active'));
+      document.getElementById('drawerBackdrop')?.classList.add('open');
     }
 
     function closeConfigDrawer() {
-      document.getElementById('drawerConfig').classList.remove('open');
-      document.getElementById('sideCfgBtn').classList.remove('active');
-      document.getElementById('sideRoomBtn').classList.add('active');
+      document.getElementById('drawerConfig')?.classList.remove('open');
+      document.querySelectorAll('.btn-drawer-cfg').forEach(el => el.classList.remove('active'));
+      checkDrawerOpenState();
+      updateMainTabUI();
       checkBackdrop();
     }
 
     function toggleConfigDrawer() {
       const d = document.getElementById('drawerConfig');
-      if (d.classList.contains('open')) {
+      if (d && d.classList.contains('open')) {
         closeConfigDrawer();
       } else {
         openConfigDrawer();
       }
     }
 
-    function closeAllDrawers() {
-      closeHistoryDrawer();
-      closeConfigDrawer();
-      document.getElementById('sideRoomBtn').classList.add('active');
+    function closeAllDrawers(syncUI = true) {
+      document.getElementById('drawerHistory')?.classList.remove('open');
+      document.getElementById('drawerConfig')?.classList.remove('open');
+      document.querySelectorAll('.btn-drawer-hist, .btn-drawer-cfg').forEach(el => el.classList.remove('active'));
+      document.getElementById('drawerBackdrop')?.classList.remove('open');
+      checkDrawerOpenState();
+      if (syncUI) updateMainTabUI();
     }
 
     function checkBackdrop() {
@@ -2150,16 +2604,30 @@
           }
         }
 
-        // ALTERNÂNCIA: TELA DE OPERAÇÃO ATIVA VS TELA DE ANÁLISE
+        // ALTERNÂNCIA: TELA DE OPERAÇÃO ATIVA VS TELA DE ANÁLISE VS TRADER ROOM
         const viewAnalysis = document.getElementById('viewAnalysis');
         const viewActiveTrade = document.getElementById('viewActiveTrade');
+        const viewTraderRoom = document.getElementById('viewTraderRoom');
         const isTrading = !!d.is_trading;
+        window._isTradingActive = !!(isTrading && sig);
+
+        if (currentMainTab === 'traderoom') {
+          if (viewTraderRoom) viewTraderRoom.style.display = 'flex';
+          if (viewAnalysis) viewAnalysis.style.display = 'none';
+          if (viewActiveTrade) viewActiveTrade.style.display = 'none';
+        } else {
+          // currentMainTab === 'analysis'
+          if (viewTraderRoom) viewTraderRoom.style.display = 'none';
+          if (window._isTradingActive) {
+            if (viewAnalysis) viewAnalysis.style.display = 'none';
+            if (viewActiveTrade) viewActiveTrade.style.display = 'flex';
+          } else {
+            if (viewActiveTrade) viewActiveTrade.style.display = 'none';
+            if (viewAnalysis) viewAnalysis.style.display = 'flex';
+          }
+        }
 
         if (isTrading && sig) {
-          // AO PEGAR OPERAÇÃO, MOSTRA APENAS A TELA DE OPERAÇÃO EM ANDAMENTO (1:1 COM A BULLEX)
-          viewAnalysis.style.display = 'none';
-          viewActiveTrade.style.display = 'flex';
-
           const ativoOp = sig.asset || activeAsset;
           const visOp = parseAssetVisuals(ativoOp);
 
@@ -2242,13 +2710,16 @@
           fResaleVal.className = isWinning ? 'win' : 'loss';
 
         } else {
-          // QUANDO NÃO ESTÁ EM OPERAÇÃO (OU APÓS WIN / LOSS / G1 FINALIZAR), MOSTRA A TELA DE ANÁLISE QUANTITATIVA
-          viewActiveTrade.style.display = 'none';
-          viewAnalysis.style.display = 'flex';
+          // QUANDO NÃO ESTÁ EM OPERAÇÃO (OU APÓS WIN / LOSS / G1 FINALIZAR)
+          if (currentMainTab === 'analysis') {
+            viewActiveTrade.style.display = 'none';
+            viewAnalysis.style.display = 'flex';
+          }
 
           // Pensamento Real da IA Formatado e Sem Zeros
           const textoPensamento = gerarPensamentoRealIA(activeAsset, dt, med, clockStr, seg, sig, d.observation, d.ai_enabled, d.warmup_done, d.warmup_progress);
-          document.getElementById('thoughtText').textContent = textoPensamento;
+          const tElem = document.getElementById('thoughtText');
+          if (tElem) tElem.textContent = textoPensamento;
         }
 
       } catch (e) {
