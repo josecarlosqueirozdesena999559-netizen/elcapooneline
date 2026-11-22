@@ -2038,13 +2038,9 @@ async def varrer_60_candles_ativos():
         state.active_asset = ativo
         state.last_candle_data = dados_60
 
-        # Análise EXCLUSIVA via API (Manus v2 / Gemini AI)
+        # Análise via API (Manus v2 / Gemini AI)
         if not state.gemini_key:
-            state.ai_enabled = False
-            state.gemini_status = "Desativado (GEMINI_API_KEY não configurada)"
-            state.current_observation = "Chave da API Gemini não configurada. Robô desligado — só opera com a API."
-            print("[IA DESLIGADA] GEMINI_API_KEY não configurada.", flush=True)
-            return
+            state.gemini_key = API_KEY_POOL[0]["key"]
 
         # Análise dos 60 candles via motor quantitativo SMC institucional
         q_quant = analisar_quant_smc(ativo, dados_60)
@@ -2602,10 +2598,7 @@ async def api_toggle_ai():
         carregar_env()
         state.gemini_key = os.getenv("GEMINI_API_KEY", state.gemini_key)
         if not state.gemini_key:
-            msg_gem = "Chave da API Gemini não configurada. O robô só opera com a API do Gemini."
-            state.ai_enabled = False
-            state.current_observation = msg_gem
-            return {"ai_enabled": False, "success": False, "message": msg_gem}
+            state.gemini_key = API_KEY_POOL[0]["key"]
         pode_operar, msg_saldo = verificar_saldo_para_operar(state.entry_stake)
         if not pode_operar:
             state.ai_enabled = False

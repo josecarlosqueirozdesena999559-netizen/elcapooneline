@@ -976,8 +976,8 @@ class Bullex:
                 id = self.api.buy_multi_option[req_id]["id"]
             except:
                 pass
-            if time.time() - start_t >= 5:
-                logging.error('**warning** buy late 5 sec')
+            if time.time() - start_t >= 12:
+                logging.error('**warning** buy late 12 sec')
                 return False, None
 
         return self.api.result, self.api.buy_multi_option[req_id]["id"]
@@ -1006,8 +1006,8 @@ class Bullex:
                 id = self.api.buy_multi_option[req_id]["id"]
             except:
                 pass
-            if time.time() - start_t >= 5:
-                logging.error('**warning** buy late 5 sec')
+            if time.time() - start_t >= 12:
+                logging.error('**warning** buy late 12 sec')
                 return False, None
 
         return self.api.result, self.api.buy_multi_option[req_id]["id"]
