@@ -2273,10 +2273,10 @@
       if (!aiEnabled) {
         return "Inteligência Artificial desligada. Clique no botão Ligar IA para carregar os 60 candles de todos os ativos e iniciar a auditoria institucional em tempo real.";
       }
-      if (!warmupDone) {
+      if (!warmupDone && (!warmupProgress || (warmupProgress.percent || 0) < 100)) {
         const wp = warmupProgress || {};
         const pct = wp.percent || 0;
-        return `Carregando histórico dos 60 candles de todos os ativos OTC (${wp.loaded || 0}/${wp.total || 74} — ${pct}%)...`;
+        return `Carregando histórico dos 60 candles dos ativos OTC (${wp.loaded || 0}/${wp.total || 74} — ${pct}%)...`;
       }
       if (!dt || !dt.ultimo_preco || dt.ultimo_preco <= 0) {
         return `Carregamento concluído. Iniciando auditoria dos 60 candles de ${ativo || 'EURUSD-OTC'} na BullEx...`;
@@ -2922,7 +2922,7 @@
             trigBadge.className = 'trigger-badge-status';
             trigBadge.textContent = 'IA DESLIGADA';
           }
-        } else if (!d.warmup_done) {
+        } else if (!d.warmup_done && (!wp || (wp.percent || 0) < 100)) {
           // ENQUANTO CARREGA OS 60 CANDLES: FICA SÓ O CARREGAMENTO DOS CANDLES!
           // NÃO APARECE PREÇO, VELA M1, CONFLUÊNCIA NEM MÃO ENQUANTO NÃO TIVER O ATIVO
           if (assetBar) assetBar.style.display = 'none';
@@ -2932,7 +2932,7 @@
           document.getElementById('wlbPct').textContent = `${pct}%`;
           document.getElementById('wlbAssetDetail').textContent = `Carregando histórico dos 60 candles: ${wp.asset || 'ativos OTC'} (${wp.loaded || 0}/${wp.total || 74} — ${pct}%)...`;
         } else {
-          // CARREGAMENTO CONCLUÍDO: SÓ APARECE A BARRA QUANDO JÁ TIVER O ATIVO QUE VAI ANALISAR!
+          // CARREGAMENTO CONCLUÍDO (OU 100%): MOSTRA A BARRA DO ATIVO E O PREÇO EM TEMPO REAL!
           if (warmupBar) warmupBar.style.display = 'none';
           if (assetBar) assetBar.style.display = 'flex';
 

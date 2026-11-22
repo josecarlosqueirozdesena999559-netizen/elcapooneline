@@ -604,10 +604,9 @@ class Bullex:
                     time.sleep(0.05)
                 if self.api.candles.candles_data != None:
                     break
-            except:
-                logging.error('**error** get_candles need reconnect')
-                self.connect()
-                time.sleep(0.2)
+            except Exception as e:
+                logging.warning(f'get_candles error for {ACTIVES}: {e}')
+                break
 
         return self.api.candles.candles_data
 
