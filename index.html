@@ -849,26 +849,53 @@
       color: #fff;
     }
 
-    /* Filtro do Histórico (Todas as Posições) */
+    /* Filtro do Histórico (Todas as Posições e Datas) */
     .bx-drawer-filter {
       padding: 10px 14px;
       border-bottom: 1px solid rgba(255, 255, 255, 0.04);
       flex-shrink: 0;
     }
+    .bx-drawer-filter-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
     .bx-drawer-filter-select {
+      flex: 1;
       width: 100%;
-      height: 36px;
+      height: 34px;
       background: #171d2b;
       border: 1px solid var(--border-subtle);
       border-radius: 6px;
       color: #cbd5e1;
-      font-size: 13px !important;
-      padding: 0 12px;
+      font-size: 12px !important;
+      padding: 0 10px;
       outline: none;
       cursor: pointer;
     }
     .bx-drawer-filter-select:focus {
       border-color: #334155;
+    }
+    .bx-history-stats-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 10px;
+      background: #131722;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 6px;
+      font-size: 11px;
+      color: #94a3b8;
+    }
+    .bx-history-stats-bar .stat-val {
+      font-weight: 500;
+      color: #f1f5f9;
+    }
+    .bx-history-stats-bar .stat-win {
+      color: var(--bullex-green);
+    }
+    .bx-history-stats-bar .stat-loss {
+      color: var(--bullex-red);
     }
 
     /* Lista de Trades */
@@ -1763,13 +1790,24 @@
       <button class="bx-drawer-close" onclick="closeHistoryDrawer()" title="Fechar">✕</button>
     </div>
     
-    <!-- Filtro de Posições -->
+    <!-- Filtro de Posições e Datas -->
     <div class="bx-drawer-filter">
-      <select class="bx-drawer-filter-select" id="historyFilterSelect" onchange="renderHistoryCards()">
-        <option value="ALL">Todas as posições</option>
-        <option value="WIN">Vitórias (WIN)</option>
-        <option value="LOSS">Derrotas (LOSS)</option>
-      </select>
+      <div class="bx-drawer-filter-row">
+        <select class="bx-drawer-filter-select" id="historyDateSelect" onchange="renderHistoryCards()" title="Filtrar por data">
+          <option value="TODAY">Hoje</option>
+          <option value="ALL">Todos os dias</option>
+        </select>
+        <select class="bx-drawer-filter-select" id="historyFilterSelect" onchange="renderHistoryCards()" title="Filtrar por resultado">
+          <option value="ALL">Todas as posições</option>
+          <option value="WIN">Vitórias (WIN)</option>
+          <option value="LOSS">Derrotas (LOSS)</option>
+        </select>
+      </div>
+      <div id="historyStatsBar" class="bx-history-stats-bar">
+        <span>Ops: <span class="stat-val">0</span></span>
+        <span>Win/Loss: <span class="stat-win">0W</span> / <span class="stat-loss">0L</span></span>
+        <span>Lucro: <span class="stat-val">$0.00</span></span>
+      </div>
     </div>
 
     <!-- Lista de Trades -->
@@ -2241,6 +2279,75 @@
       }
     }
 
+    function getTradeDateStr(trade) {
+      if (trade.trade_date && trade.trade_date.length === 10) {
+        return trade.trade_date;
+      }
+      if (trade.created_at) {
+        const d = new Date(trade.created_at * 1000);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+      }
+      return '';
+    }
+
+    function getTodayDateStr() {
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = String(now.getMonth() + 1).padStart(2, '0');
+      const d = String(now.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    function updateHistoryDateOptions() {
+      const dateSelect = document.getElementById('historyDateSelect');
+      if (!dateSelect) return;
+      const curVal = dateSelect.value;
+
+      const dateMap = {};
+      allHistoryData.forEach(t => {
+        const ds = getTradeDateStr(t);
+        if (ds) {
+          dateMap[ds] = (dateMap[ds] || 0) + 1;
+        }
+      });
+
+      const todayStr = getTodayDateStr();
+      const sortedDates = Object.keys(dateMap).sort().reverse();
+      const meses = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+      function formatLabelDate(ds) {
+        const [y, m, d] = ds.split('-');
+        const mesNome = meses[parseInt(m, 10) - 1] || m;
+        return `${parseInt(d, 10)} ${mesNome} ${y}`;
+      }
+
+      const todayCount = dateMap[todayStr] || 0;
+      let optionsHtml = '';
+      optionsHtml += `<option value="TODAY">Hoje (${todayCount})</option>`;
+      optionsHtml += `<option value="ALL">Todos os dias (${allHistoryData.length})</option>`;
+
+      sortedDates.forEach(ds => {
+        const count = dateMap[ds];
+        const isToday = (ds === todayStr);
+        const label = isToday ? `Hoje, ${formatLabelDate(ds)} (${count})` : `${formatLabelDate(ds)} (${count})`;
+        optionsHtml += `<option value="${ds}">${label}</option>`;
+      });
+
+      dateSelect.innerHTML = optionsHtml;
+
+      if (curVal && (curVal === 'ALL' || curVal === 'TODAY' || dateMap[curVal])) {
+        dateSelect.value = curVal;
+      } else if (todayCount > 0) {
+        dateSelect.value = 'TODAY';
+      } else if (sortedDates.length > 0) {
+        dateSelect.value = sortedDates[0];
+      } else {
+        dateSelect.value = 'ALL';
+      }
+    }
+
     async function loadHistoryTrades() {
       const listElem = document.getElementById('historyTradeList');
       listElem.innerHTML = '<div style="text-align:center; padding:30px; color:var(--text-dim); font-size:12px;">Carregando histórico...</div>';
@@ -2248,6 +2355,7 @@
         const res = await fetch('/api/history');
         const d = await res.json();
         allHistoryData = d.history || [];
+        updateHistoryDateOptions();
         renderHistoryCards();
       } catch (e) {
         listElem.innerHTML = '<div style="text-align:center; padding:30px; color:var(--bullex-red); font-size:12px;">Falha ao carregar histórico.</div>';
@@ -2256,11 +2364,48 @@
 
     function renderHistoryCards() {
       const listElem = document.getElementById('historyTradeList');
-      const filter = document.getElementById('historyFilterSelect')?.value || 'ALL';
-      
-      let filtered = allHistoryData;
-      if (filter === 'WIN') filtered = allHistoryData.filter(t => t.result === 'WIN');
-      else if (filter === 'LOSS') filtered = allHistoryData.filter(t => t.result === 'LOSS');
+      const dateFilter = document.getElementById('historyDateSelect')?.value || 'TODAY';
+      const resultFilter = document.getElementById('historyFilterSelect')?.value || 'ALL';
+      const todayStr = getTodayDateStr();
+
+      let filtered = allHistoryData.filter(t => {
+        const tDate = getTradeDateStr(t);
+        if (dateFilter === 'TODAY') {
+          if (tDate !== todayStr) return false;
+        } else if (dateFilter !== 'ALL') {
+          if (tDate !== dateFilter) return false;
+        }
+        if (resultFilter === 'WIN' && t.result !== 'WIN') return false;
+        if (resultFilter === 'LOSS' && t.result !== 'LOSS') return false;
+        return true;
+      });
+
+      // Atualiza a barra de resumo estatístico do filtro ativo
+      let wins = 0;
+      let losses = 0;
+      let totalProfit = 0;
+      filtered.forEach(t => {
+        if (t.result === 'WIN') {
+          wins++;
+          totalProfit += parseFloat(t.profit_real || t.profit || 0);
+        } else if (t.result === 'LOSS') {
+          losses++;
+          totalProfit -= parseFloat(t.stake || 5);
+        }
+      });
+      const totalOps = filtered.length;
+      const winRate = totalOps > 0 ? Math.round((wins / totalOps) * 100) : 0;
+      const profitSimb = totalProfit >= 0 ? `+$${totalProfit.toFixed(2)}` : `-$${Math.abs(totalProfit).toFixed(2)}`;
+      const profitClass = totalProfit >= 0 ? 'stat-win' : 'stat-loss';
+
+      const statsBar = document.getElementById('historyStatsBar');
+      if (statsBar) {
+        statsBar.innerHTML = `
+          <span>Ops: <span class="stat-val">${totalOps}</span></span>
+          <span>Win/Loss: <span class="stat-win">${wins}W</span> / <span class="stat-loss">${losses}L</span> (<span class="stat-val">${winRate}%</span>)</span>
+          <span>Lucro: <span class="${profitClass} stat-val">${profitSimb}</span></span>
+        `;
+      }
 
       if (filtered.length === 0) {
         listElem.innerHTML = '<div style="text-align:center; padding:40px 20px; color:var(--text-dim); font-size:12px;">Nenhuma operação registrada nesta categoria.</div>';
@@ -2272,17 +2417,23 @@
         const isWin = trade.result === 'WIN';
         const isCall = trade.direction === 'CALL';
         const stake = parseFloat(trade.stake || 5);
-        const profit = parseFloat(trade.profit || 0);
+        const profit = parseFloat(trade.profit_real || trade.profit || 0);
         const payout = trade.payout ? Math.round(trade.payout * 100) : (isWin && stake > 0 ? Math.round((profit / stake) * 100) : 84);
 
         // Data e Hora estilo BullEx
         let hora = trade.trade_time || '12:00';
         let data = trade.trade_date || '21 Nov';
+        const meses = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
         if (trade.created_at) {
           const d = new Date(trade.created_at * 1000);
           hora = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-          const meses = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
           data = `${d.getDate()} ${meses[d.getMonth()]}`;
+        } else if (trade.trade_date && trade.trade_date.includes('-')) {
+          const parts = trade.trade_date.split('-');
+          if (parts.length === 3) {
+            const mIdx = parseInt(parts[1], 10) - 1;
+            data = `${parseInt(parts[2], 10)} ${meses[mIdx] || parts[1]}`;
+          }
         }
 
         // Ativo e Visual
