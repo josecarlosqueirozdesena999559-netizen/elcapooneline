@@ -2706,6 +2706,7 @@
         const finalConf = sig?.confluence || med.confluencia_total;
         const clockStr = d.candle_clock || '00:00';
         const seg = dt.segundo_da_vela ?? (60 - parseInt(clockStr.replace('00:', '')));
+        const priceVal = (dt && dt.ultimo_preco && Number(dt.ultimo_preco) > 0) ? Number(dt.ultimo_preco) : (appState.lastPrice || 0);
 
         const assetBar = document.getElementById('activeAssetBar');
         const warmupBar = document.getElementById('warmupLoadingBar');
@@ -2714,11 +2715,13 @@
           // IA DESLIGADA: oculta a barra do ativo e o warmup
           if (assetBar) assetBar.style.display = 'none';
           if (warmupBar) warmupBar.style.display = 'none';
-          priceElem.textContent = '--';
-          clockDigitsElem.textContent = '--:--';
-          totalConfElem.textContent = '--';
-          trigBadge.className = 'trigger-badge-status';
-          trigBadge.textContent = 'IA DESLIGADA';
+          if (priceElem) priceElem.textContent = '--';
+          if (clockDigitsElem) clockDigitsElem.textContent = '--:--';
+          if (totalConfElem) totalConfElem.textContent = '--';
+          if (trigBadge) {
+            trigBadge.className = 'trigger-badge-status';
+            trigBadge.textContent = 'IA DESLIGADA';
+          }
         } else if (!d.warmup_done) {
           // ENQUANTO CARREGA OS 60 CANDLES: FICA SÓ O CARREGAMENTO DOS CANDLES!
           // NÃO APARECE PREÇO, VELA M1, CONFLUÊNCIA NEM MÃO ENQUANTO NÃO TIVER O ATIVO
@@ -2733,31 +2736,32 @@
           if (warmupBar) warmupBar.style.display = 'none';
           if (assetBar) assetBar.style.display = 'flex';
 
-          if (dt.ultimo_preco && dt.ultimo_preco > 0) {
-            const priceVal = dt.ultimo_preco;
-            priceElem.textContent = priceVal.toFixed(5);
-            if (appState.lastPrice && priceVal !== appState.lastPrice) {
+          if (priceVal > 0) {
+            if (priceElem) priceElem.textContent = priceVal.toFixed(5);
+            if (appState.lastPrice && priceVal !== appState.lastPrice && priceElem) {
               priceElem.style.color = priceVal > appState.lastPrice ? 'var(--bullex-green)' : 'var(--bullex-red)';
-              setTimeout(() => { priceElem.style.color = '#fff'; }, 300);
+              setTimeout(() => { if (priceElem) priceElem.style.color = '#fff'; }, 300);
             }
             appState.lastPrice = priceVal;
           } else {
-            priceElem.textContent = '--';
+            if (priceElem) priceElem.textContent = '--';
           }
 
-          clockDigitsElem.textContent = clockStr;
-          totalConfElem.textContent = `${finalConf}%`;
+          if (clockDigitsElem) clockDigitsElem.textContent = clockStr;
+          if (totalConfElem) totalConfElem.textContent = `${finalConf}%`;
 
-          const decFinal = sig?.direction || med.direcao_sugerida;
-          if (decFinal === 'CALL' && finalConf >= 78) {
-            trigBadge.className = 'trigger-badge-status call';
-            trigBadge.textContent = `CALL (COMPRA) • 00s (${Math.max(0, 60 - seg)}s)`;
-          } else if (decFinal === 'PUT' && finalConf >= 78) {
-            trigBadge.className = 'trigger-badge-status put';
-            trigBadge.textContent = `PUT (VENDA) • 00s (${Math.max(0, 60 - seg)}s)`;
-          } else {
-            trigBadge.className = 'trigger-badge-status';
-            trigBadge.textContent = `AGUARDANDO CONFLUÊNCIA (${seg}s/60s)`;
+          if (trigBadge) {
+            const decFinal = sig?.direction || med.direcao_sugerida;
+            if (decFinal === 'CALL' && finalConf >= 78) {
+              trigBadge.className = 'trigger-badge-status call';
+              trigBadge.textContent = `CALL (COMPRA) • 00s (${Math.max(0, 60 - seg)}s)`;
+            } else if (decFinal === 'PUT' && finalConf >= 78) {
+              trigBadge.className = 'trigger-badge-status put';
+              trigBadge.textContent = `PUT (VENDA) • 00s (${Math.max(0, 60 - seg)}s)`;
+            } else {
+              trigBadge.className = 'trigger-badge-status';
+              trigBadge.textContent = `AGUARDANDO CONFLUÊNCIA (${seg}s/60s)`;
+            }
           }
         }
 
@@ -2823,7 +2827,8 @@
           // Investimento e Direção (▲ / ▼)
           const stakeVal = sig.stake_val || appState.stake || 5.0;
           const isCall = (sig.direction || '').toUpperCase() === 'CALL';
-          document.getElementById('atStakeVal').textContent = `$${stakeVal.toFixed(2)}`;
+          const stakeElem = document.getElementById('atStakeVal');
+          if (stakeElem) stakeElem.textContent = `$${stakeVal.toFixed(2)}`;
           const dirArrow = document.getElementById('atDirArrow');
           if (dirArrow) {
             dirArrow.className = isCall ? 'at-arrow call' : 'at-arrow put';
@@ -2831,46 +2836,64 @@
           }
 
           // Taxa de Abertura Real e Preço Atual Real do Candle
-          const entryRate = (sig.entry_rate && sig.entry_rate > 0) ? parseFloat(sig.entry_rate).toFixed(5) : priceVal.toFixed(5);
-          const currentRate = (sig.current_rate && sig.current_rate > 0) ? parseFloat(sig.current_rate).toFixed(5) : priceVal.toFixed(5);
-          document.getElementById('atEntryPrice').textContent = entryRate;
+          const numEntryRate = (sig.entry_rate && Number(sig.entry_rate) > 0) ? Number(sig.entry_rate) : (priceVal > 0 ? priceVal : 0);
+          const numCurrentRate = (sig.current_rate && Number(sig.current_rate) > 0) ? Number(sig.current_rate) : (priceVal > 0 ? priceVal : numEntryRate);
+          const entryRate = numEntryRate > 0 ? numEntryRate.toFixed(5) : '--';
+          const currentRate = numCurrentRate > 0 ? numCurrentRate.toFixed(5) : '--';
+
+          const entryPriceElem = document.getElementById('atEntryPrice');
+          if (entryPriceElem) entryPriceElem.textContent = entryRate;
           const curPriceElem = document.getElementById('atCurrentPrice');
-          curPriceElem.textContent = currentRate;
+          if (curPriceElem) curPriceElem.textContent = currentRate;
 
-          const isWinning = sig.live_status === 'WINNING' || (isCall ? parseFloat(currentRate) >= parseFloat(entryRate) : parseFloat(currentRate) <= parseFloat(entryRate));
-          curPriceElem.className = isWinning ? 'med win' : 'med loss';
+          const isWinning = sig.live_status ? (sig.live_status === 'WINNING') : (numCurrentRate > 0 && numEntryRate > 0 ? (isCall ? numCurrentRate >= numEntryRate : numCurrentRate <= numEntryRate) : false);
+          if (curPriceElem) curPriceElem.className = isWinning ? 'med win' : 'med loss';
 
-          // L/P Esperados e Pós-Venda
-          const payoutPct = sig.payout_pct || 0.84;
+          // L/P Esperados Real da Plataforma BullEx sem atrasos
+          const payoutPct = (sig.payout_pct && Number(sig.payout_pct) > 0) ? Number(sig.payout_pct) : 0.84;
           const expectedProfit = isWinning ? (stakeVal * payoutPct) : -stakeVal;
-          const expPnlStr = (expectedProfit >= 0 ? '+' : '-') + '$' + Math.abs(expectedProfit).toFixed(2);
+          const expPnlStr = sig.lp_expected_str || ((expectedProfit >= 0 ? '+' : '-') + '$' + Math.abs(expectedProfit).toFixed(2));
 
           const headerPnl = document.getElementById('atHeaderPnl');
-          headerPnl.textContent = expPnlStr;
-          headerPnl.className = isWinning ? 'at-header-pnl win' : 'at-header-pnl loss';
+          if (headerPnl) {
+            headerPnl.textContent = expPnlStr;
+            headerPnl.className = isWinning ? 'at-header-pnl win' : 'at-header-pnl loss';
+          }
 
           const lpExpected = document.getElementById('atLpExpected');
-          lpExpected.textContent = expPnlStr;
-          lpExpected.className = isWinning ? 'med win' : 'med loss';
+          if (lpExpected) {
+            lpExpected.textContent = expPnlStr;
+            lpExpected.className = isWinning ? 'med win' : 'med loss';
+          }
 
           const lpResaleStr = sig.lp_pos_venda_str || (isWinning ? `+$${(expectedProfit * 0.75).toFixed(2)}` : `-$${(stakeVal * 0.85).toFixed(2)}`);
           const lpResale = document.getElementById('atLpResale');
-          lpResale.textContent = lpResaleStr;
-          lpResale.className = isWinning ? 'med win' : 'med loss';
+          if (lpResale) {
+            lpResale.textContent = lpResaleStr;
+            lpResale.className = isWinning ? 'med win' : 'med loss';
+          }
 
           // Rodapé da Posição
-          document.getElementById('atFooterStake').textContent = `$${stakeVal.toFixed(2)}`;
+          const footStake = document.getElementById('atFooterStake');
+          if (footStake) footStake.textContent = `$${stakeVal.toFixed(2)}`;
+
           const fExpected = document.getElementById('atFooterLpExpected');
-          fExpected.textContent = expPnlStr;
-          fExpected.className = isWinning ? 'win' : 'loss';
+          if (fExpected) {
+            fExpected.textContent = expPnlStr;
+            fExpected.className = isWinning ? 'win' : 'loss';
+          }
 
           const fResalePct = document.getElementById('atFooterResalePercent');
-          fResalePct.textContent = sig.resale_percent || (isWinning ? '+72.00%' : '-83.44%');
-          fResalePct.className = isWinning ? 'win' : 'loss';
+          if (fResalePct) {
+            fResalePct.textContent = sig.resale_percent || (isWinning ? '+72.00%' : '-83.44%');
+            fResalePct.className = isWinning ? 'win' : 'loss';
+          }
 
           const fResaleVal = document.getElementById('atFooterResaleVal');
-          fResaleVal.textContent = lpResaleStr;
-          fResaleVal.className = isWinning ? 'win' : 'loss';
+          if (fResaleVal) {
+            fResaleVal.textContent = lpResaleStr;
+            fResaleVal.className = isWinning ? 'win' : 'loss';
+          }
 
         } else {
           // QUANDO NÃO ESTÁ EM OPERAÇÃO (OU APÓS WIN / LOSS / G1 FINALIZAR)

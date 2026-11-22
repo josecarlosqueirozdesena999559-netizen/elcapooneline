@@ -1253,14 +1253,29 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
             payout_pct = get_real_asset_payout(ativo)
             payout_estimado = round(valor * payout_pct, 2)
             
-            # Taxa de entrada inicial real da vela na plataforma
+            # Taxa de entrada inicial real da vela na plataforma (BullEx)
             taxa_entrada = 0.0
-            try:
-                c_init = api.get_candles(ativo, 60, 1, int(start_t))
-                if c_init and len(c_init) > 0:
-                    taxa_entrada = float(c_init[-1].get('close') or c_init[-1].get('open') or 0.0)
-            except Exception:
-                taxa_entrada = 0.0
+            for _ in range(4):
+                opt_data = api.api.socket_option_opened.get(order_id)
+                if opt_data and isinstance(opt_data, dict):
+                    msg = opt_data.get("msg", {}) if isinstance(opt_data.get("msg"), dict) else opt_data
+                    val = msg.get("value") or msg.get("open_quote") or msg.get("quote")
+                    if val:
+                        try:
+                            taxa_entrada = float(val)
+                            break
+                        except Exception:
+                            pass
+                time.sleep(0.08)
+
+            if taxa_entrada == 0.0:
+                cur_data = state.last_candle_data or {}
+                taxa_entrada = float(cur_data.get("ultimo_preco") or 0.0)
+
+            if taxa_entrada == 0.0:
+                c_cached = state.candles_cache.get(ativo, [])
+                if c_cached:
+                    taxa_entrada = float(c_cached[-1].get("close") or c_cached[-1].get("open") or 0.0)
 
             max_espera = max(90, total_espera + 25)
             loop_start = time.time()
@@ -1270,15 +1285,31 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                 mins = remaining // 60
                 secs = remaining % 60
                 clock_str = f"{mins:02d}:{secs:02d}"
-                
-                # Coleta taxa atual real da vela na plataforma
-                taxa_atual = taxa_entrada
-                try:
-                    c_now = api.get_candles(ativo, 60, 1, int(t_atual))
-                    if c_now and len(c_now) > 0:
-                        taxa_atual = float(c_now[-1].get('close') or taxa_entrada)
-                except Exception:
-                    pass
+
+                # Atualiza taxa_entrada caso o socket-option-opened tenha chegado após o disparo
+                if taxa_entrada == 0.0:
+                    opt_data = api.api.socket_option_opened.get(order_id)
+                    if opt_data and isinstance(opt_data, dict):
+                        msg = opt_data.get("msg", {}) if isinstance(opt_data.get("msg"), dict) else opt_data
+                        val = msg.get("value") or msg.get("open_quote") or msg.get("quote")
+                        if val:
+                            try:
+                                taxa_entrada = float(val)
+                            except Exception:
+                                pass
+
+                # Coleta taxa atual real instantânea da memória (sem bloquear threads de websocket)
+                cur_data = state.last_candle_data or {}
+                preco_memoria = float(cur_data.get("ultimo_preco") or 0.0)
+                if preco_memoria > 0.0:
+                    taxa_atual = preco_memoria
+                elif taxa_entrada > 0.0:
+                    taxa_atual = taxa_entrada
+                else:
+                    taxa_atual = 0.0
+
+                if taxa_entrada == 0.0 and taxa_atual > 0.0:
+                    taxa_entrada = taxa_atual
 
                 # Avaliação de vitória em tempo real (CALL: taxa atual >= taxa entrada | PUT: taxa atual <= taxa entrada)
                 if direcao.upper() == "CALL":
@@ -1340,7 +1371,7 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                         return True, (win_str == "win"), lucro, None
                 except Exception:
                     pass
-                time.sleep(1)
+                time.sleep(0.25)
             # Timeout
             return True, False, -valor, "Timeout aguardando fechamento da vela"
         return False, False, 0.0, f"Ordem não aceita pela corretora: {order_id}"
@@ -2393,9 +2424,23 @@ async def api_status():
         if len(c_list) >= 20:
             state.last_candle_data = calcular_indicadores_60(c_list)
     if state.is_trading and state.active_signal:
-        cur_p = state.last_candle_data.get("ultimo_preco")
+        cur_p = state.last_candle_data.get("ultimo_preco") if state.last_candle_data else None
         if cur_p and cur_p > 0:
             state.active_signal["current_rate"] = cur_p
+            ent_p = state.active_signal.get("entry_rate") or cur_p
+            direc = (state.active_signal.get("direction") or "CALL").upper()
+            is_win = (cur_p >= ent_p) if direc == "CALL" else (cur_p <= ent_p)
+            state.active_signal["live_status"] = "WINNING" if is_win else "LOSING"
+            stk = float(state.active_signal.get("stake_val") or state.entry_stake or 5.0)
+            pct = float(state.active_signal.get("payout_pct") or 0.84)
+            simb = "$" if state.currency in ["USD", "$"] else "R$"
+            if is_win:
+                p_win = round(stk * pct, 2)
+                state.active_signal["live_profit"] = p_win
+                state.active_signal["lp_expected_str"] = f"+{simb} {p_win:.2f}"
+            else:
+                state.active_signal["live_profit"] = -stk
+                state.active_signal["lp_expected_str"] = f"-{simb} {stk:.2f}"
     bal = state.balance_demo if state.mode == "DEMO" else state.balance_real
     return {
         "connected": bool(state.is_connected and state.api is not None),
