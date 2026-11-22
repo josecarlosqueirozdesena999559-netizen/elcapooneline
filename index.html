@@ -2750,7 +2750,7 @@
             if (priceElem) priceElem.textContent = priceVal.toFixed(5);
             if (appState.lastPrice && priceVal !== appState.lastPrice && priceElem) {
               priceElem.style.color = priceVal > appState.lastPrice ? 'var(--bullex-green)' : 'var(--bullex-red)';
-              setTimeout(() => { if (priceElem) priceElem.style.color = '#fff'; }, 300);
+              setTimeout(() => { if (priceElem) priceElem.style.color = '#fff'; }, 150);
             }
             appState.lastPrice = priceVal;
           } else {
@@ -2964,7 +2964,7 @@
       }
     }, 250);
 
-    setInterval(fetchStatus, 800);
+    setInterval(fetchStatus, 150);
     fetchStatus();
   </script>
 </body>

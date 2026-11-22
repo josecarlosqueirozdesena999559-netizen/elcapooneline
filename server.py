@@ -1239,6 +1239,19 @@ def calcular_expiracao_m1_epoch(now_ts: Optional[float] = None, expiracao_min: i
     minutos_extras = 1 if seg_restantes_minuto > 30 else 2
     return float(((ts // 60) + minutos_extras) * 60)
 
+def assinar_ticks_ativo(ativo: str):
+    """Inscreve na WebSocket da BullEx para receber ticks contínuos em tempo real."""
+    if not (state.api and state.is_connected and ativo):
+        return
+    try:
+        from bullexapi.constants import ACTIVES
+        if ativo in ACTIVES:
+            act_id = ACTIVES[ativo]
+            state.api.api.subscribe(act_id, 60)
+            state.api.api.subscribe(act_id, 1)
+    except Exception:
+        pass
+
 def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, expiracao: int):
     try:
         status, order_id = api.buy(valor, ativo, direcao.lower(), expiracao)
@@ -1434,18 +1447,19 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
     agora = datetime.fromtimestamp(agora_ts)
     seg_atual = agora_ts % 60
 
-    # JANELA DE ENTRADA PRÓXIMO AOS 30 SEGUNDOS (24s a 29.2s):
-    # O robô não entra no início da vela; ele espera o desenvolvimento do candle até próximo dos 30s
-    # para pegar a melhor taxa de retração do pavio (comprar no fundo ou vender no topo).
-    if seg_atual < 24.0:
-        seg_espera = 24.0 - seg_atual
-    elif seg_atual <= 29.2:
+    # NOVO TIMING: O robô não precisa esperar até os 30s.
+    # Virou o candle (00s), espera subir ou descer um pouco (retração) para fazer a operação!
+    if seg_atual >= 48.0:
+        # Vela atual quase encerrando: aguarda a virada para a próxima vela (00s)
+        seg_espera = 60.0 - seg_atual
+    elif seg_atual <= 6.0:
+        # Vela acabou de virar (está nos primeiros segundos): busca taxa de retração imediatamente
         seg_espera = 0.0
     else:
-        # Passou dos 29s: aguarda virar para a próxima vela e chegar na janela dos 24s a 29s dela
-        seg_espera = (60.0 - seg_atual) + 24.0
+        # Se o sinal confluir no meio da vela (ex: 20s-45s), aguarda virar para a próxima vela
+        seg_espera = 60.0 - seg_atual
 
-    target_janela_epoch = agora_ts + seg_espera
+    target_virada_epoch = agora_ts + seg_espera
 
     if seg_espera > 0.5:
         state.active_signal = {
@@ -1453,32 +1467,35 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             "direction": direcao,
             "confluence": conf,
             "expiration": "M1 (1 Minuto)",
-            "target": f"Janela 30s ({int(round(seg_espera))}s)",
+            "target": f"Virada do Candle ({int(round(seg_espera))}s)",
             "seconds_left": int(round(seg_espera)),
-            "target_epoch": target_janela_epoch,
-            "action_hint": f"[{tipo_operacao}] Sinal {direcao} confirmado! Aguardando próximo aos 30s para taxa de retração.",
-            "status": f"SINAL CONFIRMADO ({tipo_operacao}) — BUSCANDO TAXA AOS 30s",
+            "target_epoch": target_virada_epoch,
+            "action_hint": f"[{tipo_operacao}] Sinal {direcao} confirmado! Aguardando virar o candle para buscar retração.",
+            "status": f"SINAL CONFIRMADO ({tipo_operacao}) — AGUARDANDO VIRADA DO CANDLE",
             "time": agora.strftime("%H:%M:%S"),
             "gale_step": state.current_gale_step,
             "stake": valor,
             "clock_str": f"00:{int(round(seg_espera)):02d}"
         }
-        print(f"\n[SINAL CONFIRMADO - {tipo_operacao}] {direcao} em {ativo} | Aguardando {seg_espera:.1f}s até a janela de taxa (24s-29s da vela M1)...", flush=True)
+        print(f"\n[SINAL CONFIRMADO - {tipo_operacao}] {direcao} em {ativo} | Aguardando {seg_espera:.1f}s até a virada da vela M1...", flush=True)
 
-        while obter_tempo_oficial_plataforma() < target_janela_epoch - 0.1:
+        while obter_tempo_oficial_plataforma() < target_virada_epoch - 0.1:
             if not state.ai_enabled and "Manual" not in motivo_str:
                 state.is_trading = False
                 state.active_signal = None
                 return
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)
             t_now = obter_tempo_oficial_plataforma()
-            rest = max(0, int(round(target_janela_epoch - t_now)))
+            rest = max(0, int(round(target_virada_epoch - t_now)))
             if state.active_signal:
                 state.active_signal["seconds_left"] = rest
                 state.active_signal["clock_str"] = f"00:{rest:02d}"
 
-    # Estamos na janela de 24s a 29.2s!
-    # Obter preço de abertura para calcular a melhor taxa de retração sem bloquear a websocket:
+    # VIROU O CANDLE!
+    # Garante assinatura de ticks em tempo real na corretora BullEx
+    assinar_ticks_ativo(ativo)
+
+    # Obter preço de abertura da nova vela:
     preco_abertura = 0.0
     cur_d = state.last_candle_data or {}
     c_last = cur_d.get("candle_ultimo") or {}
@@ -1488,30 +1505,37 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         if c_list:
             preco_abertura = float(c_list[-1].get("open") or c_list[-1].get("close") or 0.0)
 
-    # Busca a melhor taxa até 29.0s da vela:
-    # Se COMPRA: espera retrair um pouco para baixo da abertura para comprar no fundo
-    # Se VENDA: espera esticar um pouco para cima da abertura para vender no topo
-    print(f" -> [JANELA 30s ATIVA] {ativo}: buscando melhor taxa de {direcao} (Abertura: {preco_abertura})...", flush=True)
-    while True:
+    # Espera subir ou descer um pouco para fazer a operação (máximo 6 segundos):
+    # Se COMPRA (CALL): espera descer um pouco abaixo da abertura para comprar no fundo
+    # Se VENDA (PUT): espera subir um pouco acima da abertura para vender no topo
+    print(f" -> [VIRADA DO CANDLE] {ativo}: aguardando {'descer um pouco para CALL' if direcao.upper() == 'CALL' else 'subir um pouco para PUT'} (Abertura: {preco_abertura})...", flush=True)
+
+    if state.active_signal:
+        state.active_signal["status"] = f"VIRADA DO CANDLE — BUSCANDO TAXA FAVORÁVEL ({direcao})"
+        state.active_signal["action_hint"] = f"Virou o candle! Aguardando {'descer um pouco para COMPRAR' if direcao.upper() == 'CALL' else 'subir um pouco para VENDER'}..."
+
+    inicio_busca = time.time()
+    while (time.time() - inicio_busca) < 6.0:
         t_atual = obter_tempo_oficial_plataforma()
-        seg_janela = t_atual % 60
-        if seg_janela >= 28.8 or (seg_janela < 24.0 and seg_janela > 1.0):
+        seg_vela = t_atual % 60
+        if seg_vela >= 8.0 and seg_vela < 50.0:
             break
 
-        taxa_atual = float((state.last_candle_data or {}).get("ultimo_preco") or preco_abertura)
+        cur_ticks = getattr(state.api.api, "real_time_ticks", {}) if (state.api and state.is_connected) else {}
+        taxa_atual = cur_ticks.get(ativo) or float((state.last_candle_data or {}).get("ultimo_preco") or preco_abertura)
 
         if direcao.upper() == "CALL" and preco_abertura > 0:
-            if taxa_atual <= preco_abertura:
-                print(f" -> [RETRAÇÃO CALL] Taxa favorável no fundo: {taxa_atual} <= {preco_abertura} aos {seg_janela:.1f}s!", flush=True)
+            if taxa_atual < preco_abertura:
+                print(f" -> [RETRAÇÃO CALL] Taxa favorável no fundo: {taxa_atual} < {preco_abertura} aos {seg_vela:.1f}s! Disparando COMPRA...", flush=True)
                 break
         elif direcao.upper() == "PUT" and preco_abertura > 0:
-            if taxa_atual >= preco_abertura:
-                print(f" -> [ESTICADA PUT] Taxa favorável no topo: {taxa_atual} >= {preco_abertura} aos {seg_janela:.1f}s!", flush=True)
+            if taxa_atual > preco_abertura:
+                print(f" -> [RETRAÇÃO PUT] Taxa favorável no topo: {taxa_atual} > {preco_abertura} aos {seg_vela:.1f}s! Disparando VENDA...", flush=True)
                 break
 
-        await asyncio.sleep(0.08)
+        await asyncio.sleep(0.04)
 
-    # Disparo Oficial na Corretora antes dos 30s para expirar no fim da vela atual!
+    # Disparo Oficial na Corretora!
     t_exec = obter_tempo_oficial_plataforma()
     seg_disparo = t_exec % 60
     agora_exec_str = datetime.fromtimestamp(t_exec).strftime("%H:%M:%S")
@@ -2076,45 +2100,68 @@ async def varrer_60_candles_ativos():
         state.is_scanning = False
 
 async def loop_candle_tempo_real():
-    """Atualiza o último candle, saldos e indicadores segundo a segundo em tempo real sem bloquear /api/status."""
+    """Atualiza ticks em tempo real via WebSocket continuamente (100ms) sem travar ou pular."""
     tick_count = 0
+    ativo_assinado = None
     while True:
         try:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
             tick_count += 1
             ativo = state.active_asset
-            if not (state.api and state.is_connected):
+            if not (state.api and state.is_connected and ativo):
                 continue
-            if tick_count % 5 == 0:
+
+            # Garante que a WebSocket está recebendo ticks deste ativo
+            if ativo != ativo_assinado:
+                assinar_ticks_ativo(ativo)
+                ativo_assinado = ativo
+
+            # 1. Pega tick em tempo real da websocket instantaneamente (0ms lag, sem pular)
+            cur_ticks = getattr(state.api.api, "real_time_ticks", {})
+            if ativo in cur_ticks and cur_ticks[ativo] > 0:
+                p_tick = cur_ticks[ativo]
+                if state.last_candle_data:
+                    state.last_candle_data["ultimo_preco"] = p_tick
+                if state.is_trading and state.active_signal:
+                    state.active_signal["current_rate"] = p_tick
+
+            # 2. Sincroniza saldos a cada 5 segundos
+            if tick_count % 50 == 0:
                 try:
                     await asyncio.wait_for(
                         asyncio.to_thread(sincronizar_saldos_plataforma, state.api),
-                        timeout=3.0
+                        timeout=2.0
                     )
                 except Exception:
                     pass
-            if not ativo or not state.ai_enabled or not state.warmup_done:
-                continue
-            agora_ts = int(time.time())
-            novos = await asyncio.wait_for(
-                asyncio.to_thread(state.api.get_candles, ativo, 60, 2, agora_ts),
-                timeout=2.0
-            )
-            if novos and isinstance(novos, list):
-                cached = state.candles_cache.get(ativo, [])
-                if cached:
-                    by_id = {c.get("id"): c for c in cached if isinstance(c, dict) and c.get("id") is not None}
-                    for c in novos:
-                        if isinstance(c, dict) and c.get("id") is not None:
-                            by_id[c.get("id")] = c
-                    candles = [by_id[k] for k in sorted(by_id.keys())][-60:]
-                else:
-                    candles = novos[-60:]
-                if len(candles) >= 20:
-                    state.candles_cache[ativo] = candles
-                    dados = calcular_indicadores_60(candles)
-                    if dados:
-                        state.last_candle_data = dados
+
+            # 3. Atualiza velas e indicadores a cada 1.5s
+            if tick_count % 15 == 0 and state.ai_enabled and state.warmup_done:
+                agora_ts = int(time.time())
+                try:
+                    novos = await asyncio.wait_for(
+                        asyncio.to_thread(state.api.get_candles, ativo, 60, 2, agora_ts),
+                        timeout=1.5
+                    )
+                    if novos and isinstance(novos, list):
+                        cached = state.candles_cache.get(ativo, [])
+                        if cached:
+                            by_id = {c.get("id"): c for c in cached if isinstance(c, dict) and c.get("id") is not None}
+                            for c in novos:
+                                if isinstance(c, dict) and c.get("id") is not None:
+                                    by_id[c.get("id")] = c
+                            candles = [by_id[k] for k in sorted(by_id.keys())][-60:]
+                        else:
+                            candles = novos[-60:]
+                        if len(candles) >= 20:
+                            state.candles_cache[ativo] = candles
+                            dados = calcular_indicadores_60(candles)
+                            if dados:
+                                if ativo in cur_ticks and cur_ticks[ativo] > 0:
+                                    dados["ultimo_preco"] = cur_ticks[ativo]
+                                state.last_candle_data = dados
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -2132,6 +2179,12 @@ async def loop_trader_background():
                 state.last_candle_data["segundo_da_vela"] = seg_v
                 state.last_candle_data["tempo_restante_vela"] = restante_vela
                 state.last_candle_data["relogio_horario"] = agora_hms
+
+            if agora_s % 10 == 0 and state.is_connected and state.email:
+                try:
+                    cached_status_analytics["data"] = await asyncio.to_thread(obter_analytics_usuario, state.email)
+                except Exception:
+                    pass
 
             # Transição imediata: se não está em trade e a observação tem mensagem de pós-operação (WIN/LOSS/SUSPENSO),
             # vai direto para a análise técnica viva do ativo atual sem ficar parado na mensagem antiga
@@ -2401,9 +2454,14 @@ async def api_analytics(scope: str = "day", date: Optional[str] = None, month: O
         return obter_analytics_usuario(None, scope=scope, target_date=date, target_month=month)
     return obter_analytics_usuario(state.email, scope=scope, target_date=date, target_month=month)
 
+cached_status_analytics = {"data": None, "ts": 0.0}
+cached_status_credits = {"data": {"credits": 50, "balance": "$0.00"}, "ts": 0.0}
+
 @app.get("/api/status")
 async def api_status():
+    t_start = time.time()
     verificar_virada_dia()
+    t_a = time.time()
     agora_hms = datetime.now().strftime("%H:%M:%S")
     if state.current_observation:
         state.current_observation = re.sub(
@@ -2411,11 +2469,23 @@ async def api_status():
             f"[ANALISE INSTITUCIONAL {agora_hms}]",
             state.current_observation,
         )
+    t_b = time.time()
+
+    # Ticks em tempo real da WebSocket (sem pular, 0ms lag)
+    ativo_now = state.active_asset or "EURUSD-OTC"
+    if state.api and state.is_connected:
+        cur_ticks = getattr(state.api.api, "real_time_ticks", {})
+        if ativo_now in cur_ticks and cur_ticks[ativo_now] > 0:
+            if state.last_candle_data:
+                state.last_candle_data["ultimo_preco"] = cur_ticks[ativo_now]
+    t_c = time.time()
+
     if (not state.last_candle_data or state.last_candle_data.get("ultimo_preco") == 0) and state.candles_cache:
-        ativo_now = state.active_asset or "EURUSD-OTC"
         c_list = state.candles_cache.get(ativo_now, [])
         if len(c_list) >= 20:
             state.last_candle_data = calcular_indicadores_60(c_list)
+    t_d = time.time()
+
     if state.is_trading and state.active_signal:
         cur_p = state.last_candle_data.get("ultimo_preco") if state.last_candle_data else None
         if cur_p and cur_p > 0:
@@ -2434,8 +2504,10 @@ async def api_status():
             else:
                 state.active_signal["live_profit"] = -stk
                 state.active_signal["lp_expected_str"] = f"-{simb} {stk:.2f}"
+    t_e = time.time()
+
     bal = state.balance_demo if state.mode == "DEMO" else state.balance_real
-    return {
+    resp = {
         "connected": bool(state.is_connected and state.api is not None),
         "email": state.email,
         "trader_name": state.trader_name,
@@ -2446,7 +2518,7 @@ async def api_status():
         "balance_real": state.balance_real,
         "gemini_active": bool(state.gemini_key),
         "gemini_status": state.gemini_status,
-        "gemini_credits": await asyncio.to_thread(atualizar_creditos_gemini, False),
+        "gemini_credits": state.gemini_credits or {"credits": 50, "balance": "$0.00"},
         "warmup_progress": state.warmup_progress,
         "warmup_done": bool(state.warmup_done),
         "ai_enabled": state.ai_enabled,
@@ -2471,7 +2543,7 @@ async def api_status():
         },
         "history": state.history_trades[:15],
         "history_full": state.history_trades,
-        "analytics": obter_analytics_usuario(state.email) if (state.is_connected and state.email) else None,
+        "analytics": cached_status_analytics["data"],
         "config": {
             "stake": state.entry_stake,
             "use_martingale": state.use_martingale,
@@ -2481,6 +2553,11 @@ async def api_status():
             "stop_loss": state.stop_loss
         }
     }
+    t_end = time.time()
+    dt_total = (t_end - t_start) * 1000
+    if dt_total > 50:
+        print(f"[STATUS TIMING] Total: {dt_total:.1f}ms | a: {(t_a-t_start)*1000:.1f}ms | b: {(t_b-t_a)*1000:.1f}ms | c: {(t_c-t_b)*1000:.1f}ms | d: {(t_d-t_c)*1000:.1f}ms | e: {(t_e-t_d)*1000:.1f}ms | resp: {(t_end-t_e)*1000:.1f}ms", flush=True)
+    return resp
 
 @app.post("/api/toggle_ai")
 async def api_toggle_ai():

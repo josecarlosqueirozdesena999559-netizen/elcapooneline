@@ -16,3 +16,10 @@ def candle_generated_realtime(api, message, dict_queue_add):
         dict_queue_add(api.real_time_candles,
                             maxdict, active, size, from_, msg)
         api.candle_generated_check[active][size] = True
+        if not hasattr(api, "real_time_ticks"):
+            api.real_time_ticks = {}
+        if "close" in msg and msg["close"] is not None:
+            try:
+                api.real_time_ticks[active] = float(msg["close"])
+            except Exception:
+                pass
