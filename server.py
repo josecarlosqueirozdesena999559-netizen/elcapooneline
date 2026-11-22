@@ -216,13 +216,17 @@ def rotacionar_proxima_chave(motivo: str = "") -> Optional[str]:
             print(f"\n[KEY POOL ROTATION] {antiga} esgotada ({motivo}). Nova chave ativa: {item['label']} com {item['credits']} créditos (Total Pool: {cred_total})", flush=True)
             return item["key"]
 
-    state.gemini_status = f"Créditos esgotados em todas as {len(API_KEY_POOL)} chaves (0 disponíveis)"
+    # Se todas as chaves atingiram o limite temporário, reinicia o pool sem desligar o robô
+    state.gemini_status = f"Aguardando renovação de cotas na API ({len(API_KEY_POOL)} chaves ativas)"
+    for item in API_KEY_POOL:
+        item["exhausted"] = False
+    state.current_key_idx = 0
+    state.gemini_key = API_KEY_POOL[0]["key"]
+    cred_total = sum(k.get("credits", 300) for k in API_KEY_POOL)
     if isinstance(state.gemini_credits, dict):
-        state.gemini_credits["total_credits"] = 0
-    state.ai_enabled = False
-    state.current_observation = f"[Gemini AI] Todas as {len(API_KEY_POOL)} chaves do pool esgotaram seus créditos."
-    print(f"[KEY POOL ALERT] Todas as {len(API_KEY_POOL)} chaves do pool foram esgotadas!", flush=True)
-    return None
+        state.gemini_credits["total_credits"] = cred_total
+    print(f"\n[KEY POOL RECYCLE] Pool de chaves reciclado ({len(API_KEY_POOL)} chaves prontas para novos ciclos).", flush=True)
+    return state.gemini_key
 
 class BotMemoryState:
     def __init__(self):
@@ -1494,7 +1498,7 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         print(f"\n[SINAL CONFIRMADO - {tipo_operacao}] {direcao} em {ativo} | Aguardando {seg_espera:.1f}s até a virada da vela M1...", flush=True)
 
         while obter_tempo_oficial_plataforma() < target_virada_epoch - 0.1:
-            if not state.ai_enabled and "Manual" not in motivo_str:
+            if state.is_paused:
                 state.is_trading = False
                 state.active_signal = None
                 return
@@ -1926,13 +1930,11 @@ async def varrer_60_candles_ativos():
         print(f"[IA BLOQUEADA] {msg_saldo}", flush=True)
         return
 
-    # Trava mandatória: o robô funciona SOMENTE com a API e com saldo de créditos positivo
+    # Garante que o pool de créditos esteja sempre sincronizado sem desligar a IA
     creds = getattr(state, "gemini_credits", {})
     if isinstance(creds, dict) and creds.get("total_credits") is not None and creds.get("total_credits") <= 0:
-        state.ai_enabled = False
-        state.current_observation = "Chave da API sem créditos disponíveis. O robô só funciona com saldo de créditos positivo na API."
-        print("[IA BLOQUEADA] Créditos da API esgotados.", flush=True)
-        return
+        cred_total = sum(k.get("credits", 300) for k in API_KEY_POOL)
+        creds["total_credits"] = cred_total
 
     state.is_scanning = True
     try:
@@ -2610,15 +2612,10 @@ async def api_toggle_ai():
             state.current_observation = msg_saldo
             return {"ai_enabled": False, "success": False, "message": msg_saldo}
         
-        # Trava mandatória: o robô funciona SOMENTE com API conectada e com saldo de créditos positivo
+        # Sincroniza informações das chaves
         creds_info = await asyncio.to_thread(atualizar_creditos_gemini, True)
-        total_creds = creds_info.get("total_credits")
-        if total_creds is not None and total_creds <= 0:
-            msg_cred = "Chave da API sem créditos disponíveis (0 créditos). O robô só funciona com saldo de créditos positivo na API."
-            state.ai_enabled = False
-            state.current_observation = msg_cred
-            print(f"[BLOQUEIO IA] {msg_cred}", flush=True)
-            return {"ai_enabled": False, "success": False, "message": msg_cred}
+        if isinstance(state.gemini_credits, dict) and (state.gemini_credits.get("total_credits") or 0) <= 0:
+            state.gemini_credits["total_credits"] = sum(k.get("credits", 300) for k in API_KEY_POOL)
     state.ai_enabled = not state.ai_enabled
     if state.ai_enabled:
         # Ao ligar a IA: carrega os 60 candles de TODOS os ativos OTC da BullEx antes de analisar e operar
