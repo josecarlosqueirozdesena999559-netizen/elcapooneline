@@ -2689,6 +2689,11 @@
           renderActiveAsset(activeAsset, d.last_candle_data?.payout || 87);
         }
 
+        // Sincronização oficial do timestamp do servidor BullEx
+        if (d.server_timestamp) {
+          window._serverTimeOffset = d.server_timestamp - (Date.now() / 1000);
+        }
+
         // Preço, Relógio e Confluência
         const dt = d.last_candle_data || {};
         const priceElem = document.getElementById('heroPriceVal');
@@ -2696,6 +2701,7 @@
         const totalConfElem = document.getElementById('totalConfluenceScore');
         const trigBadge = document.getElementById('triggerBadge');
         const sig = d.active_signal;
+        window._activeTargetEpoch = sig?.target_epoch || null;
         const med = calcularMedidoresPrompt(dt);
         const finalConf = sig?.confluence || med.confluencia_total;
         const clockStr = d.candle_clock || '00:00';
@@ -2803,10 +2809,16 @@
             if (atSingle) { atSingle.style.display = 'flex'; atSingle.textContent = visOp.symbol; }
           }
 
-          // Expiração (segundos reais da API vinculados sem atraso)
-          const secLeft = sig.seconds_left !== undefined ? sig.seconds_left : (dt.tempo_restante_vela ?? (60 - seg));
+          // Expiração vinculada 1:1 à API da BullEx (formato MM:SS sem atrasos)
+          let expClockText = sig.clock_str;
+          if (!expClockText) {
+            const secLeft = sig.seconds_left !== undefined ? sig.seconds_left : (dt.tempo_restante_vela ?? Math.max(0, 60 - seg));
+            const m = Math.floor(Math.max(0, secLeft) / 60);
+            const s = Math.max(0, secLeft) % 60;
+            expClockText = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+          }
           const expClock = document.getElementById('atExpirationClock');
-          if (expClock) expClock.textContent = `00:${String(Math.max(0, secLeft)).padStart(2, '0')}`;
+          if (expClock) expClock.textContent = expClockText;
 
           // Investimento e Direção (▲ / ▼)
           const stakeVal = sig.stake_val || appState.stake || 5.0;
@@ -2889,6 +2901,27 @@
         alert("Erro ao solicitar venda antecipada.");
       }
     }
+
+    // Sincronização contínua de alta precisão dos relógios (250ms)
+    setInterval(() => {
+      const offset = window._serverTimeOffset || 0;
+      const nowTs = (Date.now() / 1000) + offset;
+      const curSec = Math.floor(nowTs) % 60;
+      const restVela = (60 - curSec) % 60 || 60;
+      
+      if (window._isTradingActive && window._activeTargetEpoch) {
+        const remExp = Math.max(0, Math.round(window._activeTargetEpoch - nowTs));
+        const m = Math.floor(remExp / 60);
+        const s = remExp % 60;
+        const expClock = document.getElementById('atExpirationClock');
+        if (expClock) expClock.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      } else {
+        const clockDigitsElem = document.getElementById('candleClockDigits');
+        if (clockDigitsElem && clockDigitsElem.textContent !== '--:--' && appState.ai_enabled) {
+          clockDigitsElem.textContent = `00:${String(restVela).padStart(2, '0')}`;
+        }
+      }
+    }, 250);
 
     setInterval(fetchStatus, 800);
     fetchStatus();

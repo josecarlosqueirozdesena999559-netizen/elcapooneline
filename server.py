@@ -1212,11 +1212,31 @@ Responda ESTRITAMENTE em formato JSON com o schema exigido.
                 continue
     return None
 
+def obter_tempo_oficial_plataforma() -> float:
+    """Retorna o timestamp exato sincronizado com o WebSocket da BullEx ou relógio local caso offline."""
+    if state.api and hasattr(state.api, "api") and hasattr(state.api.api, "timesync"):
+        try:
+            st = getattr(state.api.api.timesync, "server_timestamp", None)
+            if st and st > 0:
+                return float(st)
+        except Exception:
+            pass
+    return time.time()
+
 def calcular_expiracao_m1_epoch(now_ts: Optional[float] = None, expiracao_min: int = 1) -> float:
-    """Calcula o timestamp exato de fechamento da vela na BullEx (múltiplo de 60s; se >= 30s, rola para o próximo minuto)."""
-    ts = int(now_ts if now_ts is not None else time.time())
+    """Calcula o timestamp exato de fechamento da vela na BullEx vinculado diretamente à API da corretora."""
+    ts = int(now_ts if now_ts is not None else obter_tempo_oficial_plataforma())
+    try:
+        from bullexapi.expiration import get_expiration_time
+        exp, _ = get_expiration_time(ts, expiracao_min)
+        if exp and exp > ts:
+            return float(exp)
+    except Exception:
+        pass
     seg = ts % 60
-    minutos_extras = expiracao_min + (1 if seg >= 30 else 0)
+    # Regra oficial da BullEx (Turbo M1): se faltam > 30s no minuto atual, expira no final deste minuto (+1); se faltam <= 30s, expira no final do próximo minuto (+2).
+    seg_restantes_minuto = (60 - seg) if seg > 0 else 60
+    minutos_extras = 1 if seg_restantes_minuto > 30 else 2
     return float(((ts // 60) + minutos_extras) * 60)
 
 def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, expiracao: int):
@@ -1226,8 +1246,8 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
         if status and order_id:
             if not state.asset_payouts:
                 sincronizar_payouts_plataforma(api)
-            # Aguarda o fechamento oficial da vela de 1 minuto sincronizado com o relógio da plataforma
-            start_t = time.time()
+            # Sincroniza o relógio oficial exato da plataforma
+            start_t = obter_tempo_oficial_plataforma()
             target_epoch = calcular_expiracao_m1_epoch(start_t, expiracao)
             total_espera = max(1, int(round(target_epoch - start_t)))
             payout_pct = get_real_asset_payout(ativo)
@@ -1236,20 +1256,25 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
             # Taxa de entrada inicial real da vela na plataforma
             taxa_entrada = 0.0
             try:
-                c_init = api.get_candles(ativo, 60, 1, int(time.time()))
+                c_init = api.get_candles(ativo, 60, 1, int(start_t))
                 if c_init and len(c_init) > 0:
                     taxa_entrada = float(c_init[-1].get('close') or c_init[-1].get('open') or 0.0)
             except Exception:
                 taxa_entrada = 0.0
 
-            while time.time() - start_t < 75:
-                elapsed = int(time.time() - start_t)
-                remaining = max(0, int(round(target_epoch - time.time())))
+            max_espera = max(90, total_espera + 25)
+            loop_start = time.time()
+            while (time.time() - loop_start) < max_espera:
+                t_atual = obter_tempo_oficial_plataforma()
+                remaining = max(0, int(round(target_epoch - t_atual)))
+                mins = remaining // 60
+                secs = remaining % 60
+                clock_str = f"{mins:02d}:{secs:02d}"
                 
                 # Coleta taxa atual real da vela na plataforma
                 taxa_atual = taxa_entrada
                 try:
-                    c_now = api.get_candles(ativo, 60, 1, int(time.time()))
+                    c_now = api.get_candles(ativo, 60, 1, int(t_atual))
                     if c_now and len(c_now) > 0:
                         taxa_atual = float(c_now[-1].get('close') or taxa_entrada)
                 except Exception:
@@ -1262,14 +1287,13 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     is_winning = (taxa_atual <= taxa_entrada)
 
                 simb = "$" if state.currency in ["USD", "$"] else "R$"
-                gale_loss_ant = state.accumulated_gale_loss
 
                 if is_winning:
                     live_status = "WINNING"
                     live_profit = payout_estimado
                     live_text = f"+{simb} {payout_estimado:.2f}"
-                    status_banner = f"OPERACAO DANDO VITORIA ({live_text}) - FECHAMENTO EM {remaining}s"
-                    perc_recompra = min(0.85, 0.35 + (60 - remaining) / 100.0)
+                    status_banner = f"OPERAÇÃO DANDO VITÓRIA ({live_text}) — FECHAMENTO EM {clock_str}"
+                    perc_recompra = min(0.85, 0.35 + (60 - min(60, remaining)) / 100.0)
                     lp_pos_venda = round(payout_estimado * perc_recompra, 2)
                     lp_pos_venda_str = f"+{simb} {lp_pos_venda:.2f}"
                     resale_percent = f"+{perc_recompra * 100:.2f}%"
@@ -1277,8 +1301,8 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     live_status = "LOSING"
                     live_profit = -valor
                     live_text = f"-{simb} {valor:.2f}"
-                    status_banner = f"ENTRADA NEGATIVA ({live_text}) - FECHAMENTO EM {remaining}s"
-                    perc_perda = min(0.95, 0.45 + (60 - remaining) / 120.0)
+                    status_banner = f"ENTRADA NEGATIVA ({live_text}) — FECHAMENTO EM {clock_str}"
+                    perc_perda = min(0.95, 0.45 + (60 - min(60, remaining)) / 120.0)
                     lp_pos_venda = -round(valor * perc_perda, 2)
                     lp_pos_venda_str = f"-{simb} {abs(lp_pos_venda):.2f}"
                     resale_percent = f"-{perc_perda * 100:.2f}%"
@@ -1298,7 +1322,7 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     # Modelo BullEx Oficial de Operações Abertas
                     state.active_signal["order_id"] = order_id
                     state.active_signal["order_type"] = "Binária"
-                    state.active_signal["clock_str"] = f"00:{remaining:02d}"
+                    state.active_signal["clock_str"] = clock_str
                     state.active_signal["stake_val"] = valor
                     state.active_signal["stake_str"] = f"{simb} {valor:.2f}"
                     state.active_signal["lp_expected_str"] = f"+{simb} {payout_estimado:.2f}" if is_winning else f"-{simb} {valor:.2f}"
@@ -1375,9 +1399,9 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
 
     tipo_operacao = f"MARTINGALE G{state.current_gale_step}" if state.current_gale_step > 0 else "ENTRADA INICIAL"
 
-    agora_ts = time.time()
-    agora = datetime.now()
-    seg_atual = agora.second
+    agora_ts = obter_tempo_oficial_plataforma()
+    agora = datetime.fromtimestamp(agora_ts)
+    seg_atual = int(agora_ts) % 60
 
     # EXECUÇÃO IMEDIATA SEM DELAY (0s LAG):
     # Se a análise confirmou e estamos até os 40s da vela: DISPARA IMEDIATAMENTE!
@@ -1397,18 +1421,21 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             "status": f"SINAL CONFIRMADO ({tipo_operacao}) — AGUARDANDO ABERTURA",
             "time": agora.strftime("%H:%M:%S"),
             "gale_step": state.current_gale_step,
-            "stake": valor
+            "stake": valor,
+            "clock_str": f"00:{seg_ate_virada:02d}"
         }
         print(f"\n[SINAL CONFIRMADO - {tipo_operacao}] {direcao} em {ativo} | Aguardando {seg_ate_virada}s para virada exata da vela...", flush=True)
-        while time.time() < target_virada_epoch - 0.1:
+        while obter_tempo_oficial_plataforma() < target_virada_epoch - 0.1:
             if not state.ai_enabled and "Manual" not in motivo_str:
                 state.is_trading = False
                 state.active_signal = None
                 return
             await asyncio.sleep(0.1)
-            rest = max(0, int(round(target_virada_epoch - time.time())))
+            t_now = obter_tempo_oficial_plataforma()
+            rest = max(0, int(round(target_virada_epoch - t_now)))
             if state.active_signal:
                 state.active_signal["seconds_left"] = rest
+                state.active_signal["clock_str"] = f"00:{rest:02d}"
     else:
         state.active_signal = {
             "asset": ativo,
@@ -1422,17 +1449,23 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             "status": f"EXECUTANDO DISPARO IMEDIATO ({tipo_operacao})",
             "time": agora.strftime("%H:%M:%S"),
             "gale_step": state.current_gale_step,
-            "stake": valor
+            "stake": valor,
+            "clock_str": "00:00"
         }
 
-    # Disparo IMEDIATO (ZERO ATRASO): sem esperar 27s, pegando a taxa exata de abertura ou confirmação!
-    agora_exec_str = datetime.now().strftime("%H:%M:%S")
+    # Disparo IMEDIATO (ZERO ATRASO): sincronizado 1:1 com o relógio oficial da BullEx!
+    t_exec = obter_tempo_oficial_plataforma()
+    agora_exec_str = datetime.fromtimestamp(t_exec).strftime("%H:%M:%S")
     if state.active_signal:
-        exp_epoch = calcular_expiracao_m1_epoch(time.time(), 1)
-        rem_exp = max(1, int(round(exp_epoch - time.time())))
-        state.active_signal["status"] = f"OPERAÇÃO EM ANDAMENTO (M1) — FECHAMENTO EM {rem_exp}s"
+        exp_epoch = calcular_expiracao_m1_epoch(t_exec, 1)
+        rem_exp = max(1, int(round(exp_epoch - t_exec)))
+        m_exp = rem_exp // 60
+        s_exp = rem_exp % 60
+        clock_exp_str = f"{m_exp:02d}:{s_exp:02d}"
+        state.active_signal["status"] = f"OPERAÇÃO EM ANDAMENTO (M1) — FECHAMENTO EM {clock_exp_str}"
         state.active_signal["seconds_left"] = rem_exp
         state.active_signal["target_epoch"] = exp_epoch
+        state.active_signal["clock_str"] = clock_exp_str
         state.active_signal["action_hint"] = f"[{tipo_operacao}] Ordem executada na abertura da vela M1! Monitorando fechamento."
 
     executou = False
@@ -1927,88 +1960,54 @@ async def varrer_60_candles_ativos():
             print("[IA DESLIGADA] GEMINI_API_KEY não configurada.", flush=True)
             return
 
+        # Análise dos 60 candles via motor quantitativo SMC institucional
+        q_quant = analisar_quant_smc(ativo, dados_60)
+        dec_quant = q_quant.get("decisao")
+        conf_quant = q_quant.get("confluencia_porcentagem", 0)
+
+        # Consulta rápida à IA Gemini (com timeout ágil para não perder o timing do candle M1)
         analise = None
-        try:
-            gem_timeout = 90.0 if state.gemini_key.startswith("sk-") else 24.0
-            analise = await asyncio.wait_for(consultar_gemini(ativo, dados_60), timeout=gem_timeout)
-        except Exception as ex:
-            state.gemini_status = f"Atraso/Timeout: {type(ex).__name__}"
-            print(f"[GEMINI TIMEOUT] {ativo}: {ex}", flush=True)
+        if state.gemini_key:
+            try:
+                gem_timeout = 6.0
+                analise = await asyncio.wait_for(consultar_gemini(ativo, dados_60), timeout=gem_timeout)
+            except Exception as ex:
+                state.gemini_status = f"Atraso/Timeout: {type(ex).__name__}"
+                print(f"[GEMINI DELAY/TIMEOUT] {ativo}: {ex}", flush=True)
 
-        if not analise or not isinstance(analise, dict) or analise.get("decisao") not in ["CALL", "PUT", "AGUARDAR"]:
-            state.active_signal = None
-            if not state.ai_enabled:
-                print(f"[IA DESLIGADA] {state.current_observation}", flush=True)
-                return
-            # Se for erro 429 / cota temporária, aguarda 30s antes de tentar novamente para não spammar
-            st_low = (state.gemini_status or "").lower()
-            espera = 30 if ("429" in st_low or "cota" in st_low) else 2
-            state.current_observation = f"[Gemini AI] {state.gemini_status}. Reanalisando próximo candle de {ativo}..."
-            print(f"[IA REAVALIANDO] {state.current_observation}", flush=True)
-            await asyncio.sleep(espera)
-            return
+        # DECISÃO UNIFICADA: Se a IA ou o motor quantitativo SMC confirmar sinal CALL ou PUT:
+        # MANDATÓRIO: "aparece o sinal ele tem que pegar" (NÃO PULAR NEM DESCARTAR!)
+        decisao = "AGUARDAR"
+        conf = 0
+        padrao_usado = ""
+        motivo_usado = ""
 
-        conf = analise.get("confluencia_porcentagem", 0)
-        decisao = analise.get("decisao")
-
-        # Trava dura anti-topo e anti-fundo extremos (Bollinger + RSI)
-        ultimo_p = float(dados_60.get("ultimo_preco") or 0)
-        bb_up = float(dados_60.get("bb_upper") or 0)
-        bb_low = float(dados_60.get("bb_lower") or 0)
-        rsi_val = float(dados_60.get("rsi14") or 50)
-        if decisao == "CALL" and (bb_up > 0 and ultimo_p > bb_up * 1.001 and rsi_val >= 78):
-            print(f" -> [FILTRO ANTI-TOPO] CALL bloqueado em {ativo} (preço={ultimo_p}, BB_sup={bb_up}, RSI={rsi_val}).", flush=True)
-            decisao = "AGUARDAR"
-            analise["texto_observacao"] = f"[{ativo} | {agora_str}] CALL bloqueado em topo extremo (BB Sup={bb_up}, RSI={rsi_val}). Aguardando melhor ponto."
-        elif decisao == "PUT" and (bb_low > 0 and ultimo_p < bb_low * 0.999 and rsi_val <= 22):
-            print(f" -> [FILTRO ANTI-FUNDO] PUT bloqueado em {ativo} (preço={ultimo_p}, BB_inf={bb_low}, RSI={rsi_val}).", flush=True)
-            decisao = "AGUARDAR"
-            analise["texto_observacao"] = f"[{ativo} | {agora_str}] PUT bloqueado em fundo extremo (BB Inf={bb_low}, RSI={rsi_val}). Aguardando melhor ponto."
-
-        # Confluência Obrigatória de Indicadores (Tendência + MACD + RSI + IA)
-        macd_exp_bull = bool(dados_60.get("macd_expanding_bull"))
-        macd_exp_bear = bool(dados_60.get("macd_expanding_bear"))
-        macd_val = float(dados_60.get("macd") or 0.0)
-        macd_sig = float(dados_60.get("macd_signal") or 0.0)
-        tendencia_str = str(dados_60.get("tendencia_emas") or "")
-
-        if decisao == "CALL":
-            if "BAIXA ESTRUTURAL" in tendencia_str:
-                print(f" -> [FILTRO TENDÊNCIA] CALL bloqueado em {ativo} (tendência de baixa ativa).", flush=True)
-                decisao = "AGUARDAR"
-            elif macd_exp_bear:
-                print(f" -> [FILTRO MACD] CALL bloqueado em {ativo} (MACD expansivo de baixa).", flush=True)
-                decisao = "AGUARDAR"
-            elif rsi_val >= 75:
-                print(f" -> [FILTRO RSI] CALL bloqueado em {ativo} (RSI {rsi_val} sobrecomprado).", flush=True)
-                decisao = "AGUARDAR"
-        elif decisao == "PUT":
-            if "ALTA ESTRUTURAL" in tendencia_str:
-                print(f" -> [FILTRO TENDÊNCIA] PUT bloqueado em {ativo} (tendência de alta ativa).", flush=True)
-                decisao = "AGUARDAR"
-            elif macd_exp_bull:
-                print(f" -> [FILTRO MACD] PUT bloqueado em {ativo} (MACD expansivo de alta).", flush=True)
-                decisao = "AGUARDAR"
-            elif rsi_val <= 25:
-                print(f" -> [FILTRO RSI] PUT bloqueado em {ativo} (RSI {rsi_val} sobrevendido).", flush=True)
-                decisao = "AGUARDAR"
+        if analise and isinstance(analise, dict) and analise.get("decisao") in ["CALL", "PUT"] and (analise.get("confluencia_porcentagem") or 0) >= 75:
+            decisao = analise["decisao"]
+            conf = int(analise["confluencia_porcentagem"])
+            padrao_usado = analise.get("padrao_vela") or "IA Institucional"
+            motivo_usado = analise.get("psicologia_mercado") or analise.get("texto_observacao") or ""
+        elif dec_quant in ["CALL", "PUT"] and conf_quant >= 75:
+            decisao = dec_quant
+            conf = conf_quant
+            padrao_usado = q_quant.get("padrao_vela") or "SMC / Olho de Deus A+"
+            motivo_usado = q_quant.get("psicologia_mercado") or q_quant.get("texto_observacao") or ""
+        elif analise and isinstance(analise, dict):
+            decisao = analise.get("decisao", "AGUARDAR")
+            conf = int(analise.get("confluencia_porcentagem") or 0)
+            padrao_usado = analise.get("padrao_vela") or "IA Institucional"
+            motivo_usado = analise.get("psicologia_mercado") or analise.get("texto_observacao") or ""
 
         olho_badge = dados_60.get("olho_deus_classificacao", "")
-        obs_txt = analise.get("texto_observacao") or f"[{ativo} | {agora_str}] Decisão: {decisao} ({conf}% confluência) - {olho_badge}"
+        obs_txt = f"[{ativo} | {agora_str}] Decisão: {decisao} ({conf}% confluência) - {padrao_usado} | {olho_badge}"
         state.current_observation = obs_txt
-        print(f"    [ANÁLISE 0s LAG] {ativo}: {decisao} ({conf}%) | {analise.get('padrao_vela', '')} | {olho_badge} | MACD: {dados_60.get('macd')}/{dados_60.get('macd_hist')}", flush=True)
+        print(f"    [ANÁLISE 0s LAG] {ativo}: {decisao} ({conf}%) | {padrao_usado} | {olho_badge} | MACD: {dados_60.get('macd')}/{dados_60.get('macd_hist')}", flush=True)
 
         if decisao in ["CALL", "PUT"] and conf >= limite_confluencia and not state.is_trading and not state.is_paused:
-            seg_agora = int(time.time()) % 60
-            # Se virou a vela durante a análise, mas ainda está no início (<= 45s), entra com precisão nesta nova vela!
-            if seg_agora > 45 and (int(time.time()) // 60) != minuto_inicio_analise:
-                print(f" -> [ATRASO EXCESSIVO] {ativo}: a vela virou e já passou de 45s ({seg_agora}s). Reavaliando próximo candle...", flush=True)
-                return
-
             state.active_asset = ativo
-            print(f" -> [SINAL CONFIRMADO] {ativo}: {decisao} ({conf}%). Preparando disparo para {ativo}.", flush=True)
+            print(f" -> [SINAL CONFIRMADO - DISPARO GARANTIDO] {ativo}: {decisao} ({conf}%). Executando sem pular!", flush=True)
 
-            motivo = f"Confluência {conf}%: [{analise.get('padrao_vela', 'Olho de Deus A+')}] {analise.get('psicologia_mercado', '')} | {olho_badge}"
+            motivo = f"Confluência {conf}%: [{padrao_usado}] {motivo_usado} | {olho_badge}"
             valor = state.entry_stake * (state.gale_factor ** state.current_gale_step if state.current_gale_step > 0 else 1.0)
             tipo_tiro = f"MARTINGALE G{state.current_gale_step}" if state.current_gale_step > 0 else "ENTRADA INICIAL"
             simb = "$" if state.currency in ["USD", "$"] else "R$"
@@ -2016,6 +2015,7 @@ async def varrer_60_candles_ativos():
             asyncio.create_task(disparar_trade_autonomo(
                 decisao, valor, motivo, ativo, conf
             ))
+            return
         else:
             # Não houve confluência suficiente neste ativo: rotaciona para o próximo ativo com oportunidade
             proximo_ativo = None
@@ -2029,8 +2029,8 @@ async def varrer_60_candles_ativos():
                 proximo_ativo = ativos_livres[proximo_idx]
 
             state.active_asset = proximo_ativo
-            print(f" -> [ROTAÇÃO OTC] {ativo} em {decisao} ({conf}% < {limite_confluencia}%). Rotacionando para próximo ativo: {proximo_ativo}...", flush=True)
-            await asyncio.sleep(1.5)
+            print(f" -> [ROTAÇÃO OTC] {ativo} em {decisao} ({conf}% < {limite_confluencia}%). Analisando próximo ativo: {proximo_ativo}...", flush=True)
+            await asyncio.sleep(1.0)
     finally:
         state.is_scanning = False
 
@@ -2081,13 +2081,15 @@ async def loop_trader_background():
     while True:
         try:
             await asyncio.sleep(1)
-            agora_s = int(time.time())
+            t_oficial = obter_tempo_oficial_plataforma()
+            agora_s = int(t_oficial)
             seg_v = agora_s % 60
-            state.candle_clock = f"00:{60 - seg_v:02d}"
-            agora_hms = datetime.now().strftime("%H:%M:%S")
+            restante_vela = (60 - seg_v) if seg_v > 0 else 60
+            state.candle_clock = f"00:{restante_vela:02d}"
+            agora_hms = datetime.fromtimestamp(t_oficial).strftime("%H:%M:%S")
             if state.last_candle_data:
                 state.last_candle_data["segundo_da_vela"] = seg_v
-                state.last_candle_data["tempo_restante_vela"] = 60 - seg_v
+                state.last_candle_data["tempo_restante_vela"] = restante_vela
                 state.last_candle_data["relogio_horario"] = agora_hms
 
             # Transição imediata: se não está em trade e a observação tem mensagem de pós-operação (WIN/LOSS/SUSPENSO),
@@ -2400,6 +2402,7 @@ async def api_status():
         "active_signal": state.active_signal,
         "observation": state.current_observation,
         "candle_clock": state.candle_clock,
+        "server_timestamp": int(obter_tempo_oficial_plataforma()),
         "last_candle_data": state.last_candle_data,
         "recently_traded": list(state.recently_traded_assets.keys()),
         "otc_catalog_size": len(obter_pool_otc_binarios()),
