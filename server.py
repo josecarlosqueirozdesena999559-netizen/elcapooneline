@@ -148,7 +148,7 @@ def obter_pool_otc_binarios() -> List[str]:
 
 SCAN_ASSETS_PRIORITY = OTC_BINARY_CATALOG
 
-# Pool de Chaves com Rotação Automática (Chave Ativa Renovada + Reservas)
+# Pool de Chaves com Rotação Automática (Chave Ativa Renovada + Reservas do Usuário)
 API_KEY_POOL = [
     {
         "id": 1,
@@ -160,25 +160,33 @@ API_KEY_POOL = [
     },
     {
         "id": 2,
-        "label": "Chave 5 (Reserva 1)",
+        "label": "Chave 5 (300 cr)",
         "key": "sk-eWO12W1x-flzVPOkm_hcVFhU3JTbKShmdjvt52p6gfZKP-rYbCyCzWz0qlQc4TyqQoybsxe20jeoO25AlgmIKO-qrPOF",
-        "credits": 0,
+        "credits": 300,
         "max_credits": 300,
         "exhausted": False
     },
     {
         "id": 3,
-        "label": "Chave 3 (Reserva 2)",
+        "label": "Chave 3 (298 cr)",
         "key": "sk-fwbSvlXpSOxJCvb8LkKSDvcdPBwtFmuxs1-AObo4ghwynYcJBOr4JaXzLOpD8MawjaWegeakdA9n-9re5_ENRkWtf2I4",
-        "credits": 0,
+        "credits": 298,
         "max_credits": 300,
         "exhausted": False
     },
     {
         "id": 4,
-        "label": "Chave 4 (Reserva 3)",
+        "label": "Chave 4 (159 cr)",
         "key": "sk-25iVyLYJOlutOOKU-yN3hgENMN3uHzDmgSVavczWte2hAdQyPfA7AIuRbjAhvkvWNX-VS1huuo2-d8t62_4jB14mGPZV",
-        "credits": 0,
+        "credits": 159,
+        "max_credits": 300,
+        "exhausted": False
+    },
+    {
+        "id": 5,
+        "label": "Chave Reserva (300 cr)",
+        "key": "sk-k_VxdL7oyteSeYD1VY0FRSiQ1X-CQYWtGXRIHOPsWQ7YbRX846vMXHAsKVodB5cOJx7yAe65CrXzROTEUs-6w87gNWrY",
+        "credits": 300,
         "max_credits": 300,
         "exhausted": False
     }
@@ -951,11 +959,13 @@ def atualizar_creditos_gemini(force: bool = False) -> Dict[str, Any]:
         if r.status_code == 200:
             d = r.json()
             tc = d.get("total_credits")
+            if tc is None:
+                tc = d.get("refresh_credits")
             if tc is not None:
                 tc = int(tc)
-                if chave_info:
+                if tc >= 0 and chave_info:
                     chave_info["credits"] = tc
-                    if tc <= 0:
+                    if tc == 0:
                         chave_info["exhausted"] = True
                         rotacionar_proxima_chave("Créditos zerados na consulta")
 
@@ -1253,27 +1263,20 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
 
                 simb = "$" if state.currency in ["USD", "$"] else "R$"
                 gale_loss_ant = state.accumulated_gale_loss
-                lucro_liquido_estimado = round(payout_estimado - gale_loss_ant, 2)
-                total_perda_estimada = round(valor + gale_loss_ant, 2)
 
                 if is_winning:
                     live_status = "WINNING"
-                    if gale_loss_ant > 0:
-                        live_profit = payout_estimado
-                        live_text = f"+{simb} {payout_estimado:.2f} (Líq: +{simb} {lucro_liquido_estimado:.2f})"
-                        status_banner = f"OPERACAO DANDO VITORIA (+{simb} {payout_estimado:.2f} BullEx | Liquido G1: +{simb} {lucro_liquido_estimado:.2f}) - FECHAMENTO EM {remaining}s"
-                    else:
-                        live_profit = payout_estimado
-                        live_text = f"+{simb} {payout_estimado:.2f}"
-                        status_banner = f"OPERACAO DANDO VITORIA ({live_text}) - FECHAMENTO EM {remaining}s"
+                    live_profit = payout_estimado
+                    live_text = f"+{simb} {payout_estimado:.2f}"
+                    status_banner = f"OPERACAO DANDO VITORIA ({live_text}) - FECHAMENTO EM {remaining}s"
                     perc_recompra = min(0.85, 0.35 + (60 - remaining) / 100.0)
                     lp_pos_venda = round(payout_estimado * perc_recompra, 2)
                     lp_pos_venda_str = f"+{simb} {lp_pos_venda:.2f}"
                     resale_percent = f"+{perc_recompra * 100:.2f}%"
                 else:
                     live_status = "LOSING"
-                    live_profit = -total_perda_estimada if gale_loss_ant > 0 else -valor
-                    live_text = f"-{simb} {total_perda_estimada:.2f}" if gale_loss_ant > 0 else f"-{simb} {valor:.2f}"
+                    live_profit = -valor
+                    live_text = f"-{simb} {valor:.2f}"
                     status_banner = f"ENTRADA NEGATIVA ({live_text}) - FECHAMENTO EM {remaining}s"
                     perc_perda = min(0.95, 0.45 + (60 - remaining) / 120.0)
                     lp_pos_venda = -round(valor * perc_perda, 2)
@@ -1289,7 +1292,7 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     state.active_signal["live_profit"] = live_profit
                     state.active_signal["live_profit_text"] = live_text
                     state.active_signal["live_profit_gross"] = payout_estimado
-                    state.active_signal["live_profit_net"] = lucro_liquido_estimado
+                    state.active_signal["live_profit_net"] = payout_estimado
                     state.active_signal["entry_rate"] = taxa_entrada
                     state.active_signal["current_rate"] = taxa_atual
                     # Modelo BullEx Oficial de Operações Abertas
@@ -1298,7 +1301,7 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     state.active_signal["clock_str"] = f"00:{remaining:02d}"
                     state.active_signal["stake_val"] = valor
                     state.active_signal["stake_str"] = f"{simb} {valor:.2f}"
-                    state.active_signal["lp_expected_str"] = (f"+{simb} {payout_estimado:.2f} (Líq: +{simb} {lucro_liquido_estimado:.2f})" if gale_loss_ant > 0 else f"+{simb} {payout_estimado:.2f}") if is_winning else (f"-{simb} {total_perda_estimada:.2f}" if gale_loss_ant > 0 else f"-{simb} {valor:.2f}")
+                    state.active_signal["lp_expected_str"] = f"+{simb} {payout_estimado:.2f}" if is_winning else f"-{simb} {valor:.2f}"
                     state.active_signal["lp_pos_venda_str"] = lp_pos_venda_str
                     state.active_signal["lp_pos_venda_val"] = lp_pos_venda
                     state.active_signal["resale_percent"] = resale_percent
