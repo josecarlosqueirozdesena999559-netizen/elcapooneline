@@ -1608,46 +1608,25 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
     else:
         # LOSS na entrada atual
         if state.use_martingale and state.current_gale_step < state.max_gales:
-            # 1º LOSS: Registra a perda da 1ª mão (-$5.00) exatamente como na plataforma BullEx!
+            # 1ª MÃO NÃO CONTOU COMO LOSS: O loss só é contabilizado se o G1 dobrado também não bater!
             simb = "$" if state.currency in ["USD", "$"] else "R$"
-            perda_primeira_mao = round(valor, 2)
-            state.losses += 1
-            state.resultado = round(state.resultado - perda_primeira_mao, 2)
-            state.operacoes += 1
-            tot = state.wins + state.losses
-            state.assertividade = round((state.wins / tot) * 100, 1) if tot > 0 else 0.0
-
-            state.history_trades.insert(0, {
-                "time": agora_exec_str,
-                "asset": ativo,
-                "direction": direcao,
-                "stake": valor,
-                "result": "LOSS",
-                "profit": -perda_primeira_mao,
-                "profit_gross": -perda_primeira_mao,
-                "profit_net": -perda_primeira_mao,
-                "win_amount": 0.0,
-                "breakdown": f"Loss 1ª mão (-{simb} {perda_primeira_mao:.2f}) -> disparando G1",
-                "reason": motivo_str
-            })
-            salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, "LOSS", -perda_primeira_mao, 0, f"Loss 1ª mão (-{simb} {perda_primeira_mao:.2f})", motivo_str, agora_exec_str, profit_gross=-perda_primeira_mao)
-
-            state.current_gale_step += 1
             state.accumulated_gale_loss += valor
-            proximo_valor = state.entry_stake * (state.gale_factor ** state.current_gale_step)
+            state.current_gale_step += 1
+            proximo_valor = round(state.entry_stake * (state.gale_factor ** state.current_gale_step), 2)
             
-            print(f"\n -> [G1 NO MESMO ATIVO] Entrada inicial em {ativo} ({direcao}) deu loss (-{simb} {perda_primeira_mao:.2f}). Reanalisando {ativo} para G1 ({simb} {proximo_valor:.2f})...", flush=True)
-            state.current_observation = f"[MARTINGALE G1 - {ativo}] 1ª mão deu loss (-{simb} {perda_primeira_mao:.2f}). Disparando G1 ({simb} {proximo_valor:.2f}) para buscar o lucro da plataforma..."
+            print(f"\n -> [MARTINGALE G1 DOBRADO] 1ª mão em {ativo} não bateu (-{simb} {valor:.2f}). Disparando G1 dobrado ({simb} {proximo_valor:.2f}) para buscar a vitória!", flush=True)
+            state.current_observation = f"[MARTINGALE G1 - {ativo}] 1ª mão sem vitória (-{simb} {valor:.2f}). Disparando G1 dobrado ({simb} {proximo_valor:.2f}) no mesmo ativo para fechar no lucro..."
             
             asyncio.create_task(preparar_e_disparar_g1(ativo, direcao, proximo_valor))
             return
         else:
-            # LOSS NO G1 (OU SEM MARTINGALE)
+            # LOSS DEFINITIVO: OCORRE APENAS APÓS O G1 (OU SEM MARTINGALE)
             simb = "$" if state.currency in ["USD", "$"] else "R$"
-            perda_g1 = round(valor, 2)
-            state.losses += 1
-            state.resultado = round(state.resultado - perda_g1, 2)
             gale_usado = state.current_gale_step
+            perda_total = round(valor + state.accumulated_gale_loss, 2)
+            
+            state.losses += 1
+            state.resultado = round(state.resultado - perda_total, 2)
             state.current_gale_step = 0
             state.accumulated_gale_loss = 0.0
             state.recently_traded_assets[ativo] = time.time()
@@ -1657,25 +1636,25 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             tot = state.wins + state.losses
             state.assertividade = round((state.wins / tot) * 100, 1) if tot > 0 else 0.0
 
-            breakdown_str = f"Loss G{gale_usado} (-{simb} {perda_g1:.2f})" if gale_usado > 0 else f"Loss (-{simb} {valor:.2f})"
+            breakdown_str = f"Loss no G1 (-{simb} {perda_total:.2f})" if gale_usado > 0 else f"Loss (-{simb} {perda_total:.2f})"
             state.history_trades.insert(0, {
                 "time": agora_exec_str,
                 "asset": ativo,
                 "direction": f"{direcao} (G{gale_usado})" if gale_usado > 0 else direcao,
-                "stake": valor,
+                "stake": perda_total,
                 "result": res_str,
-                "profit": -perda_g1,
-                "profit_gross": -perda_g1,
-                "profit_net": -perda_g1,
+                "profit": -perda_total,
+                "profit_gross": -perda_total,
+                "profit_net": -perda_total,
                 "win_amount": 0.0,
                 "breakdown": breakdown_str,
                 "reason": motivo_str
             })
-            salvar_resultado_db(state.email, state.mode, ativo, direcao, valor, res_str, -perda_g1, gale_usado, breakdown_str, motivo_str, agora_exec_str, profit_gross=-perda_g1)
+            salvar_resultado_db(state.email, state.mode, ativo, direcao, perda_total, res_str, -perda_total, gale_usado, breakdown_str, motivo_str, agora_exec_str, profit_gross=-perda_total)
             if gale_usado > 0:
-                state.current_observation = f"[FIM DE CICLO G1] Loss em {ativo} (-{simb} {perda_g1:.2f}). Analisando novos pares para recuperação..."
+                state.current_observation = f"[FIM DE CICLO G1] Loss em {ativo} (-{simb} {perda_total:.2f}). Analisando novos pares para recuperação..."
             else:
-                state.current_observation = f"[RESULTADO] Loss em {ativo} (-{simb} {perda_g1:.2f}). Analisando novos pares para próxima entrada..."
+                state.current_observation = f"[RESULTADO] Loss em {ativo} (-{simb} {perda_total:.2f}). Analisando novos pares para próxima entrada..."
             asyncio.create_task(varrer_60_candles_ativos())
 
     # Proteção de Stop Win / Stop Loss
