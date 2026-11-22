@@ -1401,61 +1401,99 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
 
     agora_ts = obter_tempo_oficial_plataforma()
     agora = datetime.fromtimestamp(agora_ts)
-    seg_atual = int(agora_ts) % 60
+    seg_atual = agora_ts % 60
 
-    # EXECUÇÃO IMEDIATA SEM DELAY (0s LAG):
-    # Se a análise confirmou e estamos até os 40s da vela: DISPARA IMEDIATAMENTE!
-    # Se já passou dos 40s (fim da vela): aguarda a virada (segundo 00s) e entra no 1º segundo da abertura!
-    if seg_atual >= 41 and not is_immediate_gale:
-        seg_ate_virada = 60 - seg_atual
-        target_virada_epoch = agora_ts + seg_ate_virada
+    # JANELA DE ENTRADA PRÓXIMO AOS 30 SEGUNDOS (24s a 29.2s):
+    # O robô não entra no início da vela; ele espera o desenvolvimento do candle até próximo dos 30s
+    # para pegar a melhor taxa de retração do pavio (comprar no fundo ou vender no topo).
+    if seg_atual < 24.0:
+        seg_espera = 24.0 - seg_atual
+    elif seg_atual <= 29.2:
+        seg_espera = 0.0
+    else:
+        # Passou dos 29s: aguarda virar para a próxima vela e chegar na janela dos 24s a 29s dela
+        seg_espera = (60.0 - seg_atual) + 24.0
+
+    target_janela_epoch = agora_ts + seg_espera
+
+    if seg_espera > 0.5:
         state.active_signal = {
             "asset": ativo,
             "direction": direcao,
             "confluence": conf,
             "expiration": "M1 (1 Minuto)",
-            "target": f"Abertura Nova Vela ({seg_ate_virada}s)",
-            "seconds_left": seg_ate_virada,
-            "target_epoch": target_virada_epoch,
-            "action_hint": f"[{tipo_operacao}] Sinal confirmado! Aguardando virada para pegar abertura da vela.",
-            "status": f"SINAL CONFIRMADO ({tipo_operacao}) — AGUARDANDO ABERTURA",
+            "target": f"Janela 30s ({int(round(seg_espera))}s)",
+            "seconds_left": int(round(seg_espera)),
+            "target_epoch": target_janela_epoch,
+            "action_hint": f"[{tipo_operacao}] Sinal {direcao} confirmado! Aguardando próximo aos 30s para taxa de retração.",
+            "status": f"SINAL CONFIRMADO ({tipo_operacao}) — BUSCANDO TAXA AOS 30s",
             "time": agora.strftime("%H:%M:%S"),
             "gale_step": state.current_gale_step,
             "stake": valor,
-            "clock_str": f"00:{seg_ate_virada:02d}"
+            "clock_str": f"00:{int(round(seg_espera)):02d}"
         }
-        print(f"\n[SINAL CONFIRMADO - {tipo_operacao}] {direcao} em {ativo} | Aguardando {seg_ate_virada}s para virada exata da vela...", flush=True)
-        while obter_tempo_oficial_plataforma() < target_virada_epoch - 0.1:
+        print(f"\n[SINAL CONFIRMADO - {tipo_operacao}] {direcao} em {ativo} | Aguardando {seg_espera:.1f}s até a janela de taxa (24s-29s da vela M1)...", flush=True)
+
+        while obter_tempo_oficial_plataforma() < target_janela_epoch - 0.1:
             if not state.ai_enabled and "Manual" not in motivo_str:
                 state.is_trading = False
                 state.active_signal = None
                 return
             await asyncio.sleep(0.1)
             t_now = obter_tempo_oficial_plataforma()
-            rest = max(0, int(round(target_virada_epoch - t_now)))
+            rest = max(0, int(round(target_janela_epoch - t_now)))
             if state.active_signal:
                 state.active_signal["seconds_left"] = rest
                 state.active_signal["clock_str"] = f"00:{rest:02d}"
-    else:
-        state.active_signal = {
-            "asset": ativo,
-            "direction": direcao,
-            "confluence": conf,
-            "expiration": "M1 (1 Minuto)",
-            "target": "Disparo Imediato (0s Lag)",
-            "seconds_left": 0,
-            "target_epoch": agora_ts,
-            "action_hint": f"[{tipo_operacao}] Todos os indicadores e IA confirmados! Disparando imediatamente.",
-            "status": f"EXECUTANDO DISPARO IMEDIATO ({tipo_operacao})",
-            "time": agora.strftime("%H:%M:%S"),
-            "gale_step": state.current_gale_step,
-            "stake": valor,
-            "clock_str": "00:00"
-        }
 
-    # Disparo IMEDIATO (ZERO ATRASO): sincronizado 1:1 com o relógio oficial da BullEx!
+    # Estamos na janela de 24s a 29.2s!
+    # Obter preço de abertura para calcular a melhor taxa de retração:
+    preco_abertura = 0.0
+    if state.api and state.is_connected:
+        try:
+            c_now = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(obter_tempo_oficial_plataforma()))
+            if c_now and len(c_now) > 0:
+                preco_abertura = float(c_now[-1].get("open") or c_now[-1].get("close") or 0.0)
+        except Exception:
+            preco_abertura = 0.0
+
+    # Busca a melhor taxa até 29.0s da vela:
+    # Se COMPRA: espera retrair um pouco para baixo da abertura para comprar no fundo
+    # Se VENDA: espera esticar um pouco para cima da abertura para vender no topo
+    print(f" -> [JANELA 30s ATIVA] {ativo}: buscando melhor taxa de {direcao} (Abertura: {preco_abertura})...", flush=True)
+    while True:
+        t_atual = obter_tempo_oficial_plataforma()
+        seg_janela = t_atual % 60
+        if seg_janela >= 28.8 or (seg_janela < 24.0 and seg_janela > 1.0):
+            break
+
+        taxa_atual = preco_abertura
+        if state.api and state.is_connected and preco_abertura > 0:
+            try:
+                c_tick = await asyncio.to_thread(state.api.get_candles, ativo, 60, 1, int(t_atual))
+                if c_tick and len(c_tick) > 0:
+                    taxa_atual = float(c_tick[-1].get("close") or taxa_atual)
+            except Exception:
+                pass
+
+        if direcao.upper() == "CALL" and preco_abertura > 0:
+            if taxa_atual <= preco_abertura:
+                print(f" -> [RETRAÇÃO CALL] Taxa favorável no fundo: {taxa_atual} <= {preco_abertura} aos {seg_janela:.1f}s!", flush=True)
+                break
+        elif direcao.upper() == "PUT" and preco_abertura > 0:
+            if taxa_atual >= preco_abertura:
+                print(f" -> [ESTICADA PUT] Taxa favorável no topo: {taxa_atual} >= {preco_abertura} aos {seg_janela:.1f}s!", flush=True)
+                break
+
+        await asyncio.sleep(0.08)
+
+    # Disparo Oficial na Corretora antes dos 30s para expirar no fim da vela atual!
     t_exec = obter_tempo_oficial_plataforma()
+    seg_disparo = t_exec % 60
     agora_exec_str = datetime.fromtimestamp(t_exec).strftime("%H:%M:%S")
+
+    print(f"\n[DISPARO AOS {seg_disparo:.1f}s ({tipo_operacao})] Enviando {direcao} em {ativo} com mão de ${valor:.2f}...", flush=True)
+
     if state.active_signal:
         exp_epoch = calcular_expiracao_m1_epoch(t_exec, 1)
         rem_exp = max(1, int(round(exp_epoch - t_exec)))
@@ -1466,7 +1504,7 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
         state.active_signal["seconds_left"] = rem_exp
         state.active_signal["target_epoch"] = exp_epoch
         state.active_signal["clock_str"] = clock_exp_str
-        state.active_signal["action_hint"] = f"[{tipo_operacao}] Ordem executada na abertura da vela M1! Monitorando fechamento."
+        state.active_signal["action_hint"] = f"[{tipo_operacao}] Ordem executada aos {seg_disparo:.1f}s na taxa de retração! Monitorando fechamento."
 
     executou = False
     venceu = False
