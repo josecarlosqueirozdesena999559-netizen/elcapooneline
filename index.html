@@ -580,6 +580,141 @@
     }
 
     /* =========================================================================
+       TELA DE ENTRADA COM CONTAGEM REGRESSIVA (PREPARAÇÃO E PULLBACK NA VIRADA)
+       ========================================================================= */
+    .entry-prep-container {
+      width: 100%;
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .ep-header-bar {
+      height: 44px;
+      background: #141a27;
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .ep-header-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .ep-badge-call {
+      background: rgba(0, 194, 111, 0.12);
+      border: 1px solid rgba(0, 194, 111, 0.3);
+      color: var(--bullex-green);
+      font-size: 11.5px;
+      padding: 3px 10px;
+      border-radius: 4px;
+      font-weight: 500;
+      letter-spacing: 0.5px;
+    }
+    .ep-badge-put {
+      background: rgba(255, 59, 105, 0.12);
+      border: 1px solid rgba(255, 59, 105, 0.3);
+      color: var(--bullex-red);
+      font-size: 11.5px;
+      padding: 3px 10px;
+      border-radius: 4px;
+      font-weight: 500;
+      letter-spacing: 0.5px;
+    }
+    .ep-asset-title {
+      font-size: 13.5px;
+      color: #fff;
+      font-weight: 500;
+    }
+    .ep-status-pill {
+      font-size: 11px;
+      color: #848e9c;
+      background: #111622;
+      padding: 3px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--border-subtle);
+    }
+    .ep-body {
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 20px;
+      background: #0d111a;
+    }
+    .ep-countdown-wrapper {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    .ep-countdown-title {
+      font-size: 11px;
+      color: #848e9c;
+      letter-spacing: 1px;
+    }
+    .ep-countdown-digits {
+      font-size: 40px;
+      font-weight: 500;
+      font-family: monospace;
+      color: #a855f7;
+      letter-spacing: 2px;
+    }
+    .ep-cards-grid {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+    }
+    @media (max-width: 768px) {
+      .ep-cards-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+    .ep-card-item {
+      background: #131722;
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .ep-card-label {
+      font-size: 10.5px;
+      color: #848e9c;
+    }
+    .ep-card-value {
+      font-size: 13.5px;
+      font-weight: 500;
+      color: #fff;
+    }
+    .ep-status-strip {
+      width: 100%;
+      background: #111622;
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+      color: #cbd5e1;
+    }
+    .ep-pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #a855f7;
+      box-shadow: 0 0 8px #a855f7;
+      flex-shrink: 0;
+    }
+
+    /* =========================================================================
        TELA DA OPERAÇÃO EM ANDAMENTO (1:1 COM A BULLEX - FICA SÓ ISSO AO PEGAR OPERAÇÃO)
        ========================================================================= */
     .active-trade-container {
@@ -1659,6 +1794,52 @@
         </section>
       </div>
 
+      <!-- VISÃO 1.5: TELA DE ENTRADA COM CONTAGEM REGRESSIVA (PREPARAÇÃO E PULLBACK NA VIRADA) -->
+      <div id="viewEntryPrep" class="entry-prep-container" style="display: none;">
+        <!-- Header da Preparação -->
+        <div class="ep-header-bar">
+          <div class="ep-header-left">
+            <span class="ep-badge-call" id="epSignalBadge">CALL (COMPRA)</span>
+            <span class="ep-asset-title" id="epAssetName">EUR/USD (OTC)</span>
+          </div>
+          <div class="ep-header-right">
+            <span class="ep-status-pill" id="epStatusPill">AGUARDANDO VIRADA DE VELA</span>
+          </div>
+        </div>
+
+        <!-- Corpo Principal com Grande Cronômetro e Detalhes da Entrada -->
+        <div class="ep-body">
+          <div class="ep-countdown-wrapper">
+            <span class="ep-countdown-title">CONTAGEM REGRESSIVA PARA ENTRADA</span>
+            <div class="ep-countdown-digits" id="epCountdownDigits">00:08</div>
+          </div>
+
+          <div class="ep-cards-grid">
+            <div class="ep-card-item">
+              <span class="ep-card-label">Direção da Operação</span>
+              <div class="ep-card-value" id="epDirVal" style="color: var(--bullex-green);">▲ CALL (COMPRA)</div>
+            </div>
+            <div class="ep-card-item">
+              <span class="ep-card-label">Investimento</span>
+              <div class="ep-card-value" id="epStakeVal">$5.00</div>
+            </div>
+            <div class="ep-card-item">
+              <span class="ep-card-label">Preço Atual da Vela</span>
+              <div class="ep-card-value" id="epPriceVal">--</div>
+            </div>
+            <div class="ep-card-item">
+              <span class="ep-card-label">Confluência Técnica</span>
+              <div class="ep-card-value" id="epConfVal" style="color: #a855f7;">92%</div>
+            </div>
+          </div>
+
+          <div class="ep-status-strip">
+            <div class="ep-pulse-dot"></div>
+            <span id="epStatusMessage">Aguardando virada da vela (00s) para buscar retração da taxa na BullEx...</span>
+          </div>
+        </div>
+      </div>
+
       <!-- VISÃO 2: TELA DA OPERAÇÃO EM ANDAMENTO (1:1 COM A BULLEX - FICA SÓ ISSO AO PEGAR OPERAÇÃO) -->
       <div id="viewActiveTrade" class="active-trade-container" style="display: none;">
         <!-- Header da Posição Aberta -->
@@ -2094,7 +2275,8 @@
       }
       if (!warmupDone) {
         const wp = warmupProgress || {};
-        return observationBackend || `Carregando histórico dos 60 candles de todos os ativos OTC (${wp.loaded || 0}/${wp.total || 14} — ${wp.percent || 0}%)...`;
+        const pct = wp.percent || 0;
+        return `Carregando histórico dos 60 candles de todos os ativos OTC (${wp.loaded || 0}/${wp.total || 74} — ${pct}%)...`;
       }
       if (!dt || !dt.ultimo_preco || dt.ultimo_preco <= 0) {
         return `Carregamento concluído. Iniciando auditoria dos 60 candles de ${ativo || 'EURUSD-OTC'} na BullEx...`;
@@ -2141,9 +2323,9 @@
 
       // Parecer do Gemini AI vindo do backend
       let pObs = "";
-      if (observationBackend && !observationBackend.includes('Carregando histórico') && !observationBackend.includes('Iniciando carregamento') && !observationBackend.includes('Inteligência Artificial desligada')) {
+      if (observationBackend && !/histórico|candles|carreg|iniciando|desligada/i.test(observationBackend)) {
         let cleanObs = observationBackend.replace(/\[(ANALISE INSTITUCIONAL|Gemini AI) \d{2}:\d{2}:\d{2}\]/g, '').trim();
-        if (cleanObs) {
+        if (cleanObs && !cleanObs.startsWith('ATIVO:') && !/histórico|candles/i.test(cleanObs)) {
           pObs = `\nParecer Gemini AI: ${cleanObs}`;
         }
       }
@@ -2174,16 +2356,23 @@
       const viewTraderRoom = document.getElementById('viewTraderRoom');
       const viewAnalysis = document.getElementById('viewAnalysis');
       const viewActiveTrade = document.getElementById('viewActiveTrade');
+      const viewEntryPrep = document.getElementById('viewEntryPrep');
 
       if (isAnalysis) {
         document.body.classList.remove('tab-traderoom-active');
         if (viewTraderRoom) viewTraderRoom.style.display = 'none';
         if (window._isTradingActive) {
           if (viewActiveTrade) viewActiveTrade.style.display = 'flex';
+          if (viewEntryPrep) viewEntryPrep.style.display = 'none';
+          if (viewAnalysis) viewAnalysis.style.display = 'none';
+        } else if (window._isEntryPrepActive) {
+          if (viewEntryPrep) viewEntryPrep.style.display = 'flex';
+          if (viewActiveTrade) viewActiveTrade.style.display = 'none';
           if (viewAnalysis) viewAnalysis.style.display = 'none';
         } else {
           if (viewAnalysis) viewAnalysis.style.display = 'flex';
           if (viewActiveTrade) viewActiveTrade.style.display = 'none';
+          if (viewEntryPrep) viewEntryPrep.style.display = 'none';
         }
         document.querySelectorAll('.btn-tab-analysis').forEach(el => el.classList.add('active'));
         document.querySelectorAll('.btn-tab-traderoom').forEach(el => el.classList.remove('active'));
@@ -2192,6 +2381,7 @@
         if (viewTraderRoom) viewTraderRoom.style.display = 'flex';
         if (viewAnalysis) viewAnalysis.style.display = 'none';
         if (viewActiveTrade) viewActiveTrade.style.display = 'none';
+        if (viewEntryPrep) viewEntryPrep.style.display = 'none';
 
         document.querySelectorAll('.btn-tab-analysis').forEach(el => el.classList.remove('active'));
         document.querySelectorAll('.btn-tab-traderoom').forEach(el => el.classList.add('active'));
@@ -2716,7 +2906,7 @@
         const finalConf = sig?.confluence || med.confluencia_total;
         const clockStr = d.candle_clock || '00:00';
         const seg = dt.segundo_da_vela ?? (60 - parseInt(clockStr.replace('00:', '')));
-        const priceVal = (dt && dt.ultimo_preco && Number(dt.ultimo_preco) > 0) ? Number(dt.ultimo_preco) : (appState.lastPrice || 0);
+        const priceVal = (d.ultimo_preco && Number(d.ultimo_preco) > 0) ? Number(d.ultimo_preco) : ((dt && dt.ultimo_preco && Number(dt.ultimo_preco) > 0) ? Number(dt.ultimo_preco) : (appState.lastPrice || 0));
 
         const assetBar = document.getElementById('activeAssetBar');
         const warmupBar = document.getElementById('warmupLoadingBar');
@@ -2740,7 +2930,7 @@
           const pct = wp.percent || 0;
           document.getElementById('wlbProgressBar').style.width = `${pct}%`;
           document.getElementById('wlbPct').textContent = `${pct}%`;
-          document.getElementById('wlbAssetDetail').textContent = d.observation || `Carregando histórico dos 60 candles: ${wp.asset || 'ativos OTC'} (${wp.loaded || 0}/${wp.total || 14} — ${pct}%)...`;
+          document.getElementById('wlbAssetDetail').textContent = `Carregando histórico dos 60 candles: ${wp.asset || 'ativos OTC'} (${wp.loaded || 0}/${wp.total || 74} — ${pct}%)...`;
         } else {
           // CARREGAMENTO CONCLUÍDO: SÓ APARECE A BARRA QUANDO JÁ TIVER O ATIVO QUE VAI ANALISAR!
           if (warmupBar) warmupBar.style.display = 'none';
@@ -2764,7 +2954,7 @@
             const decFinal = sig?.direction || med.direcao_sugerida;
             if (isTrading && sig && !sig.order_id) {
               trigBadge.className = 'trigger-badge-status ' + (sig.direction || '').toLowerCase();
-              trigBadge.textContent = `${sig.direction || 'SINAL'} CONFIRMADO • BUSCANDO TAXA AOS 30s (${sig.seconds_left || 0}s)`;
+              trigBadge.textContent = `${sig.direction || 'SINAL'} CONFIRMADO • BUSCANDO TAXA NA VIRADA (${sig.seconds_left || 0}s)`;
             } else if (decFinal === 'CALL' && finalConf >= 78) {
               trigBadge.className = 'trigger-badge-status call';
               trigBadge.textContent = `CALL (COMPRA) • 00s (${Math.max(0, 60 - seg)}s)`;
@@ -2778,27 +2968,90 @@
           }
         }
 
-        // ALTERNÂNCIA: TELA DE OPERAÇÃO ATIVA VS TELA DE ANÁLISE VS TRADER ROOM
+        // ALTERNÂNCIA: TELA DE OPERAÇÃO ATIVA VS TELA DE ENTRADA (PREPARAÇÃO) VS TELA DE ANÁLISE VS TRADER ROOM
         const viewAnalysis = document.getElementById('viewAnalysis');
         const viewActiveTrade = document.getElementById('viewActiveTrade');
+        const viewEntryPrep = document.getElementById('viewEntryPrep');
         const viewTraderRoom = document.getElementById('viewTraderRoom');
         const isTrading = !!d.is_trading;
         const hasBrokerOrder = !!(sig && sig.order_id);
+        const isEntryPrep = !!(isTrading && sig && !hasBrokerOrder);
         window._isTradingActive = !!(isTrading && sig && hasBrokerOrder);
+        window._isEntryPrepActive = isEntryPrep;
 
         if (currentMainTab === 'traderoom') {
           if (viewTraderRoom) viewTraderRoom.style.display = 'flex';
           if (viewAnalysis) viewAnalysis.style.display = 'none';
           if (viewActiveTrade) viewActiveTrade.style.display = 'none';
+          if (viewEntryPrep) viewEntryPrep.style.display = 'none';
         } else {
           // currentMainTab === 'analysis'
           if (viewTraderRoom) viewTraderRoom.style.display = 'none';
           if (window._isTradingActive) {
+            // OPERAÇÃO CONFIRMADA NA BULLEX (COM ORDER ID E EXPIRAÇÃO)
             if (viewAnalysis) viewAnalysis.style.display = 'none';
+            if (viewEntryPrep) viewEntryPrep.style.display = 'none';
             if (viewActiveTrade) viewActiveTrade.style.display = 'flex';
-          } else {
+          } else if (isEntryPrep) {
+            // TELA DE ENTRADA COM CONTAGEM REGRESSIVA (PREPARANDO NA VIRADA / BUSCANDO TAXA)
+            if (viewAnalysis) viewAnalysis.style.display = 'none';
             if (viewActiveTrade) viewActiveTrade.style.display = 'none';
+            if (viewEntryPrep) viewEntryPrep.style.display = 'flex';
+          } else {
+            // ANÁLISE NORMAL
+            if (viewActiveTrade) viewActiveTrade.style.display = 'none';
+            if (viewEntryPrep) viewEntryPrep.style.display = 'none';
             if (viewAnalysis) viewAnalysis.style.display = 'flex';
+          }
+        }
+
+        if (isEntryPrep && sig) {
+          const ativoPrep = sig.asset || activeAsset;
+          const isCall = (sig.direction || '').toUpperCase() === 'CALL';
+          const epBadge = document.getElementById('epSignalBadge');
+          if (epBadge) {
+            epBadge.className = isCall ? 'ep-badge-call' : 'ep-badge-put';
+            epBadge.textContent = isCall ? 'CALL (COMPRA)' : 'PUT (VENDA)';
+          }
+          const epAsset = document.getElementById('epAssetName');
+          if (epAsset) epAsset.textContent = (ativoPrep || 'EURUSD-OTC').replace('-OTC', ' (OTC)');
+
+          // Contagem Regressiva para Virada / Entrada
+          let epClock = sig.clock_str;
+          if (!epClock && sig.seconds_left !== undefined) {
+            const m = Math.floor(Math.max(0, sig.seconds_left) / 60);
+            const s = Math.max(0, sig.seconds_left) % 60;
+            epClock = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+          }
+          const epDigits = document.getElementById('epCountdownDigits');
+          if (epDigits) epDigits.textContent = epClock || '00:00';
+
+          const epDir = document.getElementById('epDirVal');
+          if (epDir) {
+            epDir.style.color = isCall ? 'var(--bullex-green)' : 'var(--bullex-red)';
+            epDir.textContent = isCall ? '▲ CALL (COMPRA)' : '▼ PUT (VENDA)';
+          }
+          const epStake = document.getElementById('epStakeVal');
+          if (epStake) {
+            const sVal = sig.stake || appState.stake || 5.0;
+            epStake.textContent = `$${Number(sVal).toFixed(2)}`;
+          }
+          const epPrice = document.getElementById('epPriceVal');
+          if (epPrice) {
+            epPrice.textContent = priceVal > 0 ? priceVal.toFixed(5) : '--';
+          }
+          const epConf = document.getElementById('epConfVal');
+          if (epConf) {
+            epConf.textContent = `${sig.confluence || finalConf || 85}%`;
+          }
+          const epMsg = document.getElementById('epStatusMessage');
+          if (epMsg) {
+            epMsg.textContent = sig.status || sig.action_hint || 'Aguardando virada da vela (00s) para buscar retração da taxa na BullEx...';
+          }
+          const epPill = document.getElementById('epStatusPill');
+          if (epPill) {
+            const secLeft = sig.seconds_left !== undefined ? sig.seconds_left : 0;
+            epPill.textContent = secLeft > 0 ? `DISPARO EM ${secLeft}s` : 'VIRADA DE VELA • BUSCANDO TAXA';
           }
         }
 

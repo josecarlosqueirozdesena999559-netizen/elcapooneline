@@ -266,6 +266,7 @@ class BotMemoryState:
         self.resultado_bruto = 0.0
         self.operacoes = 0
         self.assertividade = 0.0
+        self.current_price: float = 0.0
         
         self.current_observation = "Inteligência Artificial desligada. Clique no botão 'Ligar IA' para aquecer os ativos com os últimos 60 candles e iniciar as operações."
         self.history_trades: List[Dict[str, Any]] = []
@@ -1247,8 +1248,18 @@ def assinar_ticks_ativo(ativo: str):
         from bullexapi.constants import ACTIVES
         if ativo in ACTIVES:
             act_id = ACTIVES[ativo]
-            state.api.api.subscribe(act_id, 60)
-            state.api.api.subscribe(act_id, 1)
+            try:
+                state.api.api.subscribe(act_id, 1)
+            except Exception:
+                pass
+            try:
+                state.api.api.subscribe(act_id, 60)
+            except Exception:
+                pass
+            try:
+                state.api.api.subscribe_all_size(act_id)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -1365,6 +1376,7 @@ def executar_ordem_sync(api: Bullex, valor: float, ativo: str, direcao: str, exp
                     state.active_signal["current_rate"] = taxa_atual
                     # Modelo BullEx Oficial de Operações Abertas
                     state.active_signal["order_id"] = order_id
+                    state.active_signal["is_entry_prep"] = False
                     state.active_signal["order_type"] = "Binária"
                     state.active_signal["clock_str"] = clock_str
                     state.active_signal["stake_val"] = valor
@@ -1475,7 +1487,9 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             "time": agora.strftime("%H:%M:%S"),
             "gale_step": state.current_gale_step,
             "stake": valor,
-            "clock_str": f"00:{int(round(seg_espera)):02d}"
+            "clock_str": f"00:{int(round(seg_espera)):02d}",
+            "is_entry_prep": True,
+            "order_id": None
         }
         print(f"\n[SINAL CONFIRMADO - {tipo_operacao}] {direcao} em {ativo} | Aguardando {seg_espera:.1f}s até a virada da vela M1...", flush=True)
 
@@ -1490,6 +1504,11 @@ async def disparar_trade_autonomo(direcao: str, valor: float, motivo_str: str, a
             if state.active_signal:
                 state.active_signal["seconds_left"] = rest
                 state.active_signal["clock_str"] = f"00:{rest:02d}"
+                state.active_signal["is_entry_prep"] = True
+                cur_ticks = getattr(state.api.api, "real_time_ticks", {}) if (state.api and state.is_connected) else {}
+                if ativo in cur_ticks:
+                    state.active_signal["current_rate"] = cur_ticks[ativo]
+                    state.current_price = cur_ticks[ativo]
 
     # VIROU O CANDLE!
     # Garante assinatura de ticks em tempo real na corretora BullEx
@@ -1886,7 +1905,7 @@ async def aquecer_60_candles_todos_ativos_e_iniciar():
 
     state.warmup_done = True
     state.warmup_progress = {"active": False, "loaded": len(state.candles_cache), "total": total, "asset": "", "percent": 100}
-    state.current_observation = f"Histórico de 60 candles carregado com sucesso para todos os {len(state.candles_cache)}/{total} ativos OTC. Iniciando auditoria e operações..."
+    state.current_observation = ""
     print(f"\n[CARGA CONCLUÍDA] 60 candles de todos os {len(state.candles_cache)}/{total} ativos carregados! Iniciando análises e operações...\n", flush=True)
 
     # AÍ SIM INICIA A ANÁLISE E AS OPERAÇÕES:
@@ -2186,7 +2205,7 @@ async def loop_trader_background():
                 except Exception:
                     pass
 
-            # Transição imediata: se não está em trade e a observação tem mensagem de pós-operação (WIN/LOSS/SUSPENSO),
+            # Transição imediata: se não está em trade e a observação tem mensagem de pós-operação (WIN/LOSS/SUSPENSO) ou término do warmup,
             # vai direto para a análise técnica viva do ativo atual sem ficar parado na mensagem antiga
             if state.ai_enabled and not state.is_trading:
                 obs = state.current_observation or ""
@@ -2195,7 +2214,9 @@ async def loop_trader_background():
                 tend = d.get("tendencia_emas", "LATERAL")
                 padrao = d.get("padrao_detectado", "Fluxo Institucional")
                 ativo_show = state.active_asset or "EURUSD-OTC"
-                if any(tag in obs for tag in ["[VITORIA", "[RESULTADO", "[ATIVO SUSPENSO", "[EMPATE", "[AVISO BULLEX"]):
+                if state.warmup_done and (not obs or any(k in obs for k in ["Carregando histórico", "Histórico de 60 candles", "XRPUSD-OTC"])):
+                    state.current_observation = f"[ANALISE INSTITUCIONAL {agora_hms}] ATIVO: {ativo_show} | VELA: {seg_v}s/60s | PADRAO: {padrao} | RSI 14: {rsi_val} | TENDENCIA: {tend}"
+                elif any(tag in obs for tag in ["[VITORIA", "[RESULTADO", "[ATIVO SUSPENSO", "[EMPATE", "[AVISO BULLEX"]):
                     state.current_observation = f"[ANALISE INSTITUCIONAL {agora_hms}] ATIVO: {ativo_show} | VELA: {seg_v}s/60s | PADRAO: {padrao} | RSI 14: {rsi_val} | TENDENCIA: {tend}"
                 elif "[ANALISE" in obs or "[Gemini" in obs:
                     state.current_observation = f"[ANALISE INSTITUCIONAL {agora_hms}] ATIVO: {ativo_show} | VELA: {seg_v}s/60s | PADRAO: {padrao} | RSI 14: {rsi_val} | TENDENCIA: {tend}"
@@ -2273,10 +2294,10 @@ async def auto_conectar_bullex():
 
 @app.on_event("startup")
 async def startup_event():
-    # Inicia desconectado para exibir sempre a Tela de Login inicial
-    state.is_connected = False
     asyncio.create_task(loop_candle_tempo_real())
     asyncio.create_task(loop_trader_background())
+    if state.email and state.password:
+        asyncio.create_task(auto_conectar_bullex())
 
 # ==========================================
 # ENDPOINTS REST
@@ -2473,26 +2494,39 @@ async def api_status():
 
     # Ticks em tempo real da WebSocket (sem pular, 0ms lag)
     ativo_now = state.active_asset or "EURUSD-OTC"
+    cur_p = state.current_price
     if state.api and state.is_connected:
         cur_ticks = getattr(state.api.api, "real_time_ticks", {})
         if ativo_now in cur_ticks and cur_ticks[ativo_now] > 0:
-            if state.last_candle_data:
-                state.last_candle_data["ultimo_preco"] = cur_ticks[ativo_now]
+            cur_p = cur_ticks[ativo_now]
+            state.current_price = cur_p
+    if not cur_p and state.last_candle_data:
+        cur_p = float(state.last_candle_data.get("ultimo_preco") or 0.0)
+    if not cur_p and state.candles_cache and ativo_now in state.candles_cache:
+        c_list = state.candles_cache[ativo_now]
+        if c_list:
+            cur_p = float(c_list[-1].get("close") or c_list[-1].get("open") or 0.0)
+            state.current_price = cur_p
+
+    if cur_p and cur_p > 0 and state.last_candle_data:
+        state.last_candle_data["ultimo_preco"] = cur_p
     t_c = time.time()
 
     if (not state.last_candle_data or state.last_candle_data.get("ultimo_preco") == 0) and state.candles_cache:
         c_list = state.candles_cache.get(ativo_now, [])
         if len(c_list) >= 20:
             state.last_candle_data = calcular_indicadores_60(c_list)
+            if cur_p and cur_p > 0:
+                state.last_candle_data["ultimo_preco"] = cur_p
     t_d = time.time()
 
     if state.is_trading and state.active_signal:
-        cur_p = state.last_candle_data.get("ultimo_preco") if state.last_candle_data else None
-        if cur_p and cur_p > 0:
-            state.active_signal["current_rate"] = cur_p
-            ent_p = state.active_signal.get("entry_rate") or cur_p
+        cur_p_sig = cur_p or (state.last_candle_data.get("ultimo_preco") if state.last_candle_data else None)
+        if cur_p_sig and cur_p_sig > 0:
+            state.active_signal["current_rate"] = cur_p_sig
+            ent_p = state.active_signal.get("entry_rate") or cur_p_sig
             direc = (state.active_signal.get("direction") or "CALL").upper()
-            is_win = (cur_p >= ent_p) if direc == "CALL" else (cur_p <= ent_p)
+            is_win = (cur_p_sig >= ent_p) if direc == "CALL" else (cur_p_sig <= ent_p)
             state.active_signal["live_status"] = "WINNING" if is_win else "LOSING"
             stk = float(state.active_signal.get("stake_val") or state.entry_stake or 5.0)
             pct = float(state.active_signal.get("payout_pct") or 0.84)
@@ -2528,6 +2562,7 @@ async def api_status():
         "active_asset": state.active_asset,
         "active_signal": state.active_signal,
         "observation": state.current_observation,
+        "ultimo_preco": cur_p or (state.last_candle_data.get("ultimo_preco") if state.last_candle_data else 0.0),
         "candle_clock": state.candle_clock,
         "server_timestamp": int(obter_tempo_oficial_plataforma()),
         "last_candle_data": state.last_candle_data,
